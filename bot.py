@@ -7,6 +7,7 @@ load_dotenv()
 
 intents = discord.Intents.default()
 intents.voice_states = True
+intents.guilds = True  # explicit for clarity
 
 
 class QNAPBot(commands.Bot):
@@ -16,6 +17,7 @@ class QNAPBot(commands.Bot):
             intents=intents,
             help_command=None
         )
+        self.synced = False
 
     async def setup_hook(self):
         """Load all cogs automatically on startup."""
@@ -37,7 +39,15 @@ class QNAPBot(commands.Bot):
     async def on_ready(self):
         print(f"🤖 Logged in as {self.user} (ID: {self.user.id})")
         print(f"Connected to {len(self.guilds)} guilds.")
-        # TODO for future slash commands: await self.tree.sync()
+
+        # Sync slash commands (safe to run on every startup for small bots)
+        if not self.synced:
+            try:
+                synced = await self.tree.sync()
+                print(f"🔄 Synced {len(synced)} slash command(s)")
+                self.synced = True
+            except Exception as e:
+                print(f"Failed to sync slash commands: {e}")
 
 
 bot = QNAPBot()

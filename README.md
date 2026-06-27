@@ -2,18 +2,17 @@
 
 A Discord bot designed to run on **QNAP NAS** using Docker / Container Station.
 
-**Main purpose**: Keep a voice channel alive 24/7 (prevents the VC from becoming inactive).
+**Main purpose**: Keep a voice channel alive 24/7 + expandable features like the Birthday system.
 
-Built with a clean, **cog-based architecture** so you can easily expand it later (e.g. add a full Birthday system with slash commands).
+Built with a clean, **cog-based architecture** so you can easily add more features.
 
 ## Features
 
-- Stays connected to a target voice channel indefinitely
-- Automatic reconnection if the bot gets disconnected
-- Restart-safe (Docker `unless-stopped` policy)
-- Expandable cog system (new features = new file in `cogs/`)
-- Full Docker + docker-compose setup optimized for QNAP
-- Environment variable based configuration (no secrets in code)
+- Voice channel 24/7 stayer (auto-reconnect)
+- **Birthday system** with slash commands (`/birthday`)
+- JSON storage + daily announcements
+- Docker-ready for QNAP Container Station
+- Easy to expand with more cogs
 
 ## Project Structure
 
@@ -25,125 +24,76 @@ discord-qnap-bot/
 ├── docker-compose.yml
 ├── .env.example
 ├── cogs/
-│   └── voice_stayer.py
+│   ├── voice_stayer.py
+│   └── birthdays.py
 └── README.md
 ```
 
-## Quick Start
+## Quick Start (same as before)
 
-### 1. Clone & prepare
+See the previous setup instructions for cloning, `.env`, inviting the bot, and running on QNAP.
 
-```bash
-git clone https://github.com/SonIcX154/discord-qnap-bot.git
-cd discord-qnap-bot
-cp .env.example .env
+**Important for Birthday data persistence**:
+Add this volume to your `docker-compose.yml` (or Container Station) so birthdays survive container updates:
+
+```yaml
+volumes:
+  - ./data:/app/data
 ```
 
-### 2. Configure `.env`
+After adding the volume, create the `data/` folder on the host if needed.
 
-Edit the `.env` file:
+## Birthday System (`/birthday` commands)
 
-```env
-DISCORD_TOKEN=your_bot_token_here
-VOICE_CHANNEL_ID=1234567890123456789
-```
+All commands are **slash commands** (type `/birthday` in Discord).
 
-**How to get the Voice Channel ID**:
-1. Enable **Developer Mode** in Discord (`Settings` → `Advanced` → `Developer Mode`)
-2. Right-click the voice channel → **Copy Channel ID**
+### User Commands
+- **/birthday set** `<date>` `[year]`
+  Set your own birthday. Supported date formats:
+  - `25-12`, `12/25`, `25/12`
+  - `2025-12-25`, `25-12-2025`
+  - `December 25`, `25 December`, `Dec 25`
 
-### 3. Invite the bot
+- **/birthday remove** `[user]`
+  Remove your own birthday (or someone else's if you have Manage Server permission).
 
-1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
-2. Select your application → **OAuth2** → **URL Generator**
-3. Scopes: `bot` + `applications.commands`
-4. Bot Permissions (minimum):
-   - `View Channels`
-   - `Connect` (Voice)
-   - `Speak` (if you plan to add audio later)
-5. Copy the generated URL and invite the bot to your server
+- **/birthday list**
+  Shows upcoming birthdays in the server (next ~30 days), sorted by soonest.
 
-### 4. Run on QNAP NAS (Container Station)
+- **/birthday today**
+  Shows who has a birthday *today*.
 
-#### Recommended: Using docker-compose
+### Admin Commands (Manage Server permission required)
+- **/birthday setfor** `<user>` `<date>` `[year]`
+  Set birthday for any member.
 
-1. Copy/upload the entire folder to your QNAP (e.g. `/share/Container/discord-qnap-bot/`)
-2. SSH into the NAS or open **Container Station**
-3. Create the `.env` file on the NAS with your real values
-4. Run:
-   ```bash
-   cd /share/Container/discord-qnap-bot
-   docker-compose up -d --build
-   ```
+- **/birthday channel** `<#channel>`
+  Set the text channel where daily "Happy Birthday" messages will be automatically posted.
 
-#### Alternative: Container Station GUI
+### How Daily Announcements Work
+- The bot checks once per day and posts in the configured channel (if set).
+- Format: "🎉 Happy Birthday today! @user1 (turns 25!)✨, @user2"
+- If no channel is set, no automatic messages are sent (you can still use `/birthday today` manually).
 
-- Use the **Compose** tab (if available) and paste the content of `docker-compose.yml`
-- Or create a new container from the `Dockerfile`
-- Set **Restart policy** to `unless-stopped`
-- Add the two environment variables (or mount `.env`)
-- Start the container
-
-Check the container logs. You should see:
-- `VoiceStayer initialized...`
-- `✅ [VoiceStayer] Connected to voice channel: ...`
-
-The bot will now stay in that voice channel 24/7.
-
-## Local Development / Testing
-
-```bash
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python bot.py
-```
-
-## How to Expand (Future Birthday System, etc.)
-
-1. Create a new file: `cogs/birthdays.py`
-2. Write a standard discord.py Cog (you can use `@app_commands.command()` for slash commands)
-3. The cog will be **automatically loaded** on next container restart
-4. For slash commands, add this in `bot.py` `on_ready` (or a admin command):
-   ```python
-   await bot.tree.sync()
-   ```
-
-Example future cog skeleton:
-```python
-from discord.ext import commands
-from discord import app_commands
-
-class BirthdayCog(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-
-    @app_commands.command(name="birthday-set")
-    async def set_birthday(self, interaction: discord.Interaction, user: discord.Member, date: str):
-        await interaction.response.send_message(f"Birthday set for {user.mention}!")
-
-async def setup(bot):
-    await bot.add_cog(BirthdayCog(bot))
-```
+**Tip**: After adding the first birthdays, use `/birthday channel #general` (or a dedicated #birthdays channel) so the bot can celebrate automatically.
 
 ## Environment Variables
 
 | Variable            | Description                              | Example                  |
 |---------------------|------------------------------------------|--------------------------|
-| `DISCORD_TOKEN`     | Discord Bot Token from Developer Portal  | `MTIz...`                |
+| `DISCORD_TOKEN`     | Discord Bot Token                        | `MTIz...`                |
 | `VOICE_CHANNEL_ID`  | Target voice channel to stay in          | `1234567890123456789`    |
+
+## Expanding Further
+
+Just drop new `.py` files in `cogs/`. They will be loaded automatically.
+
+Example future cog ideas: music, moderation, reminders, polls, etc.
 
 ## Troubleshooting
 
-- **Bot not joining VC** → Check logs, confirm `VOICE_CHANNEL_ID` is correct, and that the bot has `Connect` permission in the channel.
-- **Token error** → Make sure `.env` has no extra spaces or quotes around values.
-- **On QNAP** → Ensure the container has outbound internet access (port 443).
-- **Reconnects too often** → Normal behavior if someone kicks the bot; it will rejoin automatically.
-
-## Next Steps
-
-- Add more cogs for slash commands
-- Add persistent storage (SQLite / JSON) for birthday data
-- Add logging to a file + volume mount
+- Slash commands not appearing? The bot syncs them on startup. Try restarting the container.
+- Birthday data disappearing? Make sure you mounted the `./data` volume in Docker.
+- Date not parsing? Use one of the supported formats listed above.
 
 Happy botting! 🤖
