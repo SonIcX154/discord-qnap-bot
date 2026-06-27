@@ -256,7 +256,7 @@ class BirthdayCog(commands.Cog):
             await interaction.response.send_message("Heute hat niemand Geburtstag.")
             return
         if len(celebrants) == 1:
-            await interaction.response.send_message(f"🎉 Heute hat Geburtstag: {celebrants[0]}")
+            await interaction.response.send_message(f"🎉 Heute hat {celebrants[0]} Geburtstag")
         else:
             await interaction.response.send_message(f"🎉 Heute haben Geburtstag: {', '.join(celebrants)}")
 
