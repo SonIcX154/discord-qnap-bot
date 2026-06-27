@@ -7,7 +7,8 @@ load_dotenv()
 
 intents = discord.Intents.default()
 intents.voice_states = True
-intents.guilds = True  # explicit for clarity
+intents.guilds = True
+intents.members = True
 
 
 class QNAPBot(commands.Bot):

@@ -143,7 +143,7 @@ class BirthdayCog(commands.Cog):
         await interaction.response.send_message(f"✅ Dein Geburtstag wurde auf den {day:02d}.{month:02d}. gesetzt.")  # öffentlich
 
     @app_commands.command(name="birthday-setfor", description="Geburtstag für ein anderes Mitglied setzen (Admin)")
-    @app_commands.describe(user="Mitglied", date="Datum", year="Geburtsjahr (optional)")
+    @app_commands.describe(user="Mitglied", date="Datum (z.B. 25-12 oder 25. Dezember)", year="Geburtsjahr (optional)")
     @app_commands.default_permissions(manage_guild=True)
     async def birthday_setfor(self, interaction: discord.Interaction, user: discord.Member, date: str, year: app_commands.Range[int, 1900, 2026] = None):
         if not interaction.guild:
