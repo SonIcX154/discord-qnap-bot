@@ -289,12 +289,12 @@ class BirthdayCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         members = [m for m in interaction.guild.members if not m.bot]
-        if len(members) < 4:
+        if len(members) < 3:
             await interaction.followup.send("Nicht genug Member auf dem Server (mind. 4 benötigt).", ephemeral=True)
             return
 
         random.shuffle(members)
-        test_cases = [1, 2, 3, 4]
+        test_cases = [1, 2, 3]
 
         for count in test_cases:
             selected = members[:count]
