@@ -88,6 +88,19 @@ class BirthdayCog(commands.Cog):
             next_bd = this_year
         return (next_bd - today).days, next_bd
 
+    async def _get_member_name(self, guild: discord.Guild, user_id: int) -> str:
+        """Try to get member name, with fetch as fallback."""
+        member = guild.get_member(user_id)
+        if member:
+            return member.display_name
+        try:
+            member = await guild.fetch_member(user_id)
+            return member.display_name
+        except discord.NotFound:
+            return str(user_id)
+        except Exception:
+            return str(user_id)
+
     async def _announce_birthdays(self, check_date: date):
         for guild in self.bot.guilds:
             gid = str(guild.id)
@@ -105,17 +118,16 @@ class BirthdayCog(commands.Cog):
                     continue
                 try:
                     if b.get("month") == check_date.month and b.get("day") == check_date.day:
-                        member = guild.get_member(int(uid_str))
-                        if member:
-                            age_str = ""
-                            if b.get("year"):
-                                try:
-                                    age = check_date.year - int(b["year"])
-                                    if age > 0:
-                                        age_str = f" (turns {age}!)✨"
-                                except:
-                                    pass
-                            celebrants.append(f"{member.mention}{age_str}")
+                        name = await self._get_member_name(guild, int(uid_str))
+                        age_str = ""
+                        if b.get("year"):
+                            try:
+                                age = check_date.year - int(b["year"])
+                                if age > 0:
+                                    age_str = f" (turns {age}!)✨"
+                            except:
+                                pass
+                        celebrants.append(f"@{name}{age_str}")
                 except Exception:
                     continue
             if celebrants:
@@ -140,10 +152,10 @@ class BirthdayCog(commands.Cog):
         gdata = self._get_guild_data(interaction.guild.id)
         gdata[str(interaction.user.id)] = {"month": month, "day": day, "year": year}
         self._save_data()
-        await interaction.response.send_message(f"✅ Dein Geburtstag wurde auf den {day:02d}.{month:02d}. gesetzt.")  # öffentlich
+        await interaction.response.send_message(f"✅ Dein Geburtstag wurde auf den {day:02d}.{month:02d}. gesetzt.")
 
     @app_commands.command(name="birthday-setfor", description="Geburtstag für ein anderes Mitglied setzen (Admin)")
-    @app_commands.describe(user="Mitglied", date="Datum (z.B. 25-12 oder 25. Dezember)", year="Geburtsjahr (optional)")
+    @app_commands.describe(user="Mitglied", date="Datum", year="Geburtsjahr (optional)")
     @app_commands.default_permissions(manage_guild=True)
     async def birthday_setfor(self, interaction: discord.Interaction, user: discord.Member, date: str, year: app_commands.Range[int, 1900, 2026] = None):
         if not interaction.guild:
@@ -190,9 +202,8 @@ class BirthdayCog(commands.Cog):
             if uid_str == "config":
                 continue
             try:
+                name = await self._get_member_name(interaction.guild, int(uid_str))
                 days_until, next_date = self._get_days_until(b["month"], b["day"], today)
-                member = interaction.guild.get_member(int(uid_str))
-                name = member.display_name if member else uid_str
                 upcoming.append((days_until, f"**{name}** — {next_date.strftime('%d.%m.')}"))
             except:
                 continue
@@ -213,10 +224,20 @@ class BirthdayCog(commands.Cog):
         for uid_str, b in gdata.items():
             if uid_str == "config":
                 continue
-            if b.get("month") == today.month and b.get("day") == today.day:
-                member = interaction.guild.get_member(int(uid_str))
-                if member:
-                    celebrants.append(member.mention)
+            try:
+                name = await self._get_member_name(interaction.guild, int(uid_str))
+                if b.get("month") == today.month and b.get("day") == today.day:
+                    age_str = ""
+                    if b.get("year"):
+                        try:
+                            age = today.year - int(b["year"])
+                            if age > 0:
+                                age_str = f" (turns {age}!)✨"
+                        except:
+                            pass
+                    celebrants.append(f"@{name}{age_str}")
+            except:
+                continue
         if not celebrants:
             await interaction.response.send_message("Heute hat niemand Geburtstag.")
             return
