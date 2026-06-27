@@ -1,7 +1,7 @@
 import json
 import os
 import datetime
-from datetime import date, time, timedelta
+from datetime import date, time
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
