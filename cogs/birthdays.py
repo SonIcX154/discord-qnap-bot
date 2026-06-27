@@ -11,6 +11,7 @@ from discord import app_commands
 
 DATA_FILE = os.getenv("BIRTHDAY_DATA_PATH", "data/birthdays.json")
 ANNOUNCE_HOUR = int(os.getenv("BIRTHDAY_ANNOUNCE_HOUR", "0"))
+ANNOUNCE_MINUTE = int(os.getenv("BIRTHDAY_ANNOUNCE_MINUTE", "0"))
 
 
 class BirthdayCog(commands.Cog):
