@@ -14,7 +14,7 @@ ANNOUNCE_HOUR = int(os.getenv("BIRTHDAY_ANNOUNCE_HOUR", "0"))
 
 
 class BirthdayCog(commands.Cog):
-    """Birthday system with slash commands."""
+    """Birthday system with slash commands (German parameters)."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -148,58 +148,58 @@ class BirthdayCog(commands.Cog):
                     continue
             if celebrants:
                 if len(celebrants) == 1:
-                    msg = f"## 🎉Alles Gute zum Geburtstag, {celebrants[0]}!"
+                    msg = f"🎉 **Alles Gute zum Geburtstag, {celebrants[0]}!**"
                 elif len(celebrants) == 2:
-                    msg = f"## 🎉Alles Gute zum Geburtstag {celebrants[0]} und {celebrants[1]}!"
+                    msg = f"🎉 **Alles Gute zum Geburtstag {celebrants[0]} und {celebrants[1]}!**"
                 else:
-                    msg = f"## 🎉Alles Gute zum Geburtstag {', '.join(celebrants[:-1])} und {celebrants[-1]}!"
+                    msg = f"🎉 **Alles Gute zum Geburtstag {', '.join(celebrants[:-1])} und {celebrants[-1]}!**"
                 try:
                     await channel.send(msg)
                 except Exception:
                     pass
 
-    # ==================== FLATTENED SLASH COMMANDS ====================
+    # ==================== SLASH COMMANDS (German parameters) ====================
 
     @app_commands.command(name="birthday-set", description="Dein Geburtstag setzen")
-    @app_commands.describe(Datum="Datum (z.B. 25-12 oder 25. Dezember)", Jahr="Geburtsjahr (optional für Altersanzeige)")
-    async def birthday_set(self, interaction: discord.Interaction, date: str, year: app_commands.Range[int, 1900, 2026] = None):
+    @app_commands.describe(datum="Datum (z.B. 7 Januar oder 25-12)", jahr="Geburtsjahr (optional)")
+    async def birthday_set(self, interaction: discord.Interaction, datum: str, jahr: app_commands.Range[int, 1900, 2026] = None):
         if not interaction.guild:
             await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
             return
-        parsed = self._parse_date(date)
+        parsed = self._parse_date(datum)
         if not parsed:
             await interaction.response.send_message("Datum konnte nicht erkannt werden.", ephemeral=True)
             return
         month, day = parsed
         gdata = self._get_guild_data(interaction.guild.id)
-        gdata[str(interaction.user.id)] = {"month": month, "day": day, "year": year}
+        gdata[str(interaction.user.id)] = {"month": month, "day": day, "year": jahr}
         self._save_data()
         await interaction.response.send_message(f"✅ Dein Geburtstag wurde auf den {day:02d}.{month:02d}. gesetzt.")
 
     @app_commands.command(name="birthday-setfor", description="Geburtstag für ein anderes Mitglied setzen (Admin)")
-    @app_commands.describe(Benutzer="Mitglied", Datum="Datum (z.B. 25-12 oder 25. Dezember)", Jahr="Geburtsjahr (optional)")
+    @app_commands.describe(benutzer="Mitglied", datum="Datum", jahr="Geburtsjahr (optional)")
     @app_commands.default_permissions(manage_guild=True)
-    async def birthday_setfor(self, interaction: discord.Interaction, user: discord.Member, date: str, year: app_commands.Range[int, 1900, 2026] = None):
+    async def birthday_setfor(self, interaction: discord.Interaction, benutzer: discord.Member, datum: str, jahr: app_commands.Range[int, 1900, 2026] = None):
         if not interaction.guild:
             await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
             return
-        parsed = self._parse_date(date)
+        parsed = self._parse_date(datum)
         if not parsed:
             await interaction.response.send_message("Datum konnte nicht erkannt werden.", ephemeral=True)
             return
         month, day = parsed
         gdata = self._get_guild_data(interaction.guild.id)
-        gdata[str(user.id)] = {"month": month, "day": day, "year": year}
+        gdata[str(benutzer.id)] = {"month": month, "day": day, "year": jahr}
         self._save_data()
-        await interaction.response.send_message(f"✅ Geburtstag für {user.mention} wurde gesetzt.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Geburtstag für {benutzer.mention} wurde gesetzt.", ephemeral=True)
 
     @app_commands.command(name="birthday-remove", description="Einen Geburtstag entfernen")
-    @app_commands.describe(user="Leer lassen, um deinen eigenen zu entfernen")
-    async def birthday_remove(self, interaction: discord.Interaction, user: discord.Member = None):
+    @app_commands.describe(benutzer="Leer lassen, um deinen eigenen zu entfernen")
+    async def birthday_remove(self, interaction: discord.Interaction, benutzer: discord.Member = None):
         if not interaction.guild:
             await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
             return
-        target = user or interaction.user
+        target = benutzer or interaction.user
         gdata = self._get_guild_data(interaction.guild.id)
         uid = str(target.id)
         if uid not in gdata or uid == "config":
@@ -261,14 +261,12 @@ class BirthdayCog(commands.Cog):
             except:
                 continue
         if not celebrants:
-            await interaction.response.send_message("Heute hat niemand Geburtstag")
+            await interaction.response.send_message("Heute hat niemand Geburtstag.")
             return
         if len(celebrants) == 1:
-            await interaction.response.send_message(f"🎉 Heute hat {celebrants[0]} Geburtstag")
-        elif len(celebrants) == 2:
-            await interaction.response.send_message(f"🎉 Heute haben {celebrants[0]} und {celebrants[1]} Geburtstag")
+            await interaction.response.send_message(f"🎉 Heute hat Geburtstag: {celebrants[0]}")
         else:
-            await interaction.response.send_message(f"🎉 Heute haben {', '.join(celebrants[:-1])} und {celebrants[-1]} Geburtstag")
+            await interaction.response.send_message(f"🎉 Heute haben Geburtstag: {', '.join(celebrants)}")
 
     @app_commands.command(name="birthday-channel", description="Ankündigungskanal festlegen (Admin)")
     @app_commands.default_permissions(manage_guild=True)
