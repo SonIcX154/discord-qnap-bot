@@ -123,64 +123,64 @@ class BirthdayCog(commands.Cog):
                 except Exception:
                     pass
 
-    # ==================== FLATTENED SLASH COMMANDS ====================
+    # ==================== FLATTENED SLASH COMMANDS (German descriptions) ====================
 
-    @app_commands.command(name="birthday-set", description="Set your own birthday")
-    @app_commands.describe(date="Date (e.g. 25-12, December 25)", year="Birth year (optional)")
+    @app_commands.command(name="birthday-set", description="Dein Geburtstag setzen")
+    @app_commands.describe(date="Datum (z.B. 25-12 oder 25. Dezember)", year="Geburtsjahr (optional für Altersanzeige)")
     async def birthday_set(self, interaction: discord.Interaction, date: str, year: app_commands.Range[int, 1900, 2026] = None):
         if not interaction.guild:
-            await interaction.response.send_message("Only usable in a server.", ephemeral=True)
+            await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
             return
         parsed = self._parse_date(date)
         if not parsed:
-            await interaction.response.send_message("Could not parse date.", ephemeral=True)
+            await interaction.response.send_message("Datum konnte nicht erkannt werden.", ephemeral=True)
             return
         month, day = parsed
         gdata = self._get_guild_data(interaction.guild.id)
         gdata[str(interaction.user.id)] = {"month": month, "day": day, "year": year}
         self._save_data()
-        await interaction.response.send_message(f"✅ Birthday set to {day:02d}-{month:02d}.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Dein Geburtstag wurde auf den {day:02d}.{month:02d}. gesetzt.", ephemeral=True)
 
-    @app_commands.command(name="birthday-setfor", description="Set birthday for another member (Admin)")
-    @app_commands.describe(user="Member", date="Date", year="Year (optional)")
+    @app_commands.command(name="birthday-setfor", description="Geburtstag für ein anderes Mitglied setzen (Admin)")
+    @app_commands.describe(user="Mitglied", date="Datum", year="Geburtsjahr (optional)")
     @app_commands.default_permissions(manage_guild=True)
     async def birthday_setfor(self, interaction: discord.Interaction, user: discord.Member, date: str, year: app_commands.Range[int, 1900, 2026] = None):
         if not interaction.guild:
-            await interaction.response.send_message("Only usable in a server.", ephemeral=True)
+            await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
             return
         parsed = self._parse_date(date)
         if not parsed:
-            await interaction.response.send_message("Could not parse date.", ephemeral=True)
+            await interaction.response.send_message("Datum konnte nicht erkannt werden.", ephemeral=True)
             return
         month, day = parsed
         gdata = self._get_guild_data(interaction.guild.id)
         gdata[str(user.id)] = {"month": month, "day": day, "year": year}
         self._save_data()
-        await interaction.response.send_message(f"✅ Birthday for {user.mention} set.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Geburtstag für {user.mention} wurde gesetzt.", ephemeral=True)
 
-    @app_commands.command(name="birthday-remove", description="Remove a birthday")
-    @app_commands.describe(user="Leave empty for yourself")
+    @app_commands.command(name="birthday-remove", description="Einen Geburtstag entfernen")
+    @app_commands.describe(user="Leer lassen, um deinen eigenen zu entfernen")
     async def birthday_remove(self, interaction: discord.Interaction, user: discord.Member = None):
         if not interaction.guild:
-            await interaction.response.send_message("Only usable in a server.", ephemeral=True)
+            await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
             return
         target = user or interaction.user
         gdata = self._get_guild_data(interaction.guild.id)
         uid = str(target.id)
         if uid not in gdata or uid == "config":
-            await interaction.response.send_message("No birthday found.", ephemeral=True)
+            await interaction.response.send_message("Kein Geburtstag gefunden.", ephemeral=True)
             return
         if target.id != interaction.user.id and not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message("No permission.", ephemeral=True)
+            await interaction.response.send_message("Keine Berechtigung.", ephemeral=True)
             return
         del gdata[uid]
         self._save_data()
-        await interaction.response.send_message(f"✅ Removed birthday for {target.mention}.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Geburtstag von {target.mention} wurde entfernt.", ephemeral=True)
 
-    @app_commands.command(name="birthday-list", description="Show upcoming birthdays")
+    @app_commands.command(name="birthday-list", description="Kommende Geburtstage anzeigen")
     async def birthday_list(self, interaction: discord.Interaction):
         if not interaction.guild:
-            await interaction.response.send_message("Only usable in a server.", ephemeral=True)
+            await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
             return
         gdata = self._get_guild_data(interaction.guild.id)
         today = date.today()
@@ -192,19 +192,19 @@ class BirthdayCog(commands.Cog):
                 days_until, next_date = self._get_days_until(b["month"], b["day"], today)
                 member = interaction.guild.get_member(int(uid_str))
                 name = member.display_name if member else uid_str
-                upcoming.append((days_until, f"**{name}** — {next_date.strftime('%d %b')}"))
+                upcoming.append((days_until, f"**{name}** — {next_date.strftime('%d.%m.')}"))
             except:
                 continue
         if not upcoming:
-            await interaction.response.send_message("No birthdays set.", ephemeral=True)
+            await interaction.response.send_message("Noch keine Geburtstage eingetragen.", ephemeral=True)
             return
         upcoming.sort()
-        await interaction.response.send_message("\n".join([f"{d} days — {t}" for d, t in upcoming[:10]]), ephemeral=True)
+        await interaction.response.send_message("\n".join([f"{d} Tage — {t}" for d, t in upcoming[:10]]), ephemeral=True)
 
-    @app_commands.command(name="birthday-today", description="Who has birthday today?")
+    @app_commands.command(name="birthday-today", description="Wer hat heute Geburtstag?")
     async def birthday_today(self, interaction: discord.Interaction):
         if not interaction.guild:
-            await interaction.response.send_message("Only usable in a server.", ephemeral=True)
+            await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
             return
         gdata = self._get_guild_data(interaction.guild.id)
         today = date.today()
@@ -217,22 +217,22 @@ class BirthdayCog(commands.Cog):
                 if member:
                     celebrants.append(member.mention)
         if not celebrants:
-            await interaction.response.send_message("No birthdays today.", ephemeral=True)
+            await interaction.response.send_message("Heute hat niemand Geburtstag.", ephemeral=True)
             return
-        await interaction.response.send_message("🎉 Happy Birthday: " + ", ".join(celebrants))
+        await interaction.response.send_message("🎉 Heute haben Geburtstag: " + ", ".join(celebrants))
 
-    @app_commands.command(name="birthday-channel", description="Set announcement channel (Admin)")
+    @app_commands.command(name="birthday-channel", description="Ankündigungskanal festlegen (Admin)")
     @app_commands.default_permissions(manage_guild=True)
     async def birthday_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         if not interaction.guild:
-            await interaction.response.send_message("Only usable in a server.", ephemeral=True)
+            await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
             return
         gdata = self._get_guild_data(interaction.guild.id)
         if "config" not in gdata:
             gdata["config"] = {}
         gdata["config"]["announce_channel_id"] = channel.id
         self._save_data()
-        await interaction.response.send_message(f"✅ Announcements will be sent to {channel.mention}.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Ankündigungen werden jetzt in {channel.mention} gesendet.", ephemeral=True)
 
     # Background task
     @tasks.loop(hours=24)
@@ -247,7 +247,7 @@ class BirthdayCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def cog_load(self):
-        print("[Birthday] Cog loaded (flattened commands).")
+        print("[Birthday] Cog loaded.")
         self.daily_check.start()
 
     async def cog_unload(self):
