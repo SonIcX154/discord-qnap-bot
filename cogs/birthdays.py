@@ -10,22 +10,6 @@ from discord import app_commands
 DATA_FILE = os.getenv("BIRTHDAY_DATA_PATH", "data/birthdays.json")
 ANNOUNCE_HOUR = int(os.getenv("BIRTHDAY_ANNOUNCE_HOUR", "0"))
 
-# German month names for date parsing
-GERMAN_MONTHS = {
-    "januar": 1, "jänner": 1,
-    "februar": 2,
-    "märz": 3, "maerz": 3,
-    "april": 4,
-    "mai": 5,
-    "juni": 6,
-    "juli": 7,
-    "august": 8,
-    "september": 9,
-    "oktober": 10,
-    "november": 11,
-    "dezember": 12,
-}
-
 
 class BirthdayCog(commands.Cog):
     """Birthday system with slash commands."""
@@ -65,44 +49,44 @@ class BirthdayCog(commands.Cog):
     def _parse_date(self, date_str: str) -> tuple[int, int] | None:
         if not date_str:
             return None
-        s = date_str.strip().lower()
-
-        # Try numeric formats first
+        s = date_str.strip()
         full_formats = ["%Y-%m-%d", "%d-%m-%Y", "%m-%d-%Y", "%d/%m/%Y", "%m/%d/%Y"]
         for fmt in full_formats:
             try:
-                dt = datetime.datetime.strptime(date_str, fmt)
+                dt = datetime.datetime.strptime(s, fmt)
                 return dt.month, dt.day
             except ValueError:
                 continue
-
         md_formats = ["%d-%m", "%d/%m", "%m-%d", "%m/%d"]
         for fmt in md_formats:
             try:
-                dt = datetime.datetime.strptime(date_str, fmt)
+                dt = datetime.datetime.strptime(s, fmt)
                 return dt.month, dt.day
             except ValueError:
                 continue
-
-        # English named months
+        named = s.title()
         named_formats = ["%d %B", "%B %d", "%d %b", "%b %d"]
         for fmt in named_formats:
             try:
-                dt = datetime.datetime.strptime(date_str.title(), fmt)
+                dt = datetime.datetime.strptime(named, fmt)
                 return dt.month, dt.day
             except ValueError:
                 continue
-
-        # German month names
-        for month_name, month_num in GERMAN_MONTHS.items():
-            if month_name in s:
-                # Try to extract day number
+        # German months
+        s_lower = s.lower()
+        german_months = {
+            "januar": 1, "jänner": 1, "februar": 2, "märz": 3, "maerz": 3,
+            "april": 4, "mai": 5, "juni": 6, "juli": 7, "august": 8,
+            "september": 9, "oktober": 10, "november": 11, "dezember": 12
+        }
+        for name, num in german_months.items():
+            if name in s_lower:
                 import re
-                match = re.search(r'(\d{1,2})', s)
+                match = re.search(r"(\d{1,2})", s)
                 if match:
                     day = int(match.group(1))
                     if 1 <= day <= 31:
-                        return month_num, day
+                        return num, day
         return None
 
     def _get_days_until(self, month: int, day: int, today: date) -> tuple[int, date]:
@@ -271,7 +255,10 @@ class BirthdayCog(commands.Cog):
         if not celebrants:
             await interaction.response.send_message("Heute hat niemand Geburtstag.")
             return
-        await interaction.response.send_message("🎉 Heute haben Geburtstag: " + ", ".join(celebrants))
+        if len(celebrants) == 1:
+            await interaction.response.send_message(f"🎉 Heute hat Geburtstag: {celebrants[0]}")
+        else:
+            await interaction.response.send_message(f"🎉 Heute haben Geburtstag: {', '.join(celebrants)}")
 
     @app_commands.command(name="birthday-channel", description="Ankündigungskanal festlegen (Admin)")
     @app_commands.default_permissions(manage_guild=True)
