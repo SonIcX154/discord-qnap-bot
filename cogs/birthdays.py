@@ -146,11 +146,11 @@ class BirthdayCog(commands.Cog):
                     continue
             if celebrants:
                 if len(celebrants) == 1:
-                    msg = f"🎉 **Alles Gute zum Geburtstag, {celebrants[0]}!**"
+                    msg = f"## 🎉Alles Gute zum Geburtstag, {celebrants[0]}!"
                 elif len(celebrants) == 2:
-                    msg = f"🎉 **Alles Gute zum Geburtstag {celebrants[0]} und {celebrants[1]}!**"
+                    msg = f"## 🎉Alles Gute zum Geburtstag {celebrants[0]} und {celebrants[1]}!"
                 else:
-                    msg = f"🎉 **Alles Gute zum Geburtstag {', '.join(celebrants[:-1])} und {celebrants[-1]}!**"
+                    msg = f"## 🎉Alles Gute zum Geburtstag {', '.join(celebrants[:-1])} und {celebrants[-1]}!"
                 try:
                     await channel.send(msg)
                 except Exception:
