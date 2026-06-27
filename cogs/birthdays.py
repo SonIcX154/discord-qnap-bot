@@ -1,7 +1,7 @@
 import json
 import os
 import datetime
-from datetime import date, time
+from datetime import date, time, timedelta
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -9,6 +9,22 @@ from discord import app_commands
 
 DATA_FILE = os.getenv("BIRTHDAY_DATA_PATH", "data/birthdays.json")
 ANNOUNCE_HOUR = int(os.getenv("BIRTHDAY_ANNOUNCE_HOUR", "0"))
+
+# German month names for date parsing
+GERMAN_MONTHS = {
+    "januar": 1, "jänner": 1,
+    "februar": 2,
+    "märz": 3, "maerz": 3,
+    "april": 4,
+    "mai": 5,
+    "juni": 6,
+    "juli": 7,
+    "august": 8,
+    "september": 9,
+    "oktober": 10,
+    "november": 11,
+    "dezember": 12,
+}
 
 
 class BirthdayCog(commands.Cog):
@@ -49,29 +65,44 @@ class BirthdayCog(commands.Cog):
     def _parse_date(self, date_str: str) -> tuple[int, int] | None:
         if not date_str:
             return None
-        s = date_str.strip()
+        s = date_str.strip().lower()
+
+        # Try numeric formats first
         full_formats = ["%Y-%m-%d", "%d-%m-%Y", "%m-%d-%Y", "%d/%m/%Y", "%m/%d/%Y"]
         for fmt in full_formats:
             try:
-                dt = datetime.datetime.strptime(s, fmt)
+                dt = datetime.datetime.strptime(date_str, fmt)
                 return dt.month, dt.day
             except ValueError:
                 continue
+
         md_formats = ["%d-%m", "%d/%m", "%m-%d", "%m/%d"]
         for fmt in md_formats:
             try:
-                dt = datetime.datetime.strptime(s, fmt)
+                dt = datetime.datetime.strptime(date_str, fmt)
                 return dt.month, dt.day
             except ValueError:
                 continue
-        named = s.title()
+
+        # English named months
         named_formats = ["%d %B", "%B %d", "%d %b", "%b %d"]
         for fmt in named_formats:
             try:
-                dt = datetime.datetime.strptime(named, fmt)
+                dt = datetime.datetime.strptime(date_str.title(), fmt)
                 return dt.month, dt.day
             except ValueError:
                 continue
+
+        # German month names
+        for month_name, month_num in GERMAN_MONTHS.items():
+            if month_name in s:
+                # Try to extract day number
+                import re
+                match = re.search(r'(\d{1,2})', s)
+                if match:
+                    day = int(match.group(1))
+                    if 1 <= day <= 31:
+                        return month_num, day
         return None
 
     def _get_days_until(self, month: int, day: int, today: date) -> tuple[int, date]:
@@ -89,7 +120,6 @@ class BirthdayCog(commands.Cog):
         return (next_bd - today).days, next_bd
 
     async def _get_member_name(self, guild: discord.Guild, user_id: int) -> str:
-        """Try to get member name, with fetch as fallback."""
         member = guild.get_member(user_id)
         if member:
             return member.display_name
@@ -155,7 +185,7 @@ class BirthdayCog(commands.Cog):
         await interaction.response.send_message(f"✅ Dein Geburtstag wurde auf den {day:02d}.{month:02d}. gesetzt.")
 
     @app_commands.command(name="birthday-setfor", description="Geburtstag für ein anderes Mitglied setzen (Admin)")
-    @app_commands.describe(user="Mitglied", date="Datum (z.B. 25-12 oder 25. Dezember)", year="Geburtsjahr (optional)")
+    @app_commands.describe(user="Mitglied", date="Datum", year="Geburtsjahr (optional)")
     @app_commands.default_permissions(manage_guild=True)
     async def birthday_setfor(self, interaction: discord.Interaction, user: discord.Member, date: str, year: app_commands.Range[int, 1900, 2026] = None):
         if not interaction.guild:
