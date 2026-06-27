@@ -160,7 +160,7 @@ class BirthdayCog(commands.Cog):
 
     # ==================== SLASH COMMANDS (German parameters) ====================
 
-    @app_commands.command(name="Geburtstag-setzen", description="Lege deinen Geburtstag fest (Jahr optional)")
+    @app_commands.command(name="geburtstag-setzen", description="Lege deinen Geburtstag fest (Jahr optional)")
     @app_commands.describe(datum="Datum (z.B. 7 Januar oder 25-12)", jahr="Geburtsjahr (optional)")
     async def birthday_set(self, interaction: discord.Interaction, datum: str, jahr: app_commands.Range[int, 1900, 2026] = None):
         if not interaction.guild:
@@ -193,7 +193,7 @@ class BirthdayCog(commands.Cog):
         self._save_data()
         await interaction.response.send_message(f"✅ Geburtstag für {benutzer.mention} wurde gesetzt.", ephemeral=True)
 
-    @app_commands.command(name="Geburtstag-entfernen", description="Deinen Geburtstag entfernen oder den eines anderen Mitglieds (Admin)")
+    @app_commands.command(name="geburtstag-entfernen", description="Deinen Geburtstag entfernen oder den eines anderen Mitglieds (Admin)")
     @app_commands.describe(benutzer="Leer lassen, um deinen eigenen zu entfernen")
     async def birthday_remove(self, interaction: discord.Interaction, benutzer: discord.Member = None):
         if not interaction.guild:
@@ -212,7 +212,7 @@ class BirthdayCog(commands.Cog):
         self._save_data()
         await interaction.response.send_message(f"✅ Geburtstag von {target.mention} wurde entfernt.", ephemeral=True)
 
-    @app_commands.command(name="Geburtstags-Liste", description="Kommende Geburtstage anzeigen")
+    @app_commands.command(name="geburtstags-liste", description="Kommende Geburtstage anzeigen")
     async def birthday_list(self, interaction: discord.Interaction):
         if not interaction.guild:
             await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
@@ -235,7 +235,7 @@ class BirthdayCog(commands.Cog):
         upcoming.sort()
         await interaction.response.send_message("\n".join([f"{d} Tage — {t}" for d, t in upcoming[:10]]))
 
-    @app_commands.command(name="Geburtstag-heute", description="Wer hat heute Geburtstag?")
+    @app_commands.command(name="geburtstag-heute", description="Wer hat heute Geburtstag?")
     async def birthday_today(self, interaction: discord.Interaction):
         if not interaction.guild:
             await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
