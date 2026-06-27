@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   discord-qnap-bot:
     build: .
@@ -8,10 +6,4 @@ services:
     env_file:
       - .env
     volumes:
-      # Birthday data persistence (highly recommended)
       - ./data:/app/data
-    # Add more volumes here if you add other cogs that need persistent storage
-
-networks:
-  default:
-    driver: bridge

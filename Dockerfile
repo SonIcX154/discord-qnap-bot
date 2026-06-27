@@ -2,8 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies (ffmpeg + opus for future audio features)
-RUN apt-get update && apt-get install -y \
+# Install system dependencies (minimal, avoids pulling systemd and bloat)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libopus0 \
     && rm -rf /var/lib/apt/lists/*
