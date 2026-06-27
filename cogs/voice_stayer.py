@@ -83,7 +83,7 @@ class VoiceStayer(commands.Cog):
                 print(f"[VoiceStayer] Unexpected error: {e}")
 
             # Check / heal connection every 10 seconds
-            await asyncio.sleep(10)
+            await asyncio.sleep(1)
 
 
 async def setup(bot: commands.Bot):
