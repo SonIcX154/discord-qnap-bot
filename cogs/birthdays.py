@@ -7,7 +7,8 @@ from discord.ext import commands, tasks
 from discord import app_commands
 
 
-DATA_FILE = "data/birthdays.json"
+# Configurable via environment variable for multiple bot instances
+DATA_FILE = os.getenv("BIRTHDAY_DATA_PATH", "data/birthdays.json")
 
 
 class BirthdayCog(commands.Cog):
@@ -15,7 +16,7 @@ class BirthdayCog(commands.Cog):
     
     Features:
     - /birthday set, setfor, remove, list, today, channel
-    - JSON storage (persistent with Docker volume)
+    - JSON storage (path configurable via BIRTHDAY_DATA_PATH)
     - Daily birthday announcements in configured channel
     - Age calculation when birth year is provided
     """
@@ -31,7 +32,8 @@ class BirthdayCog(commands.Cog):
         self._load_data()
 
     def _load_data(self):
-        os.makedirs("data", exist_ok=True)
+        data_dir = os.path.dirname(DATA_FILE) or "."
+        os.makedirs(data_dir, exist_ok=True)
         if os.path.exists(DATA_FILE):
             try:
                 with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -42,7 +44,8 @@ class BirthdayCog(commands.Cog):
             self.data = {}
 
     def _save_data(self):
-        os.makedirs("data", exist_ok=True)
+        data_dir = os.path.dirname(DATA_FILE) or "."
+        os.makedirs(data_dir, exist_ok=True)
         try:
             with open(DATA_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, indent=2, ensure_ascii=False)
@@ -258,7 +261,8 @@ class BirthdayCog(commands.Cog):
         del gdata[uid]
         self._save_data()
         await interaction.response.send_message(
-            f"✅ Removed birthday for {target.mention}.", ephemeral=True
+            f"✅ Removed birthday for {target.mention}.",
+            ephemeral=True
         )
 
     @birthday.command(name="list", description="Show upcoming birthdays in this server")

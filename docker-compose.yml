@@ -7,9 +7,10 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    # Add volumes here later if you need persistent data/logs
-    # volumes:
-    #   - ./logs:/app/logs
+    volumes:
+      # Birthday data persistence (highly recommended)
+      - ./data:/app/data
+    # Add more volumes here if you add other cogs that need persistent storage
 
 networks:
   default:
