@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  discord-qnap-bot:
+    build: .
+    container_name: discord-qnap-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Add volumes here later if you need persistent data/logs
+    # volumes:
+    #   - ./logs:/app/logs
+
+networks:
+  default:
+    driver: bridge
