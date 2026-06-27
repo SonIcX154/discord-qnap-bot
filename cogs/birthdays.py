@@ -8,7 +8,7 @@ from discord import app_commands
 
 
 DATA_FILE = os.getenv("BIRTHDAY_DATA_PATH", "data/birthdays.json")
-ANNOUNCE_HOUR = int(os.getenv("BIRTHDAY_ANNOUNCE_HOUR", "0"))  # default: 00:00
+ANNOUNCE_HOUR = int(os.getenv("BIRTHDAY_ANNOUNCE_HOUR", "0"))
 
 
 class BirthdayCog(commands.Cog):
@@ -124,7 +124,7 @@ class BirthdayCog(commands.Cog):
                 except Exception:
                     pass
 
-    # ==================== FLATTENED SLASH COMMANDS (German descriptions) ====================
+    # ==================== FLATTENED SLASH COMMANDS ====================
 
     @app_commands.command(name="birthday-set", description="Dein Geburtstag setzen")
     @app_commands.describe(date="Datum (z.B. 25-12 oder 25. Dezember)", year="Geburtsjahr (optional für Altersanzeige)")
@@ -140,7 +140,7 @@ class BirthdayCog(commands.Cog):
         gdata = self._get_guild_data(interaction.guild.id)
         gdata[str(interaction.user.id)] = {"month": month, "day": day, "year": year}
         self._save_data()
-        await interaction.response.send_message(f"✅ Dein Geburtstag wurde auf den {day:02d}.{month:02d}. gesetzt.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Dein Geburtstag wurde auf den {day:02d}.{month:02d}. gesetzt.")  # öffentlich
 
     @app_commands.command(name="birthday-setfor", description="Geburtstag für ein anderes Mitglied setzen (Admin)")
     @app_commands.describe(user="Mitglied", date="Datum", year="Geburtsjahr (optional)")
@@ -197,10 +197,10 @@ class BirthdayCog(commands.Cog):
             except:
                 continue
         if not upcoming:
-            await interaction.response.send_message("Noch keine Geburtstage eingetragen.", ephemeral=True)
+            await interaction.response.send_message("Noch keine Geburtstage eingetragen.")
             return
         upcoming.sort()
-        await interaction.response.send_message("\n".join([f"{d} Tage — {t}" for d, t in upcoming[:10]]), ephemeral=True)
+        await interaction.response.send_message("\n".join([f"{d} Tage — {t}" for d, t in upcoming[:10]]))
 
     @app_commands.command(name="birthday-today", description="Wer hat heute Geburtstag?")
     async def birthday_today(self, interaction: discord.Interaction):
@@ -218,7 +218,7 @@ class BirthdayCog(commands.Cog):
                 if member:
                     celebrants.append(member.mention)
         if not celebrants:
-            await interaction.response.send_message("Heute hat niemand Geburtstag.", ephemeral=True)
+            await interaction.response.send_message("Heute hat niemand Geburtstag.")
             return
         await interaction.response.send_message("🎉 Heute haben Geburtstag: " + ", ".join(celebrants))
 
