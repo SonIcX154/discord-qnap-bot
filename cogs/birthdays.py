@@ -145,8 +145,12 @@ class BirthdayCog(commands.Cog):
                 except Exception:
                     continue
             if celebrants:
+                if len(celebrants) == 1:
+                    msg = f"🎉 **Heute hat Geburtstag:** {celebrants[0]}"
+                else:
+                    msg = f"🎉 **Heute haben Geburtstag:** {', '.join(celebrants)}"
                 try:
-                    await channel.send("🎉 **Happy Birthday today!** " + ", ".join(celebrants))
+                    await channel.send(msg)
                 except Exception:
                     pass
 
@@ -256,7 +260,7 @@ class BirthdayCog(commands.Cog):
             await interaction.response.send_message("Heute hat niemand Geburtstag.")
             return
         if len(celebrants) == 1:
-            await interaction.response.send_message(f"🎉 Heute hat {celebrants[0]} Geburtstag")
+            await interaction.response.send_message(f"🎉 Heute hat Geburtstag: {celebrants[0]}")
         else:
             await interaction.response.send_message(f"🎉 Heute haben Geburtstag: {', '.join(celebrants)}")
 
