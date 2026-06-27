@@ -7,7 +7,6 @@ from discord.ext import commands, tasks
 from discord import app_commands
 
 
-# Configurable via environment variable for multiple bot instances
 DATA_FILE = os.getenv("BIRTHDAY_DATA_PATH", "data/birthdays.json")
 
 
@@ -261,8 +260,7 @@ class BirthdayCog(commands.Cog):
         del gdata[uid]
         self._save_data()
         await interaction.response.send_message(
-            f"✅ Removed birthday for {target.mention}.",
-            ephemeral=True
+            f"✅ Removed birthday for {target.mention}.", ephemeral=True
         )
 
     @birthday.command(name="list", description="Show upcoming birthdays in this server")
@@ -383,7 +381,7 @@ class BirthdayCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def cog_load(self):
-        self.bot.tree.add_command(self.birthday)
+        self.bot.tree.add_command(self.birthday, override=True)
         print("[Birthday] Slash command group registered.")
         self.daily_check.start()
         print("[Birthday] Daily announcement task started.")
