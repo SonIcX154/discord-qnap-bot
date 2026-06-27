@@ -1,17 +1,18 @@
 import json
 import os
 import datetime
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 
 
 DATA_FILE = os.getenv("BIRTHDAY_DATA_PATH", "data/birthdays.json")
+ANNOUNCE_HOUR = int(os.getenv("BIRTHDAY_ANNOUNCE_HOUR", "0"))  # default: 00:00
 
 
 class BirthdayCog(commands.Cog):
-    """Birthday system with slash commands (flattened to avoid registration issues)."""
+    """Birthday system with slash commands."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -234,20 +235,22 @@ class BirthdayCog(commands.Cog):
         self._save_data()
         await interaction.response.send_message(f"✅ Ankündigungen werden jetzt in {channel.mention} gesendet.", ephemeral=True)
 
-    # Background task
-    @tasks.loop(hours=24)
+    # ==================== DAILY TASK AT 00:00 ====================
+
+    @tasks.loop(time=time(hour=ANNOUNCE_HOUR, minute=0))
     async def daily_check(self):
+        """Runs daily at the configured hour (default 00:00)."""
         try:
             await self._announce_birthdays(date.today())
         except Exception as e:
-            print(f"[Birthday] Error: {e}")
+            print(f"[Birthday] Error in daily check: {e}")
 
     @daily_check.before_loop
     async def before_daily_check(self):
         await self.bot.wait_until_ready()
 
     async def cog_load(self):
-        print("[Birthday] Cog loaded.")
+        print(f"[Birthday] Cog loaded. Announcements at {ANNOUNCE_HOUR:02d}:00.")
         self.daily_check.start()
 
     async def cog_unload(self):
