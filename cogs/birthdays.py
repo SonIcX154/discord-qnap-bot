@@ -161,7 +161,7 @@ class BirthdayCog(commands.Cog):
     # ==================== FLATTENED SLASH COMMANDS ====================
 
     @app_commands.command(name="birthday-set", description="Dein Geburtstag setzen")
-    @app_commands.describe(date="Datum (z.B. 25-12 oder 25. Dezember)", year="Geburtsjahr (optional für Altersanzeige)")
+    @app_commands.describe(Datum="Datum (z.B. 25-12 oder 25. Dezember)", Jahr="Geburtsjahr (optional für Altersanzeige)")
     async def birthday_set(self, interaction: discord.Interaction, date: str, year: app_commands.Range[int, 1900, 2026] = None):
         if not interaction.guild:
             await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
@@ -177,7 +177,7 @@ class BirthdayCog(commands.Cog):
         await interaction.response.send_message(f"✅ Dein Geburtstag wurde auf den {day:02d}.{month:02d}. gesetzt.")
 
     @app_commands.command(name="birthday-setfor", description="Geburtstag für ein anderes Mitglied setzen (Admin)")
-    @app_commands.describe(user="Mitglied", date="Datum", year="Geburtsjahr (optional)")
+    @app_commands.describe(Benutzer="Mitglied", Datum="Datum (z.B. 25-12 oder 25. Dezember)", Jahr="Geburtsjahr (optional)")
     @app_commands.default_permissions(manage_guild=True)
     async def birthday_setfor(self, interaction: discord.Interaction, user: discord.Member, date: str, year: app_commands.Range[int, 1900, 2026] = None):
         if not interaction.guild:
