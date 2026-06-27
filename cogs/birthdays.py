@@ -381,6 +381,8 @@ class BirthdayCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def cog_load(self):
+        # Remove old command if it exists, then add with override
+        self.bot.tree.remove_command(self.birthday.name)
         self.bot.tree.add_command(self.birthday, override=True)
         print("[Birthday] Slash command group registered.")
         self.daily_check.start()
@@ -388,6 +390,8 @@ class BirthdayCog(commands.Cog):
 
     async def cog_unload(self):
         self.daily_check.cancel()
+        # Clean up the command from the tree
+        self.bot.tree.remove_command(self.birthday.name)
 
 
 async def setup(bot: commands.Bot):
