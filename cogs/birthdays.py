@@ -244,8 +244,7 @@ class BirthdayCog(commands.Cog):
 
         if uid not in gdata or uid == "config":
             await interaction.response.send_message(
-                f"No birthday found for {target.mention}.", ephemeral=True
-            )
+                f"No birthday found for {target.mention}.", ephemeral=True)
             return
 
         # Permission check if removing someone else's
@@ -381,17 +380,20 @@ class BirthdayCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def cog_load(self):
-        # Remove old command if it exists, then add with override
-        self.bot.tree.remove_command(self.birthday.name)
-        self.bot.tree.add_command(self.birthday, override=True)
-        print("[Birthday] Slash command group registered.")
+        try:
+            self.bot.tree.add_command(self.birthday, override=True)
+            print("[Birthday] Slash command group registered.")
+        except app_commands.CommandAlreadyRegistered:
+            print("[Birthday] Command group already registered (skipping).")
         self.daily_check.start()
         print("[Birthday] Daily announcement task started.")
 
     async def cog_unload(self):
         self.daily_check.cancel()
-        # Clean up the command from the tree
-        self.bot.tree.remove_command(self.birthday.name)
+        try:
+            self.bot.tree.remove_command(self.birthday.name)
+        except:
+            pass
 
 
 async def setup(bot: commands.Bot):
