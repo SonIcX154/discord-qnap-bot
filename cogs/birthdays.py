@@ -259,12 +259,14 @@ class BirthdayCog(commands.Cog):
             except:
                 continue
         if not celebrants:
-            await interaction.response.send_message("Heute hat niemand Geburtstag.")
+            await interaction.response.send_message("Heute hat niemand Geburtstag")
             return
         if len(celebrants) == 1:
-            await interaction.response.send_message(f"🎉 Heute hat Geburtstag: {celebrants[0]}")
+            await interaction.response.send_message(f"🎉 Heute hat {celebrants[0]} Geburtstag")
+        elif len(celebrants) == 2:
+            await interaction.response.send_message(f"🎉 Heute haben {celebrants[0]} und {celebrants[1]} Geburtstag")
         else:
-            await interaction.response.send_message(f"🎉 Heute haben Geburtstag: {', '.join(celebrants)}")
+            await interaction.response.send_message(f"🎉 Heute haben {', '.join(celebrants[:-1])} und {celebrants[-1]} Geburtstag")
 
     @app_commands.command(name="birthday-channel", description="Ankündigungskanal festlegen (Admin)")
     @app_commands.default_permissions(manage_guild=True)
