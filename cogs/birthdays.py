@@ -322,6 +322,18 @@ class BirthdayCog(commands.Cog):
 
         await interaction.followup.send("✅ Test-Nachrichten (mit echten Pings) wurden in den Kanal gesendet.", ephemeral=True)
 
+    @app_commands.command(name="force-birthday-check", description="Manually trigger today's birthday announcement check now (Admin only)")
+    @app_commands.default_permissions(manage_guild=True)
+    async def force_birthday_check(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        print(f"[Birthday] ⚙️ Manual force check triggered by {interaction.user} in guild {interaction.guild.id if interaction.guild else 'DM'}")
+        try:
+            await self._announce_birthdays(date.today())
+            await interaction.followup.send("✅ Force birthday check completed. Check the logs above for details (sent / not sent / errors).", ephemeral=True)
+        except Exception as e:
+            print(f"[Birthday] Error during force check: {e}")
+            await interaction.followup.send(f"❌ Error during force check: {e}", ephemeral=True)
+
     # ==================== DAILY TASK AT CONFIGURED TIME ====================
 
     @tasks.loop(time=time(hour=ANNOUNCE_HOUR, minute=ANNOUNCE_MINUTE))
