@@ -21,6 +21,7 @@ class BirthdayCog(commands.Cog):
         self.bot = bot
         self.data: dict = {}
         self._load_data()
+        self._last_announce_date = None   # Prevent duplicate runs in the same minute
 
     def _load_data(self):
         data_dir = os.path.dirname(DATA_FILE) or "."
@@ -334,17 +335,25 @@ class BirthdayCog(commands.Cog):
             print(f"[Birthday] Error during force check: {e}")
             await interaction.followup.send(f"❌ Error during force check: {e}", ephemeral=True)
 
-    # ==================== DAILY TASK AT CONFIGURED TIME ====================
+    # ==================== RELIABLE DAILY SCHEDULER ====================
 
-    @tasks.loop(time=time(hour=ANNOUNCE_HOUR, minute=ANNOUNCE_MINUTE))
+    @tasks.loop(minutes=1)
     async def daily_check(self):
-        """Runs daily at the configured time (default 00:00)."""
-        today = date.today()
-        print(f"[Birthday] Running daily birthday check for {today} (configured time {ANNOUNCE_HOUR:02d}:{ANNOUNCE_MINUTE:02d})")
-        try:
-            await self._announce_birthdays(today)
-        except Exception as e:
-            print(f"[Birthday] Error in daily check: {e}")
+        """Checks every minute whether it's time to send birthday announcements."""
+        now = datetime.datetime.now()
+        current_date = now.date()
+
+        # Only run if current time matches configured time (and we haven't already run today)
+        if (now.hour == ANNOUNCE_HOUR and now.minute == ANNOUNCE_MINUTE and
+                self._last_announce_date != current_date):
+
+            print(f"[Birthday] Running daily birthday check for {current_date} (configured time {ANNOUNCE_HOUR:02d}:{ANNOUNCE_MINUTE:02d})")
+            self._last_announce_date = current_date
+
+            try:
+                await self._announce_birthdays(current_date)
+            except Exception as e:
+                print(f"[Birthday] Error in daily check: {e}")
 
     @daily_check.before_loop
     async def before_daily_check(self):
