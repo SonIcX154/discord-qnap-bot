@@ -1,4 +1,5 @@
 import os
+import datetime
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -40,6 +41,10 @@ class QNAPBot(commands.Bot):
     async def on_ready(self):
         print(f"🤖 Logged in as {self.user} (ID: {self.user.id})")
         print(f"Connected to {len(self.guilds)} guilds.")
+
+        # Log current container time (helpful for verifying timezone with scheduled tasks)
+        now = datetime.datetime.now()
+        print(f"[System] Current container time after startup: {now.strftime('%Y-%m-%d %H:%M:%S')} (local time, TZ from environment)")
 
         # Sync slash commands (safe to run on every startup for small bots)
         if not self.synced:
