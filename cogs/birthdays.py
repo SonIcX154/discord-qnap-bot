@@ -128,7 +128,9 @@ class BirthdayCog(commands.Cog):
                 continue
             channel = guild.get_channel(channel_id)
             if not isinstance(channel, discord.TextChannel):
+                print(f"[Birthday] Configured announce channel {channel_id} is not a TextChannel in guild {guild.id}")
                 continue
+
             celebrants = []
             for uid_str, b in gdata.items():
                 if uid_str == "config":
@@ -147,6 +149,7 @@ class BirthdayCog(commands.Cog):
                         celebrants.append(f"<@{uid_str}>{age_str}")
                 except Exception:
                     continue
+
             if celebrants:
                 if len(celebrants) == 1:
                     msg = f"## \ud83c\udf89Alles Gute zum Geburtstag, {celebrants[0]}!"
@@ -156,8 +159,11 @@ class BirthdayCog(commands.Cog):
                     msg = f"## \ud83c\udf89Alles Gute zum Geburtstag {', '.join(celebrants[:-1])} und {celebrants[-1]}!"
                 try:
                     await channel.send(msg)
-                except Exception:
-                    pass
+                    print(f"[Birthday] ✅ Sent announcement to #{channel.name} ({channel.id}) in guild {guild.id} for {len(celebrants)} celebrant(s)")
+                except Exception as e:
+                    print(f"[Birthday] ❌ Failed to send announcement in guild {guild.id}: {e}")
+            else:
+                print(f"[Birthday] No birthdays today in guild {guild.id} (channel #{channel.name} is configured)")
 
     # ==================== SLASH COMMANDS (German parameters) ====================
 
@@ -282,6 +288,7 @@ class BirthdayCog(commands.Cog):
             gdata["config"] = {}
         gdata["config"]["announce_channel_id"] = channel.id
         self._save_data()
+        print(f"[Birthday] Announcement channel set to #{channel.name} ({channel.id}) for guild {interaction.guild.id} by {interaction.user}")
         await interaction.response.send_message(f"✅ Ankündigungen werden jetzt in {channel.mention} gesendet.", ephemeral=True)
 
     @app_commands.command(name="test-birthday-messages", description="Testet die automatischen Geburtstagsnachrichten mit echten Pings (Admin only)")
@@ -320,8 +327,10 @@ class BirthdayCog(commands.Cog):
     @tasks.loop(time=time(hour=ANNOUNCE_HOUR, minute=ANNOUNCE_MINUTE))
     async def daily_check(self):
         """Runs daily at the configured time (default 00:00)."""
+        today = date.today()
+        print(f"[Birthday] Running daily birthday check for {today} (configured time {ANNOUNCE_HOUR:02d}:{ANNOUNCE_MINUTE:02d})")
         try:
-            await self._announce_birthdays(date.today())
+            await self._announce_birthdays(today)
         except Exception as e:
             print(f"[Birthday] Error in daily check: {e}")
 
@@ -330,7 +339,7 @@ class BirthdayCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def cog_load(self):
-        print(f"[Birthday] Cog loaded. Announcements at {ANNOUNCE_HOUR:02d}:{ANNOUNCE_MINUTE:02d}.")
+        print(f"[Birthday] Cog loaded. Daily announcements configured for {ANNOUNCE_HOUR:02d}:{ANNOUNCE_MINUTE:02d} every day.")
         self.daily_check.start()
 
     async def cog_unload(self):
