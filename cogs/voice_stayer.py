@@ -2,6 +2,7 @@ import os
 import asyncio
 import discord
 from discord.ext import commands
+from discord import app_commands
 
 
 class VoiceStayer(commands.Cog):
@@ -9,6 +10,7 @@ class VoiceStayer(commands.Cog):
     
     This makes the voice channel 'long-running' / always active.
     The bot will automatically rejoin if disconnected.
+    Use /voice-stayer to toggle this behavior on or off.
     """
 
     def __init__(self, bot: commands.Bot):
@@ -16,6 +18,7 @@ class VoiceStayer(commands.Cog):
         self.voice_channel_id = int(os.getenv("VOICE_CHANNEL_ID", "0"))
         self._voice_task = None
         self._running = True
+        self.enabled = True   # Can be toggled with /voice-stayer
 
     async def cog_load(self):
         """Start the background task when the cog is loaded."""
@@ -26,7 +29,7 @@ class VoiceStayer(commands.Cog):
         print(f"VoiceStayer initialized. Target channel ID: {self.voice_channel_id}")
 
     async def cog_unload(self):
-        """Clean up the task when cog is unloaded."""
+        """Clean up the task when the cog is unloaded."""
         self._running = False
         if self._voice_task and not self._voice_task.done():
             self._voice_task.cancel()
@@ -35,12 +38,42 @@ class VoiceStayer(commands.Cog):
             except asyncio.CancelledError:
                 pass
 
+    @app_commands.command(name="voice-stayer", description="Toggle the automatic voice stayer on or off")
+    async def toggle_voice_stayer(self, interaction: discord.Interaction):
+        self.enabled = not self.enabled
+
+        if self.enabled:
+            await interaction.response.send_message(
+                "✅ Voice Stayer is now **enabled**. The bot will stay connected to the voice channel.",
+                ephemeral=True
+            )
+        else:
+            # Disconnect if currently connected
+            voice_client = discord.utils.get(
+                self.bot.voice_clients, guild=interaction.guild
+            )
+            if voice_client and voice_client.is_connected():
+                try:
+                    await voice_client.disconnect(force=True)
+                    print(f"[VoiceStayer] Disconnected from voice channel (stayer disabled by {interaction.user})")
+                except Exception:
+                    pass
+
+            await interaction.response.send_message(
+                "❌ Voice Stayer is now **disabled**. The bot will no longer force itself into the voice channel.",
+                ephemeral=True
+            )
+
     async def _stay_in_voice_channel(self):
         """Background loop that ensures the bot stays connected to the target VC."""
         await self.bot.wait_until_ready()
         print("Voice stayer task started.")
 
         while self._running and not self.bot.is_closed():
+            if not self.enabled:
+                await asyncio.sleep(5)
+                continue
+
             try:
                 channel = self.bot.get_channel(self.voice_channel_id)
 
@@ -82,7 +115,7 @@ class VoiceStayer(commands.Cog):
             except Exception as e:
                 print(f"[VoiceStayer] Unexpected error: {e}")
 
-            # Check / heal connection every 10 seconds
+            # Check / heal connection every ~1 second when enabled
             await asyncio.sleep(1)
 
 
