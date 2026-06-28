@@ -361,6 +361,19 @@ class BirthdayCog(commands.Cog):
 
     async def cog_load(self):
         print(f"[Birthday] Cog loaded. Daily announcements configured for {ANNOUNCE_HOUR:02d}:{ANNOUNCE_MINUTE:02d} every day.")
+
+        # Log configured announcement channels per guild
+        for guild in self.bot.guilds:
+            gdata = self.data.get(str(guild.id), {})
+            config = gdata.get("config", {})
+            channel_id = config.get("announce_channel_id")
+            if channel_id:
+                channel = guild.get_channel(channel_id)
+                if channel:
+                    print(f"[Birthday] Announcement channel for {guild.name}: #{channel.name} ({channel.id})")
+                else:
+                    print(f"[Birthday] Announcement channel set for {guild.name} but channel {channel_id} not found")
+
         self.daily_check.start()
 
     async def cog_unload(self):
