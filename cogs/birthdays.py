@@ -135,25 +135,25 @@ class BirthdayCog(commands.Cog):
                     continue
                 try:
                     if b.get("month") == check_date.month and b.get("day") == check_date.day:
-                        name = await self._get_member_name(guild, int(uid_str))
+                        # Use real Discord mention for pings
                         age_str = ""
                         if b.get("year"):
                             try:
                                 age = check_date.year - int(b["year"])
                                 if age > 0:
-                                    age_str = f" (turns {age}!)✨"
+                                    age_str = f" (turns {age}!)\u2728"
                             except:
                                 pass
-                        celebrants.append(f"@{name}{age_str}")
+                        celebrants.append(f"<@{uid_str}>{age_str}")
                 except Exception:
                     continue
             if celebrants:
                 if len(celebrants) == 1:
-                    msg = f"## 🎉Alles Gute zum Geburtstag, {celebrants[0]}!"
+                    msg = f"## \ud83c\udf89Alles Gute zum Geburtstag, {celebrants[0]}!"
                 elif len(celebrants) == 2:
-                    msg = f"## 🎉Alles Gute zum Geburtstag {celebrants[0]} und {celebrants[1]}!"
+                    msg = f"## \ud83c\udf89Alles Gute zum Geburtstag {celebrants[0]} und {celebrants[1]}!"
                 else:
-                    msg = f"## 🎉Alles Gute zum Geburtstag {', '.join(celebrants[:-1])} und {celebrants[-1]}!"
+                    msg = f"## \ud83c\udf89Alles Gute zum Geburtstag {', '.join(celebrants[:-1])} und {celebrants[-1]}!"
                 try:
                     await channel.send(msg)
                 except Exception:
@@ -255,7 +255,7 @@ class BirthdayCog(commands.Cog):
                         try:
                             age = today.year - int(b["year"])
                             if age > 0:
-                                age_str = f" (turns {age}!)✨"
+                                age_str = f" (turns {age}!)\u2728"
                         except:
                             pass
                     celebrants.append(f"@{name}{age_str}")
@@ -284,40 +284,42 @@ class BirthdayCog(commands.Cog):
         self._save_data()
         await interaction.response.send_message(f"✅ Ankündigungen werden jetzt in {channel.mention} gesendet.", ephemeral=True)
 
-    @app_commands.command(name="test-birthday-messages", description="Testet die automatischen Geburtstagsnachrichten mit 1-4 zufälligen Usern (Admin only)")
+    @app_commands.command(name="test-birthday-messages", description="Testet die automatischen Geburtstagsnachrichten mit echten Pings (Admin only)")
     @app_commands.default_permissions(manage_guild=True)
     async def test_birthday_messages(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
         members = [m for m in interaction.guild.members if not m.bot]
         if len(members) < 3:
-            await interaction.followup.send("Nicht genug Member auf dem Server (mind. 4 benötigt).", ephemeral=True)
+            await interaction.followup.send("Nicht genug Member auf dem Server (mind. 3 benötigt).", ephemeral=True)
             return
 
         random.shuffle(members)
-        test_cases = [1, 2, 3]
 
-        for count in test_cases:
+        for count in [1, 2, 3]:
             selected = members[:count]
-            celebrants = [f"@{m.display_name}" for m in selected]
+            celebrants = []
+            for m in selected:
+                age_str = ""
+                celebrants.append(f"<@{m.id}>{age_str}")
 
             if len(celebrants) == 1:
-                await interaction.response.send_message(f"🎉 Heute hat {celebrants[0]} Geburtstag")
+                msg = f"## \ud83c\udf89Alles Gute zum Geburtstag, {celebrants[0]}!"
             elif len(celebrants) == 2:
-                await interaction.response.send_message(f"🎉 Heute haben {celebrants[0]} und {celebrants[1]} Geburtstag")
+                msg = f"## \ud83c\udf89Alles Gute zum Geburtstag {celebrants[0]} und {celebrants[1]}!"
             else:
-                await interaction.response.send_message(f"🎉 Heute haben {', '.join(celebrants[:-1])} und {celebrants[-1]} Geburtstag")
+                msg = f"## \ud83c\udf89Alles Gute zum Geburtstag {', '.join(celebrants[:-1])} und {celebrants[-1]}!"
 
             await interaction.channel.send(msg)
             await asyncio.sleep(1.2)
 
-        await interaction.followup.send("Test-Nachrichten wurden gesendet.", ephemeral=True)
+        await interaction.followup.send("✅ Test-Nachrichten (mit echten Pings) wurden in den Kanal gesendet.", ephemeral=True)
 
-    # ==================== DAILY TASK AT 00:00 ====================
+    # ==================== DAILY TASK AT CONFIGURED TIME ====================
 
-    @tasks.loop(time=time(hour=ANNOUNCE_HOUR, minute=0))
+    @tasks.loop(time=time(hour=ANNOUNCE_HOUR, minute=ANNOUNCE_MINUTE))
     async def daily_check(self):
-        """Runs daily at the configured hour (default 00:00)."""
+        """Runs daily at the configured time (default 00:00)."""
         try:
             await self._announce_birthdays(date.today())
         except Exception as e:
@@ -328,7 +330,7 @@ class BirthdayCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def cog_load(self):
-        print(f"[Birthday] Cog loaded. Announcements at {ANNOUNCE_HOUR:02d}:00.")
+        print(f"[Birthday] Cog loaded. Announcements at {ANNOUNCE_HOUR:02d}:{ANNOUNCE_MINUTE:02d}.")
         self.daily_check.start()
 
     async def cog_unload(self):
