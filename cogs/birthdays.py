@@ -362,6 +362,10 @@ class BirthdayCog(commands.Cog):
     async def cog_load(self):
         print(f"[Birthday] Cog loaded. Daily announcements configured for {ANNOUNCE_HOUR:02d}:{ANNOUNCE_MINUTE:02d} every day.")
 
+        # Debug logs
+        print(f"[DEBUG] Guilds bot sees: {[(g.id, g.name) for g in self.bot.guilds]}")
+        print(f"[DEBUG] self.data keys: {list(self.data.keys())}")
+
         # Log configured announcement channels per guild
         for guild in self.bot.guilds:
             gdata = self.data.get(str(guild.id), {})
