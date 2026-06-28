@@ -40,6 +40,10 @@ Example `.env`:
 ```env
 DISCORD_TOKEN=your_bot_token_here
 VOICE_CHANNEL_ID=1234567890123456789
+
+# Optional birthday announcement time (default: 00:00)
+BIRTHDAY_ANNOUNCE_HOUR=0
+BIRTHDAY_ANNOUNCE_MINUTE=0
 ```
 
 Optional:
@@ -69,43 +73,51 @@ python bot.py
 
 ## Environment variables
 
-| Variable             | Required | Purpose |
-|----------------------|----------|---------|
-| `DISCORD_TOKEN`      | yes      | Discord bot token |
-| `VOICE_CHANNEL_ID`   | yes      | Voice channel to keep connected |
-| `BIRTHDAY_DATA_PATH` | no       | Path to birthday JSON file |
+| Variable                  | Required | Purpose |
+|---------------------------|----------|---------|
+| `DISCORD_TOKEN`           | yes      | Discord bot token |
+| `VOICE_CHANNEL_ID`        | yes      | Voice channel to keep connected |
+| `BIRTHDAY_DATA_PATH`      | no       | Path to birthday JSON file |
+| `BIRTHDAY_ANNOUNCE_HOUR`  | no       | Hour (0-23) when daily birthday announcements are sent (default: 0 / midnight) |
+| `BIRTHDAY_ANNOUNCE_MINUTE`| no       | Minute when daily birthday announcements are sent (default: 0) |
 
 ## Birthday commands
 
-The bot registers slash commands in Discord. Use them by typing `/birthday`.
+The bot registers slash commands in Discord. Use them by typing the command name.
+
+**Note:** Most birthday commands use German names for better localization in German-speaking servers.
 
 ### User commands
 
-- `/birthday-set date [year]`
+- `/geburtstag-setzen <datum> [jahr]`
   - Save your birthday.
-  - Supported formats: `25-12`, `12/25`, `25/12`, `2025-12-25`, `25-12-2025`, `December 25`, `25 December`, `Dec 25`.
-- `/birthday-remove [user]`
+  - Supported formats: `25-12`, `12/25`, `25/12`, `2025-12-25`, `25-12-2025`, `December 25`, `25 December`, `Dec 25`, or German month names.
+- `/geburtstag-entfernen [benutzer]`
   - Remove your own birthday or another user's birthday if you have permission.
-- `/birthday-list`
+- `/geburtstags-liste`
   - Show upcoming birthdays in the server.
-- `/birthday-today`
+- `/geburtstag-heute`
   - Show who has a birthday today.
 
 ### Admin commands
 
-- `/birthday-setfor user date [year]`
+- `/birthday-setfor <benutzer> <datum> [jahr]`
   - Set a birthday for another member.
-- `/birthday-channel channel`
+- `/birthday-channel <channel>`
   - Set the announcement channel for daily birthday messages.
+- `/test-birthday-messages`
+  - Send test birthday announcement messages (with real pings) to the current channel.
 
 ## Birthday announcements
 
-If a channel is configured with `/birthday-channel`, the bot will post a daily message when someone has a birthday.
+If a channel is configured with `/birthday-channel`, the bot will post a daily message at the configured time when someone has a birthday.
 
-Example message:
+The daily task now correctly respects both `BIRTHDAY_ANNOUNCE_HOUR` and `BIRTHDAY_ANNOUNCE_MINUTE`.
+
+Example message (with real user pings):
 
 ```text
-🎉 Happy Birthday today! @User1 (turns 25!)✨, @User2
+## 🎉Alles Gute zum Geburtstag, @User1 (turns 25!)✨!
 ```
 
 If no channel is configured, the bot will not send automatic announcements.
@@ -114,7 +126,7 @@ If no channel is configured, the bot will not send automatic announcements.
 
 - Reads `VOICE_CHANNEL_ID` from `.env`
 - Starts a background task when the cog loads
-- Every 10 seconds, it checks whether the bot is connected to the correct voice channel
+- Every ~1 second, it checks whether the bot is connected to the correct voice channel
 - If disconnected or connected to the wrong channel, it reconnects automatically
 
 ## Data persistence
@@ -140,6 +152,7 @@ If you want separate databases for multiple bots, either:
 - Slash commands missing: restart the bot and wait for command sync
 - Birthdays not saved: verify `./data` volume mount and file permissions
 - Voice reconnecting repeatedly: confirm `VOICE_CHANNEL_ID` points to a valid voice channel
+- Announcements not at expected time: check `BIRTHDAY_ANNOUNCE_HOUR` and `BIRTHDAY_ANNOUNCE_MINUTE` in `.env`
 
 ## Extending the bot
 
