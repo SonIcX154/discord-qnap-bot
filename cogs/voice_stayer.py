@@ -6,23 +6,17 @@ from discord import app_commands
 
 
 # ====================== ADMIN CONFIG ======================
-# Hardcode YOUR Discord user ID here so only you (or Manage Guild users) can use admin commands
+# Hardcode YOUR Discord user ID here
 ADMIN_USER_ID = 123456789012345678   # <-- REPLACE THIS WITH YOUR REAL DISCORD USER ID
 
 
-def is_admin_or_has_manage_guild():
-    """Custom check: allows the hardcoded admin OR anyone with Manage Guild permission."""
-    def predicate(interaction: discord.Interaction) -> bool:
-        # Hardcoded admin always allowed
-        if interaction.user.id == ADMIN_USER_ID:
-            return True
-        
-        # Or anyone with Manage Guild permission in the guild
-        if interaction.guild and interaction.user.guild_permissions.manage_guild:
-            return True
-        
-        return False
-    return app_commands.check(predicate)
+def is_admin_or_manage_guild(interaction: discord.Interaction) -> bool:
+    """Allows the hardcoded admin OR anyone with Manage Guild permission."""
+    if interaction.user.id == ADMIN_USER_ID:
+        return True
+    if interaction.guild and interaction.user.guild_permissions.manage_guild:
+        return True
+    return False
 # ==========================================================
 
 
@@ -59,7 +53,7 @@ class VoiceStayer(commands.Cog):
             except asyncio.CancelledError:
                 pass
 
-    @is_admin_or_has_manage_guild()
+    @app_commands.check(is_admin_or_manage_guild)
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.command(
         name="voice-stayer",
