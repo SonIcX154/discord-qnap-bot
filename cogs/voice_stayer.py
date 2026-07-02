@@ -7,7 +7,7 @@ from discord import app_commands
 
 # ====================== ADMIN CONFIG ======================
 # Hardcode YOUR Discord user ID here
-ADMIN_USER_ID = 123456789012345678   # <-- REPLACE THIS WITH YOUR REAL DISCORD USER ID
+ADMIN_USER_ID = 406523291382186004   # <-- REPLACE THIS WITH YOUR REAL DISCORD USER ID
 
 
 def is_admin_or_manage_guild(interaction: discord.Interaction) -> bool:
