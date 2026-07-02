@@ -5,6 +5,27 @@ from discord.ext import commands
 from discord import app_commands
 
 
+# ====================== ADMIN CONFIG ======================
+# Hardcode YOUR Discord user ID here so only you (or Manage Guild users) can use admin commands
+ADMIN_USER_ID = 123456789012345678   # <-- REPLACE THIS WITH YOUR REAL DISCORD USER ID
+
+
+def is_admin_or_has_manage_guild():
+    """Custom check: allows the hardcoded admin OR anyone with Manage Guild permission."""
+    def predicate(interaction: discord.Interaction) -> bool:
+        # Hardcoded admin always allowed
+        if interaction.user.id == ADMIN_USER_ID:
+            return True
+        
+        # Or anyone with Manage Guild permission in the guild
+        if interaction.guild and interaction.user.guild_permissions.manage_guild:
+            return True
+        
+        return False
+    return app_commands.check(predicate)
+# ==========================================================
+
+
 class VoiceStayer(commands.Cog):
     """Cog that keeps the bot permanently connected to a specific voice channel.
     
@@ -38,7 +59,12 @@ class VoiceStayer(commands.Cog):
             except asyncio.CancelledError:
                 pass
 
-    @app_commands.command(name="voice-stayer", description="Toggle the automatic voice stayer on or off")
+    @is_admin_or_has_manage_guild()
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.command(
+        name="voice-stayer",
+        description="Toggle the automatic voice stayer on or off (Admin / Manage Guild)"
+    )
     async def toggle_voice_stayer(self, interaction: discord.Interaction):
         self.enabled = not self.enabled
 
@@ -63,6 +89,16 @@ class VoiceStayer(commands.Cog):
                 "❌ Voice Stayer is now **disabled**. The bot will no longer force itself into the voice channel.",
                 ephemeral=True
             )
+
+    @toggle_voice_stayer.error
+    async def toggle_voice_stayer_error(self, interaction: discord.Interaction, error):
+        if isinstance(error, app_commands.CheckFailure):
+            await interaction.response.send_message(
+                "❌ You need **Manage Guild** permission or be the bot admin to use this command.",
+                ephemeral=True
+            )
+        else:
+            raise error
 
     async def _stay_in_voice_channel(self):
         """Background loop that ensures the bot stays connected to the target VC."""
