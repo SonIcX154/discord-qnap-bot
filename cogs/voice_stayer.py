@@ -54,10 +54,9 @@ class VoiceStayer(commands.Cog):
                 pass
 
     @app_commands.check(is_admin_or_manage_guild)
-    @app_commands.default_permissions(manage_guild=True)
     @app_commands.command(
         name="voice-stayer",
-        description="Toggle the automatic voice stayer on or off (Admin / Manage Guild)"
+        description="Toggle the automatic voice stayer on or off (Admin only)"
     )
     async def toggle_voice_stayer(self, interaction: discord.Interaction):
         self.enabled = not self.enabled
