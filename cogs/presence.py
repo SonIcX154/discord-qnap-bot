@@ -1,4 +1,3 @@
-import discord
 from discord.ext import commands, tasks
 from discord import Activity, ActivityType
 from datetime import date
@@ -17,16 +16,14 @@ class PresenceCog(commands.Cog):
     @tasks.loop(minutes=60)
     async def update_presence(self):
         """Aktualisiert die Rich Presence alle 60 Minuten."""
-        birthday_cog = self.bot.get_cog("BirthdayCog")
+        birthday_cog: BirthdayCog | None = self.bot.get_cog("BirthdayCog")  # type: ignore[assignment]
         if not birthday_cog or not self.bot.guilds:
             return
 
         guild = self.bot.guilds[0]
-        gdata = birthday_cog.data.get(str(guild.id), {})  # type: ignore[attr-defined]
+        info = birthday_cog.get_next_birthday_info(guild.id)
 
-        total_birthdays = len([k for k in gdata if k != "config"])
-
-        if total_birthdays == 0:
+        if not info:
             activity = Activity(
                 type=ActivityType.watching,
                 name="Geburtstage 🎂"
@@ -34,34 +31,16 @@ class PresenceCog(commands.Cog):
             await self.bot.change_presence(activity=activity)
             return
 
-        today = date.today()
-        next_name = "Jemand"
-        days_until_next = 999
+        name = info["name"]
+        days = info["days_until"]
+        total = info["total"]
 
-        for uid_str, entry in gdata.items():
-            if uid_str == "config":
-                continue
-            try:
-                month = entry.get("month")  # type: ignore[union-attr]
-                day = entry.get("day")      # type: ignore[union-attr]
-                if month is None or day is None:
-                    continue
-
-                d_until, _ = birthday_cog._get_days_until(month, day, today)  # type: ignore[attr-defined]
-
-                if d_until < days_until_next:
-                    days_until_next = d_until
-                    member = guild.get_member(int(uid_str))
-                    next_name = member.display_name if member else uid_str
-            except Exception:
-                continue
-
-        if days_until_next == 0:
-            text = f"Heute hat {next_name} Geburtstag! 🎉 • {total_birthdays} Geburtstage"
-        elif days_until_next == 1:
-            text = f"Morgen hat {next_name} Geburtstag 🎂 • {total_birthdays} Geburtstage"
+        if days == 0:
+            text = f"Heute hat {name} Geburtstag! 🎉 • {total} Geburtstage"
+        elif days == 1:
+            text = f"Morgen hat {name} Geburtstag 🎂 • {total} Geburtstage"
         else:
-            text = f"Nächster: {next_name} in {days_until_next} Tagen 🎂 • {total_birthdays} Geburtstage"
+            text = f"Nächster: {name} in {days} Tagen 🎂 • {total} Geburtstage"
 
         activity = Activity(
             type=ActivityType.watching,
