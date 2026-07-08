@@ -1,6 +1,5 @@
 from discord.ext import commands, tasks
 from discord import Activity, ActivityType
-from datetime import date
 
 
 class PresenceCog(commands.Cog):
@@ -16,12 +15,12 @@ class PresenceCog(commands.Cog):
     @tasks.loop(minutes=60)
     async def update_presence(self):
         """Aktualisiert die Rich Presence alle 60 Minuten."""
-        birthday_cog: BirthdayCog | None = self.bot.get_cog("BirthdayCog")  # type: ignore[assignment]
+        birthday_cog = self.bot.get_cog("BirthdayCog")
         if not birthday_cog or not self.bot.guilds:
             return
 
         guild = self.bot.guilds[0]
-        info = birthday_cog.get_next_birthday_info(guild.id)
+        info = birthday_cog.get_next_birthday_info(guild.id)  # type: ignore[attr-defined]
 
         if not info:
             activity = Activity(
@@ -31,9 +30,9 @@ class PresenceCog(commands.Cog):
             await self.bot.change_presence(activity=activity)
             return
 
-        name = info["name"]
-        days = info["days_until"]
-        total = info["total"]
+        name = info.get("name", "Jemand")
+        days = info.get("days_until", 0)
+        total = info.get("total", 0)
 
         if days == 0:
             text = f"Heute hat {name} Geburtstag! 🎉 • {total} Geburtstage"
