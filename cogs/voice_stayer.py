@@ -14,7 +14,7 @@ def is_admin_or_manage_guild(interaction: discord.Interaction) -> bool:
     """Allows the hardcoded admin OR anyone with Manage Guild permission."""
     if interaction.user.id == ADMIN_USER_ID:
         return True
-    if interaction.guild and interaction.user.guild_permissions.manage_guild:
+    if interaction.guild and isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.manage_guild:
         return True
     return False
 # ==========================================================
