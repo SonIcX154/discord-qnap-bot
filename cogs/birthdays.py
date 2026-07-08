@@ -4,6 +4,7 @@ import datetime
 import random
 import asyncio
 from datetime import date, time, timedelta
+from typing import Any
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -19,7 +20,7 @@ class BirthdayCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.data: dict = {}
+        self.data: dict[str, Any] = {}
         self._load_data()
         self._last_announce_date = None   # Prevent duplicate runs in the same minute
 
@@ -44,7 +45,7 @@ class BirthdayCog(commands.Cog):
         except Exception as e:
             print(f"[Birthday] Failed to save data: {e}")
 
-    def _get_guild_data(self, guild_id: int) -> dict:
+    def _get_guild_data(self, guild_id: int) -> dict[str, Any]:
         gid = str(guild_id)
         if gid not in self.data:
             self.data[gid] = {}
@@ -132,7 +133,7 @@ class BirthdayCog(commands.Cog):
                 print(f"[Birthday] Configured announce channel {channel_id} is not a TextChannel in guild {guild.id}")
                 continue
 
-            celebrants = []
+            celebrants: list[str] = []
             for uid_str, b in gdata.items():
                 if uid_str == "config":
                     continue
@@ -160,9 +161,9 @@ class BirthdayCog(commands.Cog):
                     msg = f"## \ud83c\udf89Alles Gute zum Geburtstag {', '.join(celebrants[:-1])} und {celebrants[-1]}!"
                 try:
                     await channel.send(msg)
-                    print(f"[Birthday] ✅ Sent announcement to #{channel.name} ({channel.id}) in guild {guild.id} for {len(celebrants)} celebrant(s)")
+                    print(f"[Birthday] \u2705 Sent announcement to #{channel.name} ({channel.id}) in guild {guild.id} for {len(celebrants)} celebrant(s)")
                 except Exception as e:
-                    print(f"[Birthday] ❌ Failed to send announcement in guild {guild.id}: {e}")
+                    print(f"[Birthday] \u274c Failed to send announcement in guild {guild.id}: {e}")
             else:
                 print(f"[Birthday] No birthdays today in guild {guild.id} (channel #{channel.name} is configured)")
 
@@ -227,7 +228,7 @@ class BirthdayCog(commands.Cog):
             return
         gdata = self._get_guild_data(interaction.guild.id)
         today = date.today()
-        upcoming = []
+        upcoming: list[tuple[int, str]] = []
         for uid_str, b in gdata.items():
             if uid_str == "config":
                 continue
@@ -250,7 +251,7 @@ class BirthdayCog(commands.Cog):
             return
         gdata = self._get_guild_data(interaction.guild.id)
         today = date.today()
-        celebrants = []
+        celebrants: list[str] = []
         for uid_str, b in gdata.items():
             if uid_str == "config":
                 continue
@@ -306,7 +307,7 @@ class BirthdayCog(commands.Cog):
 
         for count in [1, 2, 3]:
             selected = members[:count]
-            celebrants = []
+            celebrants: list[str] = []
             for m in selected:
                 age_str = ""
                 celebrants.append(f"<@{m.id}>{age_str}")
@@ -318,7 +319,12 @@ class BirthdayCog(commands.Cog):
             else:
                 msg = f"## \ud83c\udf89Alles Gute zum Geburtstag {', '.join(celebrants[:-1])} und {celebrants[-1]}!"
 
-            await interaction.channel.send(msg)
+            # Safe send (works in TextChannel and Thread)
+            if isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
+                await interaction.channel.send(msg)
+            else:
+                await interaction.followup.send(msg)
+
             await asyncio.sleep(1.2)
 
         await interaction.followup.send("✅ Test-Nachrichten (mit echten Pings) wurden in den Kanal gesendet.", ephemeral=True)
