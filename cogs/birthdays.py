@@ -144,7 +144,7 @@ class BirthdayCog(commands.Cog):
                             try:
                                 age = check_date.year - int(b["year"])
                                 if age > 0:
-                                    age_str = f" (wird {age}!)✨"
+                                    age_str = f" (wird {age}!)\u2728"
                             except:
                                 pass
                         celebrants.append(f"<@{uid_str}>{age_str}")
@@ -170,7 +170,7 @@ class BirthdayCog(commands.Cog):
 
     @app_commands.command(name="geburtstag-setzen", description="Lege deinen Geburtstag fest (Jahr optional)")
     @app_commands.describe(datum="Datum (z.B. 7 Januar oder 25-12)", jahr="Geburtsjahr (optional)")
-    async def birthday_set(self, interaction: discord.Interaction, datum: str, jahr: app_commands.Range[int, 1900, 2026] = None):
+    async def birthday_set(self, interaction: discord.Interaction, datum: str, jahr: app_commands.Range[int, 1900, 2026] | None = None):
         if not interaction.guild:
             await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
             return
@@ -187,7 +187,7 @@ class BirthdayCog(commands.Cog):
     @app_commands.command(name="birthday-setfor", description="Geburtstag für ein anderes Mitglied setzen (Admin)")
     @app_commands.describe(benutzer="Mitglied", datum="Datum", jahr="Geburtsjahr (optional)")
     @app_commands.default_permissions(manage_guild=True)
-    async def birthday_setfor(self, interaction: discord.Interaction, benutzer: discord.Member, datum: str, jahr: app_commands.Range[int, 1900, 2026] = None):
+    async def birthday_setfor(self, interaction: discord.Interaction, benutzer: discord.Member, datum: str, jahr: app_commands.Range[int, 1900, 2026] | None = None):
         if not interaction.guild:
             await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
             return
