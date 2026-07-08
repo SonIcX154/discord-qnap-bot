@@ -296,6 +296,10 @@ class BirthdayCog(commands.Cog):
     @app_commands.command(name="test-birthday-messages", description="Testet die automatischen Geburtstagsnachrichten mit echten Pings (Admin only)")
     @app_commands.default_permissions(manage_guild=True)
     async def test_birthday_messages(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
+            return
+
         await interaction.response.defer(ephemeral=True)
 
         members = [m for m in interaction.guild.members if not m.bot]
