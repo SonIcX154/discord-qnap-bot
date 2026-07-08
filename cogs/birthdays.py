@@ -66,6 +66,8 @@ class BirthdayCog(commands.Cog):
         next_name = "Jemand"
         days_until_next = 999
 
+        guild = self.bot.get_guild(guild_id)
+
         for uid_str, entry in gdata.items():
             if uid_str == "config":
                 continue
@@ -79,12 +81,10 @@ class BirthdayCog(commands.Cog):
 
                 if d_until < days_until_next:
                     days_until_next = d_until
-                    # Try to get a nice name
-                    try:
-                        member = self.bot.get_guild(guild_id).get_member(int(uid_str)) if self.bot.get_guild(guild_id) else None
-                        next_name = member.display_name if member else uid_str
-                    except:
-                        next_name = uid_str
+                    if guild:
+                        member = guild.get_member(int(uid_str))
+                        if member:
+                            next_name = member.display_name
             except:
                 continue
 
