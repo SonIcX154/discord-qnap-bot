@@ -73,13 +73,13 @@ python bot.py
 
 ## Environment variables
 
-| Variable                  | Required | Purpose |
-|---------------------------|----------|---------|
-| `DISCORD_TOKEN`           | yes      | Discord bot token |
-| `VOICE_CHANNEL_ID`        | yes      | Voice channel to keep connected |
-| `BIRTHDAY_DATA_PATH`      | no       | Path to birthday JSON file |
-| `BIRTHDAY_ANNOUNCE_HOUR`  | no       | Hour (0-23) when daily birthday announcements are sent (default: 0 / midnight) |
-| `BIRTHDAY_ANNOUNCE_MINUTE`| no       | Minute when daily birthday announcements are sent (default: 0) |
+| Variable                   | Required | Purpose                                                              |
+|----------------------------|----------|----------------------------------------------------------------------|
+| `DISCORD_TOKEN`            | yes      | Discord bot token                                                    |
+| `VOICE_CHANNEL_ID`         | yes      | Voice channel to keep connected                                      |
+| `BIRTHDAY_DATA_PATH`       | no       | Path to birthday JSON file                                           |
+| `BIRTHDAY_ANNOUNCE_HOUR`   | no       | Hour (0-23) when daily birthday announcements are sent (default: 0)  |
+| `BIRTHDAY_ANNOUNCE_MINUTE` | no       | Minute when daily birthday announcements are sent (default: 0)       |
 
 ## Birthday commands
 
