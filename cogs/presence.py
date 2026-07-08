@@ -11,7 +11,7 @@ class PresenceCog(commands.Cog):
         self.bot = bot
         self.update_presence.start()
 
-    def cog_unload(self):
+    async def cog_unload(self):
         self.update_presence.cancel()
 
     @tasks.loop(minutes=60)
@@ -21,10 +21,9 @@ class PresenceCog(commands.Cog):
         if not birthday_cog or not self.bot.guilds:
             return
 
-        guild = self.bot.guilds[0]  # Da pro Server ein Bot
-        gdata = birthday_cog.data.get(str(guild.id), {})
+        guild = self.bot.guilds[0]
+        gdata = birthday_cog.data.get(str(guild.id), {})  # type: ignore[attr-defined]
 
-        # Gesamtzahl der Geburtstage (ohne config)
         total_birthdays = len([k for k in gdata if k != "config"])
 
         if total_birthdays == 0:
@@ -35,7 +34,6 @@ class PresenceCog(commands.Cog):
             await self.bot.change_presence(activity=activity)
             return
 
-        # Nächsten Geburtstag finden
         today = date.today()
         next_name = "Jemand"
         days_until_next = 999
@@ -44,12 +42,12 @@ class PresenceCog(commands.Cog):
             if uid_str == "config":
                 continue
             try:
-                month = entry.get("month")
-                day = entry.get("day")
+                month = entry.get("month")  # type: ignore[union-attr]
+                day = entry.get("day")      # type: ignore[union-attr]
                 if month is None or day is None:
                     continue
 
-                d_until, _ = birthday_cog._get_days_until(month, day, today)
+                d_until, _ = birthday_cog._get_days_until(month, day, today)  # type: ignore[attr-defined]
 
                 if d_until < days_until_next:
                     days_until_next = d_until
@@ -58,7 +56,6 @@ class PresenceCog(commands.Cog):
             except Exception:
                 continue
 
-        # Rich Presence Text bauen
         if days_until_next == 0:
             text = f"Heute hat {next_name} Geburtstag! 🎉 • {total_birthdays} Geburtstage"
         elif days_until_next == 1:
@@ -66,7 +63,6 @@ class PresenceCog(commands.Cog):
         else:
             text = f"Nächster: {next_name} in {days_until_next} Tagen 🎂 • {total_birthdays} Geburtstage"
 
-        # Discord limitiert Activity Name auf 128 Zeichen
         activity = Activity(
             type=ActivityType.watching,
             name=text[:128]
