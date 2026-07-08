@@ -144,7 +144,7 @@ class BirthdayCog(commands.Cog):
                             try:
                                 age = check_date.year - int(b["year"])
                                 if age > 0:
-                                    age_str = f" (turns {age}!)\u2728"
+                                    age_str = f" (wird {age}!)\u2728"
                             except:
                                 pass
                         celebrants.append(f"<@{uid_str}>{age_str}")
