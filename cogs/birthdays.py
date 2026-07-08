@@ -203,7 +203,7 @@ class BirthdayCog(commands.Cog):
 
     @app_commands.command(name="geburtstag-entfernen", description="Deinen Geburtstag entfernen oder den eines anderen Mitglieds (Admin)")
     @app_commands.describe(benutzer="Leer lassen, um deinen eigenen zu entfernen")
-    async def birthday_remove(self, interaction: discord.Interaction, benutzer: discord.Member = None):
+    async def birthday_remove(self, interaction: discord.Interaction, benutzer: discord.Member | None = None):
         if not interaction.guild:
             await interaction.response.send_message("Nur in einem Server nutzbar.", ephemeral=True)
             return
@@ -213,7 +213,8 @@ class BirthdayCog(commands.Cog):
         if uid not in gdata or uid == "config":
             await interaction.response.send_message("Kein Geburtstag gefunden.", ephemeral=True)
             return
-        if target.id != interaction.user.id and not interaction.user.guild_permissions.manage_guild:
+        # Safe permission check (interaction.user is Member in guild context)
+        if target.id != interaction.user.id and isinstance(interaction.user, discord.Member) and not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("Keine Berechtigung.", ephemeral=True)
             return
         del gdata[uid]
