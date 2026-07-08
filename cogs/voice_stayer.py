@@ -71,7 +71,7 @@ class VoiceStayer(commands.Cog):
             voice_client = discord.utils.get(
                 self.bot.voice_clients, guild=interaction.guild
             )
-            if voice_client and voice_client.is_connected():
+            if voice_client and voice_client.is_connected(): # type: ignore
                 try:
                     await voice_client.disconnect(force=True)
                     print(f"[VoiceStayer] Disconnected from voice channel (stayer disabled by {interaction.user})")
@@ -84,7 +84,7 @@ class VoiceStayer(commands.Cog):
             )
 
     @toggle_voice_stayer.error
-    async def toggle_voice_stayer_error(self, interaction: discord.Interaction, error):
+    async def toggle_voice_stayer_error(self, interaction: discord.Interaction, error): # type: ignore
         if isinstance(error, app_commands.CheckFailure):
             await interaction.response.send_message(
                 "❌ You need **Manage Guild** permission or be the bot admin to use this command.",
@@ -120,9 +120,9 @@ class VoiceStayer(commands.Cog):
 
                 if voice_client is None:
                     needs_reconnect = True
-                elif not voice_client.is_connected():
+                elif not voice_client.is_connected(): # type: ignore
                     needs_reconnect = True
-                elif voice_client.channel.id != self.voice_channel_id:
+                elif voice_client.channel.id != self.voice_channel_id: # type: ignore
                     # Connected to wrong channel - disconnect and move
                     try:
                         await voice_client.disconnect(force=True)
@@ -132,7 +132,7 @@ class VoiceStayer(commands.Cog):
 
                 if needs_reconnect:
                     try:
-                        if voice_client and voice_client.is_connected():
+                        if voice_client and voice_client.is_connected(): # type: ignore
                             await voice_client.disconnect(force=True)
                         await channel.connect(reconnect=True)
                         print(f"✅ [VoiceStayer] Connected to voice channel: {channel.name} ({channel.id})")

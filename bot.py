@@ -39,6 +39,9 @@ class QNAPBot(commands.Bot):
         print("Cog loading complete.")
 
     async def on_ready(self):
+        if self.user is None:
+            return
+
         print(f"🤖 Logged in as {self.user} (ID: {self.user.id})")
         print(f"Connected to {len(self.guilds)} guilds.")
 
