@@ -3,10 +3,11 @@ import os
 import datetime
 import random
 import asyncio
-from datetime import date, time, timedelta
+from datetime import date
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
+from typing import Any, Dict, Tuple, Optional, List
 
 
 DATA_FILE = os.getenv("BIRTHDAY_DATA_PATH", "data/birthdays.json")
@@ -19,7 +20,7 @@ class BirthdayCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.data: dict = {}
+        self.data: Dict[str, Any] = {}
         self._load_data()
         self._last_announce_date = None   # Prevent duplicate runs in the same minute
 
@@ -44,13 +45,13 @@ class BirthdayCog(commands.Cog):
         except Exception as e:
             print(f"[Birthday] Failed to save data: {e}")
 
-    def _get_guild_data(self, guild_id: int) -> dict:
+    def _get_guild_data(self, guild_id: int) -> Dict[str, Any]:
         gid = str(guild_id)
         if gid not in self.data:
             self.data[gid] = {}
         return self.data[gid]
 
-    def _parse_date(self, date_str: str) -> tuple[int, int] | None:
+    def _parse_date(self, date_str: str) -> Optional[Tuple[int, int]]:
         if not date_str:
             return None
         s = date_str.strip()
@@ -132,19 +133,18 @@ class BirthdayCog(commands.Cog):
                 print(f"[Birthday] Configured announce channel {channel_id} is not a TextChannel in guild {guild.id}")
                 continue
 
-            celebrants = []
+            celebrants: List[str] = []
             for uid_str, b in gdata.items():
                 if uid_str == "config":
                     continue
                 try:
                     if b.get("month") == check_date.month and b.get("day") == check_date.day:
-                        # Use real Discord mention for pings
                         age_str = ""
                         if b.get("year"):
                             try:
                                 age = check_date.year - int(b["year"])
                                 if age > 0:
-                                    age_str = f" (wird {age}!)\u2728"
+                                    age_str = f" (wird {age}!)✨"
                             except:
                                 pass
                         celebrants.append(f"<@{uid_str}>{age_str}")
