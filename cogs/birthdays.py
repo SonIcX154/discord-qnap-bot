@@ -160,9 +160,9 @@ class BirthdayCog(commands.Cog):
                     msg = f"## \ud83c\udf89Alles Gute zum Geburtstag {', '.join(celebrants[:-1])} und {celebrants[-1]}!"
                 try:
                     await channel.send(msg)
-                    print(f"[Birthday] ✅ Sent announcement to #{channel.name} ({channel.id}) in guild {guild.id} for {len(celebrants)} celebrant(s)")
+                    print(f"[Birthday] \u2705 Sent announcement to #{channel.name} ({channel.id}) in guild {guild.id} for {len(celebrants)} celebrant(s)")
                 except Exception as e:
-                    print(f"[Birthday] ❌ Failed to send announcement in guild {guild.id}: {e}")
+                    print(f"[Birthday] \u274c Failed to send announcement in guild {guild.id}: {e}")
             else:
                 print(f"[Birthday] No birthdays today in guild {guild.id} (channel #{channel.name} is configured)")
 
@@ -227,7 +227,7 @@ class BirthdayCog(commands.Cog):
             return
         gdata = self._get_guild_data(interaction.guild.id)
         today = date.today()
-        upcoming = []
+        upcoming: list[tuple[int, str]] = []
         for uid_str, b in gdata.items():
             if uid_str == "config":
                 continue
@@ -250,7 +250,7 @@ class BirthdayCog(commands.Cog):
             return
         gdata = self._get_guild_data(interaction.guild.id)
         today = date.today()
-        celebrants = []
+        celebrants: list[str] = []
         for uid_str, b in gdata.items():
             if uid_str == "config":
                 continue
@@ -306,7 +306,7 @@ class BirthdayCog(commands.Cog):
 
         for count in [1, 2, 3]:
             selected = members[:count]
-            celebrants = []
+            celebrants: list[str] = []
             for m in selected:
                 age_str = ""
                 celebrants.append(f"<@{m.id}>{age_str}")
@@ -318,7 +318,12 @@ class BirthdayCog(commands.Cog):
             else:
                 msg = f"## \ud83c\udf89Alles Gute zum Geburtstag {', '.join(celebrants[:-1])} und {celebrants[-1]}!"
 
-            await interaction.channel.send(msg)
+            # Safe send (works in TextChannel and Thread)
+            if isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
+                await interaction.channel.send(msg)
+            else:
+                await interaction.followup.send(msg)
+
             await asyncio.sleep(1.2)
 
         await interaction.followup.send("✅ Test-Nachrichten (mit echten Pings) wurden in den Kanal gesendet.", ephemeral=True)
