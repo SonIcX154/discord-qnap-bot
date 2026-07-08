@@ -51,6 +51,49 @@ class BirthdayCog(commands.Cog):
             self.data[gid] = {}
         return self.data[gid]
 
+    def get_next_birthday_info(self, guild_id: int) -> dict[str, Any] | None:
+        """Returns info about the next upcoming birthday in this guild.
+
+        Returns a dict with: name, days_until, total or None if no birthdays exist.
+        """
+        gdata = self.data.get(str(guild_id), {})
+        today = date.today()
+
+        total = len([k for k in gdata if k != "config"])
+        if total == 0:
+            return None
+
+        next_name = "Jemand"
+        days_until_next = 999
+
+        for uid_str, entry in gdata.items():
+            if uid_str == "config":
+                continue
+            try:
+                month = entry.get("month")
+                day = entry.get("day")
+                if month is None or day is None:
+                    continue
+
+                d_until, _ = self._get_days_until(month, day, today)
+
+                if d_until < days_until_next:
+                    days_until_next = d_until
+                    # Try to get a nice name
+                    try:
+                        member = self.bot.get_guild(guild_id).get_member(int(uid_str)) if self.bot.get_guild(guild_id) else None
+                        next_name = member.display_name if member else uid_str
+                    except:
+                        next_name = uid_str
+            except:
+                continue
+
+        return {
+            "name": next_name,
+            "days_until": days_until_next,
+            "total": total
+        }
+
     def _parse_date(self, date_str: str) -> Optional[Tuple[int, int]]:
         if not date_str:
             return None
