@@ -571,6 +571,6 @@ class EconomyCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    # Wichtig: Wir registrieren den Cog explizit unter dem Namen "Economy",
-    # damit andere Cogs (Slots, Roulette) ihn mit get_cog("Economy") finden.
-    await bot.add_cog(EconomyCog(bot), name="Economy")
+    cog = EconomyCog(bot)
+    await bot.add_cog(cog)
+    bot._economy_cog = cog

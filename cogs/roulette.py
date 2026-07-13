@@ -111,7 +111,9 @@ class RouletteCog(commands.Cog):
     @app_commands.describe(bet="Dein Einsatz (Min. 10)")
     @app_commands.checks.cooldown(1, 5.0, key=lambda interaction: interaction.user.id)
     async def roulette(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]):
-        economy = self.bot.get_cog("Economy")
+        economy = getattr(self.bot, "_economy_cog", None)
+        if not economy:
+            economy = self.bot.get_cog("EconomyCog")
         if not economy:
             await interaction.response.send_message("Economy system nicht verfügbar.", ephemeral=True)
             return
