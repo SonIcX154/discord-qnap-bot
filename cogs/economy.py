@@ -10,8 +10,10 @@ from typing import Optional, List, Tuple
 
 try:
     from utils.bet_mixin import BetAdjustableMixin
+    from utils.replay_mixin import ReplayMixin
 except ImportError:
     from ..utils.bet_mixin import BetAdjustableMixin
+    from ..utils.replay_mixin import ReplayMixin
 
 
 # ====================== CONFIG ======================
@@ -129,12 +131,24 @@ class LeaderboardView(discord.ui.View):
             child.disabled = True
 
 
-class CoinflipView(BetAdjustableMixin, discord.ui.View):
-    """Interactive Coinflip with bet adjustment and choice of Kopf or Zahl."""
+class CoinflipView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
+    """Interactive Coinflip with bet adjustment and replay."""
 
     def __init__(self, economy_cog, interaction: discord.Interaction, bet: int, currency: str):
         BetAdjustableMixin.__init__(self, economy_cog, interaction.user.id, bet, currency)
+        ReplayMixin.__init__(self, interaction.user.id)
         discord.ui.View.__init__(self, timeout=120)
+
+    async def _do_replay(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="🪙 Coinflip - Wähle deine Seite",
+            description=f"Du hast **{self.bet:,} {self.currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann **Kopf** oder **Zahl**:",
+            color=discord.Color.gold()
+        )
+        embed.set_footer(text="Timeout nach 2 Minuten")
+
+        new_view = CoinflipView(self.economy, interaction, self.bet, self.currency)
+        await interaction.response.edit_message(embed=embed, view=new_view)
 
     async def _resolve(self, interaction: discord.Interaction, choice: str):
         for child in self.children:
@@ -161,7 +175,6 @@ class CoinflipView(BetAdjustableMixin, discord.ui.View):
         embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
         embed.set_footer(text=f"Gespielt von {interaction.user.display_name}")
 
-        # Replay button
         new_view = CoinflipView(self.economy, interaction, self.bet, self.currency)
         await interaction.response.edit_message(embed=embed, view=new_view)
 
