@@ -12,14 +12,108 @@ from typing import Optional, List, Tuple
 # ====================== CONFIG ======================
 ECONOMY_DB_PATH = os.getenv("ECONOMY_DATA_PATH", "data/economy.db")
 DEFAULT_CURRENCY = "Coins"
+LEADERBOARD_PER_PAGE = 10
 
-# Earning rates (balanced so chat and voice give similar income per active time)
-CHAT_COINS = 3
-CHAT_COOLDOWN_SECONDS = 45
-VOICE_COINS_PER_MINUTE = 3
-DAILY_COINS_MIN = 80
-DAILY_COINS_MAX = 120
-DAILY_COOLDOWN_SECONDS = 86400  # 24 hours
+
+class LeaderboardView(discord.ui.View):
+    """Interactive leaderboard with pagination and 'My Position' button."""
+
+    def __init__(self, cog: "EconomyCog", interaction: discord.Interaction, currency: str):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.interaction = interaction
+        self.currency = currency
+        self.current_page = 1
+        self.total_pages = 1
+        self.highlight_user_id = interaction.user.id
+
+    async def get_total_pages(self) -> int:
+        total_users = await self.cog.get_total_users()
+        return max(1, (total_users + LEADERBOARD_PER_PAGE - 1) // LEADERBOARD_PER_PAGE)
+
+    async def update_embed(self) -> discord.Embed:
+        self.total_pages = await self.get_total_pages()
+        users = await self.cog.get_leaderboard_page(self.current_page, LEADERBOARD_PER_PAGE)
+
+        embed = discord.Embed(
+            title=f"🏆 {self.currency} Leaderboard (Seite {self.current_page}/{self.total_pages})",
+            color=discord.Color.gold()
+        )
+
+        lines = []
+        start_rank = (self.current_page - 1) * LEADERBOARD_PER_PAGE + 1
+
+        for i, (user_id, balance) in enumerate(users):
+            rank = start_rank + i
+            member = self.interaction.guild.get_member(user_id) if self.interaction.guild else None
+            if member:
+                name = member.display_name
+            else:
+                try:
+                    if self.interaction.guild:
+                        member = await self.interaction.guild.fetch_member(user_id)
+                        name = member.display_name
+                    else:
+                        name = f"User {user_id}"
+                except:
+                    name = f"User {user_id}"
+
+            # Highlight the command user
+            if user_id == self.highlight_user_id:
+                prefix = "➤ **"
+                suffix = "** ⬅️"
+            else:
+                prefix = ""
+                suffix = ""
+
+            if rank == 1:
+                medal = "🥇"
+            elif rank == 2:
+                medal = "🥈"
+            elif rank == 3:
+                medal = "🥉"
+            else:
+                medal = f"{rank}."
+
+            lines.append(f"{medal} {prefix}{name}{suffix} — {balance:,} {self.currency}")
+
+        embed.description = "\n".join(lines) if lines else "Keine Daten vorhanden."
+        embed.set_footer(text="Global pro Bot-Instanz • Klicke auf 'Meine Position'")
+        return embed
+
+    @discord.ui.button(label="◀️ Zurück", style=discord.ButtonStyle.secondary)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page > 1:
+            self.current_page -= 1
+        embed = await self.update_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="▶️ Weiter", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        total = await self.get_total_pages()
+        if self.current_page < total:
+            self.current_page += 1
+        embed = await self.update_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="📍 Meine Position", style=discord.ButtonStyle.primary)
+    async def my_position_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        rank = await self.cog.get_user_rank(interaction.user.id)
+        if rank is None:
+            await interaction.response.send_message("Du hast noch keine Coins.", ephemeral=True)
+            return
+
+        # Calculate which page the user is on
+        new_page = (rank - 1) // LEADERBOARD_PER_PAGE + 1
+        self.current_page = new_page
+        self.highlight_user_id = interaction.user.id
+
+        embed = await self.update_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
 
 
 class EconomyCog(commands.Cog):
@@ -28,7 +122,7 @@ class EconomyCog(commands.Cog):
     Features:
     - Global user balances (one DB per bot instance)
     - Earn via chat + voice (only active users: not deaf/mute)
-    - /daily, /balance, /leaderboard
+    - Interactive /leaderboard with pagination + My Position
     - Coinflip + Slots
     - Admin commands (/economy give/take/set)
     - Currency name changeable by admins
@@ -232,6 +326,41 @@ class EconomyCog(commands.Cog):
             return
         user_id = message.author.id
         await self.claim_chat_earn(user_id)  # silent
+
+    # ==================== LEADERBOARD DATA METHODS ====================
+
+    async def get_total_users(self) -> int:
+        """Returns total number of users with a balance > 0."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("SELECT COUNT(*) FROM users WHERE balance > 0") as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else 0
+
+    async def get_leaderboard_page(self, page: int, per_page: int = 10) -> List[Tuple[int, int]]:
+        """Returns a page of (user_id, balance) sorted by balance DESC."""
+        offset = (page - 1) * per_page
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT user_id, balance FROM users ORDER BY balance DESC LIMIT ? OFFSET ?",
+                (per_page, offset)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [(row[0], row[1]) for row in rows]
+
+    async def get_user_rank(self, user_id: int) -> Optional[int]:
+        """Returns the rank of a user (1 = richest). Returns None if user has no balance."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT COUNT(*) + 1 FROM users WHERE balance > (SELECT balance FROM users WHERE user_id = ?)",
+                (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    rank = row[0]
+                    # Verify the user actually exists
+                    bal = await self.get_balance(user_id)
+                    return rank if bal > 0 else None
+                return None
 
     # ==================== ADMIN: SET CURRENCY ====================
 
@@ -446,51 +575,32 @@ class EconomyCog(commands.Cog):
         else:
             raise error
 
-    # ==================== LEADERBOARD ====================
+    # ==================== LEADERBOARD (Interactive) ====================
 
-    async def get_top_users(self, limit: int = 10) -> List[Tuple[int, int]]:
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(
-                "SELECT user_id, balance FROM users ORDER BY balance DESC LIMIT ?", (limit,)
-            ) as cursor:
-                rows = await cursor.fetchall()
-                return [(row[0], row[1]) for row in rows]
-
-    @app_commands.command(name="leaderboard", description="Zeigt die Top 10 reichsten User an")
+    @app_commands.command(name="leaderboard", description="Zeigt das interaktive Leaderboard an")
+    @app_commands.checks.cooldown(1, 60.0, key=lambda interaction: interaction.user.id)
     async def leaderboard(self, interaction: discord.Interaction):
         currency = await self.get_currency_name()
-        top_users = await self.get_top_users(10)
+        total_users = await self.get_total_users()
 
-        if not top_users:
+        if total_users == 0:
             await interaction.response.send_message("Noch keine Daten im Leaderboard.", ephemeral=True)
             return
 
-        embed = discord.Embed(
-            title=f"🏆 {currency} Leaderboard (Top 10)",
-            color=discord.Color.gold()
-        )
+        view = LeaderboardView(self, interaction, currency)
+        embed = await view.update_embed()
 
-        lines = []
-        for i, (user_id, balance) in enumerate(top_users, 1):
-            member = interaction.guild.get_member(user_id) if interaction.guild else None
-            if member:
-                name = member.display_name
-            else:
-                try:
-                    if interaction.guild:
-                        member = await interaction.guild.fetch_member(user_id)
-                        name = member.display_name
-                    else:
-                        name = f"User {user_id}"
-                except:
-                    name = f"User {user_id}"
+        await interaction.response.send_message(embed=embed, view=view)
 
-            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-            lines.append(f"{medal} **{name}** — {balance:,} {currency}")
-
-        embed.description = "\n".join(lines)
-        embed.set_footer(text="Global pro Bot-Instanz • /balance für deinen Stand")
-        await interaction.response.send_message(embed=embed)
+    @leaderboard.error
+    async def leaderboard_error(self, interaction: discord.Interaction, error):
+        if isinstance(error, app_commands.CommandOnCooldown):
+            await interaction.response.send_message(
+                f"⏳ Das Leaderboard hat einen Cooldown von 60 Sekunden. Warte bitte noch **{error.retry_after:.0f}s**.",
+                ephemeral=True
+            )
+        else:
+            raise error
 
     # ==================== USER COMMANDS ====================
 
