@@ -8,6 +8,11 @@ from discord.ext import commands
 from discord import app_commands
 from typing import Optional, List, Tuple
 
+try:
+    from utils.bet_mixin import BetAdjustableMixin
+except ImportError:
+    from ..utils.bet_mixin import BetAdjustableMixin
+
 
 # ====================== CONFIG ======================
 ECONOMY_DB_PATH = os.getenv("ECONOMY_DATA_PATH", "data/economy.db")
@@ -124,15 +129,12 @@ class LeaderboardView(discord.ui.View):
             child.disabled = True
 
 
-class CoinflipView(discord.ui.View):
-    """Interactive Coinflip with choice of Kopf or Zahl."""
+class CoinflipView(BetAdjustableMixin, discord.ui.View):
+    """Interactive Coinflip with bet adjustment and choice of Kopf or Zahl."""
 
-    def __init__(self, cog: "EconomyCog", interaction: discord.Interaction, bet: int, currency: str):
-        super().__init__(timeout=120)
-        self.cog = cog
-        self.user_id = interaction.user.id
-        self.bet = bet
-        self.currency = currency
+    def __init__(self, economy_cog, interaction: discord.Interaction, bet: int, currency: str):
+        BetAdjustableMixin.__init__(self, economy_cog, interaction.user.id, bet, currency)
+        discord.ui.View.__init__(self, timeout=120)
 
     async def _resolve(self, interaction: discord.Interaction, choice: str):
         for child in self.children:
@@ -142,12 +144,12 @@ class CoinflipView(discord.ui.View):
         won = (choice == result)
 
         if won:
-            new_balance = await self.cog.add_coins(self.user_id, self.bet)
+            new_balance = await self.economy.add_coins(self.user_id, self.bet)
             color = discord.Color.green()
             title = "🪙 Coinflip - Gewonnen!"
             win_text = f"+{self.bet:,} {self.currency}"
         else:
-            new_balance = await self.cog.get_balance(self.user_id)
+            new_balance = await self.economy.get_balance(self.user_id)
             color = discord.Color.red()
             title = "🪙 Coinflip - Verloren"
             win_text = f"-{self.bet:,} {self.currency}"
@@ -159,16 +161,18 @@ class CoinflipView(discord.ui.View):
         embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
         embed.set_footer(text=f"Gespielt von {interaction.user.display_name}")
 
-        await interaction.response.edit_message(embed=embed, view=self)
+        # Replay button
+        new_view = CoinflipView(self.economy, interaction, self.bet, self.currency)
+        await interaction.response.edit_message(embed=embed, view=new_view)
 
-    @discord.ui.button(label="🪙 Kopf", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="🪙 Kopf", style=discord.ButtonStyle.primary, row=1)
     async def choose_kopf(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Nur der Spieler darf wählen.", ephemeral=True)
             return
         await self._resolve(interaction, "Kopf")
 
-    @discord.ui.button(label="🪙 Zahl", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="🪙 Zahl", style=discord.ButtonStyle.primary, row=1)
     async def choose_zahl(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Nur der Spieler darf wählen.", ephemeral=True)
@@ -493,7 +497,7 @@ class EconomyCog(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="coinflip", description="Wähle Kopf oder Zahl und gewinne den 2x Einsatz")
-    @app_commands.describe(bet="Einsatz in Währung (Min. 10)")
+    @app_commands.describe(bet="Einsatz (Min. 10)")
     @app_commands.checks.cooldown(1, 3.0, key=lambda interaction: interaction.user.id)
     async def coinflip(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]):
         user_id = interaction.user.id
@@ -508,7 +512,11 @@ class EconomyCog(commands.Cog):
             await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
             return
 
-        embed = discord.Embed(title="🪙 Coinflip - Wähle deine Seite", description=f"Du hast **{bet:,} {currency}** gesetzt.\n\nWähle **Kopf** oder **Zahl**:", color=discord.Color.gold())
+        embed = discord.Embed(
+            title="🪙 Coinflip - Wähle deine Seite",
+            description=f"Du hast **{bet:,} {currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann **Kopf** oder **Zahl**:",
+            color=discord.Color.gold()
+        )
         embed.set_footer(text="Timeout nach 2 Minuten")
 
         view = CoinflipView(self, interaction, bet, currency)
