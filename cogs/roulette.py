@@ -4,6 +4,13 @@ from discord.ext import commands
 from discord import app_commands
 
 
+# TODO: Roulette Animation verbessern
+# Aktuell wird das Ergebnis direkt angezeigt.
+# Besser wäre eine richtige Animation (z.B. rollende Kugel / Zahlen die nacheinander angezeigt werden,
+# ähnlich wie bei echten Roulette-Tischen oder mit mehreren Schritten + Verzögerung).
+# Das würde das Spiel deutlich cooler und spannender machen.
+
+
 class RouletteView(discord.ui.View):
     """Interactive Roulette betting view with buttons."""
 
@@ -111,9 +118,7 @@ class RouletteCog(commands.Cog):
     @app_commands.describe(bet="Dein Einsatz (Min. 10)")
     @app_commands.checks.cooldown(1, 5.0, key=lambda interaction: interaction.user.id)
     async def roulette(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]):
-        economy = getattr(self.bot, "_economy_cog", None)
-        if not economy:
-            economy = self.bot.get_cog("EconomyCog")
+        economy = self.bot.get_cog("Economy")
         if not economy:
             await interaction.response.send_message("Economy system nicht verfügbar.", ephemeral=True)
             return
