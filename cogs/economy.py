@@ -747,7 +747,7 @@ class EconomyCog(commands.Cog):
 
     @app_commands.command(name="daily", description="Täglicher Bonus (einmal alle 24h)")
     async def daily(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=False)  # public message
 
         user_id = interaction.user.id
         currency = await self.get_currency_name()
@@ -759,7 +759,7 @@ class EconomyCog(commands.Cog):
             minutes = (remaining % 3600) // 60
             await interaction.followup.send(
                 f"⏳ Daily schon geholt. Nächster in **{hours}h {minutes}m**.",
-                ephemeral=True
+                ephemeral=True   # cooldown message remains private
             )
             return
 
@@ -767,10 +767,10 @@ class EconomyCog(commands.Cog):
         new_balance = await self.get_balance(user_id)
 
         embed = discord.Embed(title="🎁 Täglicher Bonus", color=discord.Color.green())
-        embed.description = f"Du hast **{amount} {currency}** erhalten!"
+        embed.description = f"**{interaction.user.mention}** hat **{amount} {currency}** erhalten!"
         embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
         embed.set_footer(text="Bis morgen! 💰")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=False)  # public reward message
 
 
 async def setup(bot: commands.Bot):
