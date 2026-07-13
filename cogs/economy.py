@@ -216,7 +216,7 @@ class EconomyCog(commands.Cog):
     - Global user balances (one DB per bot instance)
     - Earn via chat + voice (only active users: not deaf/mute)
     - Interactive /leaderboard with pagination + My Position
-    - Coinflip + Slots (with animation) + Roulette (with buttons)
+    - Coinflip + Slots (with fast animation) + Roulette (with buttons)
     - Admin commands (/economy-give, /economy-take, /economy-set)
     - Currency name changeable by admins
     """
@@ -610,7 +610,7 @@ class EconomyCog(commands.Cog):
             await interaction.response.send_message("❌ Fehler beim Einsatz.", ephemeral=True)
             return
 
-        # Initial spinning message
+        # Fast spinning animation (4 spins, ~1 second total)
         spinning_embed = discord.Embed(
             title="🎰 Slots - Die Walzen drehen sich...",
             description="** | | | **",
@@ -618,12 +618,11 @@ class EconomyCog(commands.Cog):
         )
         await interaction.response.send_message(embed=spinning_embed)
 
-        # Animation: 6 spins
-        for _ in range(6):
+        for _ in range(4):
             temp_reels = [random.choice(self.SLOT_SYMBOLS) for _ in range(3)]
             spinning_embed.description = f"**{' | '.join(temp_reels)}**"
             await interaction.edit_original_response(embed=spinning_embed)
-            await asyncio.sleep(0.38)
+            await asyncio.sleep(0.28)
 
         # Final result
         reels, multiplier, win_text = self._roll_slots()
@@ -738,6 +737,8 @@ class EconomyCog(commands.Cog):
 
     @app_commands.command(name="daily", description="Täglicher Bonus (einmal alle 24h)")
     async def daily(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)  # Prevent timeout
+
         user_id = interaction.user.id
         currency = await self.get_currency_name()
 
@@ -746,7 +747,7 @@ class EconomyCog(commands.Cog):
             remaining = DAILY_COOLDOWN_SECONDS - (int(time.time()) - last) if last else 0
             hours = remaining // 3600
             minutes = (remaining % 3600) // 60
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"⏳ Daily schon geholt. Nächster in **{hours}h {minutes}m**.",
                 ephemeral=True
             )
@@ -759,7 +760,7 @@ class EconomyCog(commands.Cog):
         embed.description = f"Du hast **{amount} {currency}** erhalten!"
         embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
         embed.set_footer(text="Bis morgen! 💰")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
