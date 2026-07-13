@@ -14,6 +14,16 @@ ECONOMY_DB_PATH = os.getenv("ECONOMY_DATA_PATH", "data/economy.db")
 DEFAULT_CURRENCY = "Coins"
 LEADERBOARD_PER_PAGE = 10
 
+# Earning rates
+CHAT_COINS = 3
+CHAT_COOLDOWN_SECONDS = 60
+
+VOICE_COINS_PER_MINUTE = 3
+
+DAILY_COINS_MIN = 80
+DAILY_COINS_MAX = 150
+DAILY_COOLDOWN_SECONDS = 24 * 60 * 60  # 24 hours
+
 
 class LeaderboardView(discord.ui.View):
     """Interactive leaderboard with pagination and 'My Position' button."""
@@ -737,7 +747,7 @@ class EconomyCog(commands.Cog):
 
     @app_commands.command(name="daily", description="Täglicher Bonus (einmal alle 24h)")
     async def daily(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)  # Prevent timeout
+        await interaction.response.defer(ephemeral=True)
 
         user_id = interaction.user.id
         currency = await self.get_currency_name()
