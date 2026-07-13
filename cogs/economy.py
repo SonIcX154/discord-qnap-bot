@@ -87,7 +87,6 @@ class LeaderboardView(discord.ui.View):
             lines.append(f"{medal} {prefix}{name}{suffix} — {balance:,} {self.currency}")
 
         embed.description = "\n".join(lines) if lines else "Keine Daten vorhanden."
-        embed.set_footer(text="Global pro Bot-Instanz • Klicke auf 'Meine Position'")
         return embed
 
     @discord.ui.button(label="◀️ Zurück", style=discord.ButtonStyle.secondary)
