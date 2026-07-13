@@ -301,7 +301,6 @@ class EconomyCog(commands.Cog):
         currency = await self.get_currency_name()
         old_balance = await self.get_balance(user.id)
 
-        # Set balance directly
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 INSERT INTO users (user_id, balance) VALUES (?, ?)
@@ -361,8 +360,7 @@ class EconomyCog(commands.Cog):
     async def coinflip_error(self, interaction: discord.Interaction, error):
         if isinstance(error, app_commands.CommandOnCooldown):
             await interaction.response.send_message(
-                f"⏳ Warte noch **{error.retry_after:.1f}s**.", ephemeral=True
-            )
+                f"⏳ Warte noch **{error.retry_after:.1f}s**.", ephemeral=True)
         else:
             raise error
 
@@ -421,11 +419,11 @@ class EconomyCog(commands.Cog):
         winnings = int(bet * multiplier)
 
         if multiplier > 0:
-            new_balance = await self.add_coins(user.id, winnings)
+            new_balance = await self.add_coins(user_id, winnings)
             color = discord.Color.green()
             title = "🎰 SLOTS - GEWONNEN!"
         else:
-            new_balance = await self.get_balance(user.id)
+            new_balance = await self.get_balance(user_id)
             color = discord.Color.red()
             title = "🎰 SLOTS - Verloren"
 
