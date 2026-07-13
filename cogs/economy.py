@@ -58,7 +58,6 @@ class LeaderboardView(discord.ui.View):
                 except:
                     name = f"User {user_id}"
 
-            # Highlight the command user
             if user_id == self.highlight_user_id:
                 prefix = "➤ **"
                 suffix = "** ⬅️"
@@ -103,13 +102,108 @@ class LeaderboardView(discord.ui.View):
             await interaction.response.send_message("Du hast noch keine Coins.", ephemeral=True)
             return
 
-        # Calculate which page the user is on
         new_page = (rank - 1) // LEADERBOARD_PER_PAGE + 1
         self.current_page = new_page
         self.highlight_user_id = interaction.user.id
 
         embed = await self.update_embed()
         await interaction.response.edit_message(embed=embed, view=self)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
+class RouletteView(discord.ui.View):
+    """Interactive Roulette betting view with buttons."""
+
+    def __init__(self, cog: "EconomyCog", interaction: discord.Interaction, bet: int, currency: str):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.interaction = interaction
+        self.bet = bet
+        self.currency = currency
+        self.user_id = interaction.user.id
+        self.bet_placed = False
+
+    async def resolve_bet(self, interaction: discord.Interaction, bet_type: str, multiplier: int, description: str):
+        if self.bet_placed:
+            await interaction.response.send_message("Du hast bereits gesetzt!", ephemeral=True)
+            return
+
+        self.bet_placed = True
+        for child in self.children:
+            child.disabled = True
+
+        # Simulate spin
+        number = random.randint(0, 36)
+        color = "Grün" if number == 0 else ("Rot" if number % 2 == 1 else "Schwarz")
+
+        won = False
+        win_amount = 0
+
+        if bet_type == "red" and color == "Rot":
+            won = True
+        elif bet_type == "black" and color == "Schwarz":
+            won = True
+        elif bet_type == "green" and number == 0:
+            won = True
+        elif bet_type == "even" and number != 0 and number % 2 == 0:
+            won = True
+        elif bet_type == "odd" and number % 2 == 1:
+            won = True
+        elif bet_type == "low" and 1 <= number <= 18:
+            won = True
+        elif bet_type == "high" and 19 <= number <= 36:
+            won = True
+
+        if won:
+            win_amount = int(self.bet * multiplier)
+            new_balance = await self.cog.add_coins(self.user_id, win_amount)
+            color_embed = discord.Color.green()
+            title = "🎉 Gewonnen!"
+        else:
+            new_balance = await self.cog.get_balance(self.user_id)
+            color_embed = discord.Color.red()
+            title = "😢 Verloren"
+
+        embed = discord.Embed(title=title, color=color_embed)
+        embed.description = f"**Die Kugel ist auf {number} ({color}) gelandet!**"
+        embed.add_field(name="Dein Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
+        if won:
+            embed.add_field(name="Gewinn", value=f"+{win_amount:,} {self.currency} ({description})", inline=True)
+        embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
+        embed.set_footer(text=f"Gespielt von {interaction.user.display_name}")
+
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="🔴 Rot (2x)", style=discord.ButtonStyle.danger, row=0)
+    async def red_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.resolve_bet(interaction, "red", 2, "Rot")
+
+    @discord.ui.button(label="⚫ Schwarz (2x)", style=discord.ButtonStyle.secondary, row=0)
+    async def black_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.resolve_bet(interaction, "black", 2, "Schwarz")
+
+    @discord.ui.button(label="🟢 Grün/0 (36x)", style=discord.ButtonStyle.success, row=0)
+    async def green_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.resolve_bet(interaction, "green", 36, "Grün (0)")
+
+    @discord.ui.button(label="Gerade (2x)", style=discord.ButtonStyle.primary, row=1)
+    async def even_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.resolve_bet(interaction, "even", 2, "Gerade")
+
+    @discord.ui.button(label="Ungerade (2x)", style=discord.ButtonStyle.primary, row=1)
+    async def odd_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.resolve_bet(interaction, "odd", 2, "Ungerade")
+
+    @discord.ui.button(label="1-18 (2x)", style=discord.ButtonStyle.secondary, row=2)
+    async def low_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.resolve_bet(interaction, "low", 2, "1-18")
+
+    @discord.ui.button(label="19-36 (2x)", style=discord.ButtonStyle.secondary, row=2)
+    async def high_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.resolve_bet(interaction, "high", 2, "19-36")
 
     async def on_timeout(self):
         for child in self.children:
@@ -123,7 +217,7 @@ class EconomyCog(commands.Cog):
     - Global user balances (one DB per bot instance)
     - Earn via chat + voice (only active users: not deaf/mute)
     - Interactive /leaderboard with pagination + My Position
-    - Coinflip + Slots
+    - Coinflip + Slots + Roulette (with buttons)
     - Admin commands (/economy give/take/set)
     - Currency name changeable by admins
     """
@@ -330,14 +424,12 @@ class EconomyCog(commands.Cog):
     # ==================== LEADERBOARD DATA METHODS ====================
 
     async def get_total_users(self) -> int:
-        """Returns total number of users with a balance > 0."""
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute("SELECT COUNT(*) FROM users WHERE balance > 0") as cursor:
                 row = await cursor.fetchone()
                 return row[0] if row else 0
 
     async def get_leaderboard_page(self, page: int, per_page: int = 10) -> List[Tuple[int, int]]:
-        """Returns a page of (user_id, balance) sorted by balance DESC."""
         offset = (page - 1) * per_page
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
@@ -348,7 +440,6 @@ class EconomyCog(commands.Cog):
                 return [(row[0], row[1]) for row in rows]
 
     async def get_user_rank(self, user_id: int) -> Optional[int]:
-        """Returns the rank of a user (1 = richest). Returns None if user has no balance."""
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 "SELECT COUNT(*) + 1 FROM users WHERE balance > (SELECT balance FROM users WHERE user_id = ?)",
@@ -357,7 +448,6 @@ class EconomyCog(commands.Cog):
                 row = await cursor.fetchone()
                 if row:
                     rank = row[0]
-                    # Verify the user actually exists
                     bal = await self.get_balance(user_id)
                     return rank if bal > 0 else None
                 return None
@@ -387,7 +477,6 @@ class EconomyCog(commands.Cog):
     @app_commands.group(name="economy", description="Admin-Befehle für das Economy-System")
     @app_commands.default_permissions(manage_guild=True)
     async def economy_group(self, interaction: discord.Interaction):
-        """Base group for economy admin commands."""
         pass
 
     @economy_group.command(name="give", description="Gib einem User Coins (Admin)")
@@ -572,6 +661,49 @@ class EconomyCog(commands.Cog):
     async def slots_error(self, interaction: discord.Interaction, error):
         if isinstance(error, app_commands.CommandOnCooldown):
             await interaction.response.send_message(f"⏳ Warte **{error.retry_after:.1f}s**.", ephemeral=True)
+        else:
+            raise error
+
+    # ==================== GAMBLING: ROULETTE (with buttons) ====================
+
+    @app_commands.command(name="roulette", description="Spiele Roulette mit interaktiven Buttons")
+    @app_commands.describe(bet="Dein Einsatz (Min. 10)")
+    @app_commands.checks.cooldown(1, 5.0, key=lambda interaction: interaction.user.id)
+    async def roulette(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]):
+        user_id = interaction.user.id
+        currency = await self.get_currency_name()
+
+        current = await self.get_balance(user_id)
+        if current < bet:
+            await interaction.response.send_message(
+                f"❌ Nicht genug {currency}! Du hast **{current:,}** {currency}.",
+                ephemeral=True
+            )
+            return
+
+        if not await self.remove_coins(user_id, bet):
+            await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="🎰 Roulette - Wähle deinen Einsatz",
+            description=f"Du hast **{bet:,} {currency}** gesetzt.
+
+Wähle jetzt, worauf du setzen möchtest:",
+            color=discord.Color.gold()
+        )
+        embed.set_footer(text="Die Kugel rollt... • Timeout nach 2 Minuten")
+
+        view = RouletteView(self, interaction, bet, currency)
+        await interaction.response.send_message(embed=embed, view=view)
+
+    @roulette.error
+    async def roulette_error(self, interaction: discord.Interaction, error):
+        if isinstance(error, app_commands.CommandOnCooldown):
+            await interaction.response.send_message(
+                f"⏳ Warte noch **{error.retry_after:.1f}s** bevor du wieder roulette spielst.",
+                ephemeral=True
+            )
         else:
             raise error
 
