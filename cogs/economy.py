@@ -234,11 +234,7 @@ class SlotsView(discord.ui.View):
         if new_bet < 10:
             new_bet = 10
         self.bet = new_bet
-
-        await interaction.response.send_message(
-            f"✅ Neuer Einsatz: **{self.bet:,}** {self.currency}",
-            ephemeral=True
-        )
+        await interaction.response.send_message(f"✅ Neuer Einsatz: **{self.bet:,}** {self.currency}", ephemeral=True)
 
     @discord.ui.button(label="➖ 10", style=discord.ButtonStyle.secondary, row=0)
     async def decrease_10(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -272,59 +268,51 @@ class SlotsView(discord.ui.View):
             return
 
         self.playing = True
+        try:
+            current_balance = await self.cog.get_balance(self.user_id)
+            if current_balance < self.bet:
+                await interaction.response.send_message(f"❌ Nicht genug {self.currency}! Du hast nur **{current_balance:,}**.", ephemeral=True)
+                return
 
-        current_balance = await self.cog.get_balance(self.user_id)
-        if current_balance < self.bet:
-            await interaction.response.send_message(
-                f"❌ Nicht genug {self.currency}! Du hast nur **{current_balance:,}**.",
-                ephemeral=True
-            )
+            if not await self.cog.remove_coins(self.user_id, self.bet):
+                await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
+                return
+
+            spinning_embed = discord.Embed(title="🎰 Slots - Die Walzen drehen sich...", description="** | | | **", color=discord.Color.gold())
+            await interaction.response.edit_message(embed=spinning_embed, view=None)
+
+            for _ in range(4):
+                temp_reels = [random.choice(self.cog.SLOT_SYMBOLS) for _ in range(3)]
+                spinning_embed.description = f"**{' | '.join(temp_reels)}**"
+                await interaction.edit_original_response(embed=spinning_embed)
+                await asyncio.sleep(0.28)
+
+            reels, multiplier, win_text = self.cog._roll_slots()
+            winnings = int(self.bet * multiplier)
+
+            if multiplier > 0:
+                new_balance = await self.cog.add_coins(self.user_id, winnings)
+                color = discord.Color.green()
+                title = "🎰 SLOTS - GEWONNEN!"
+            else:
+                new_balance = await self.cog.get_balance(self.user_id)
+                color = discord.Color.red()
+                title = "🎰 SLOTS - Verloren"
+
+            final_embed = discord.Embed(title=title, color=color)
+            final_embed.description = f"**{' | '.join(reels)}**"
+            final_embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
+            if multiplier > 0:
+                final_embed.add_field(name="Gewinn", value=f"+{winnings:,} {self.currency} ({win_text})", inline=True)
+            else:
+                final_embed.add_field(name="Ergebnis", value=win_text, inline=True)
+            final_embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
+            final_embed.set_footer(text=f"Gespielt von {interaction.user.display_name} • RTP ~92%")
+
+            new_view = SlotsView(self.cog, self.user_id, self.bet, self.currency)
+            await interaction.edit_original_response(embed=final_embed, view=new_view)
+        finally:
             self.playing = False
-            return
-
-        if not await self.cog.remove_coins(self.user_id, self.bet):
-            await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
-            self.playing = False
-            return
-
-        spinning_embed = discord.Embed(
-            title="🎰 Slots - Die Walzen drehen sich...",
-            description="** | | | **",
-            color=discord.Color.gold()
-        )
-        await interaction.response.edit_message(embed=spinning_embed, view=None)
-
-        for _ in range(4):
-            temp_reels = [random.choice(self.cog.SLOT_SYMBOLS) for _ in range(3)]
-            spinning_embed.description = f"**{' | '.join(temp_reels)}**"
-            await interaction.edit_original_response(embed=spinning_embed)
-            await asyncio.sleep(0.28)
-
-        reels, multiplier, win_text = self.cog._roll_slots()
-        winnings = int(self.bet * multiplier)
-
-        if multiplier > 0:
-            new_balance = await self.cog.add_coins(self.user_id, winnings)
-            color = discord.Color.green()
-            title = "🎰 SLOTS - GEWONNEN!"
-        else:
-            new_balance = await self.cog.get_balance(self.user_id)
-            color = discord.Color.red()
-            title = "🎰 SLOTS - Verloren"
-
-        final_embed = discord.Embed(title=title, color=color)
-        final_embed.description = f"**{' | '.join(reels)}**"
-        final_embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
-        if multiplier > 0:
-            final_embed.add_field(name="Gewinn", value=f"+{winnings:,} {self.currency} ({win_text})", inline=True)
-        else:
-            final_embed.add_field(name="Ergebnis", value=win_text, inline=True)
-        final_embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
-        final_embed.set_footer(text=f"Gespielt von {interaction.user.display_name} • RTP ~92%")
-
-        new_view = SlotsView(self.cog, self.user_id, self.bet, self.currency)
-        await interaction.edit_original_response(embed=final_embed, view=new_view)
-        self.playing = False
 
     async def on_timeout(self):
         for child in self.children:
