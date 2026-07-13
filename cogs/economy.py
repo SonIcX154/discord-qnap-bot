@@ -135,7 +135,6 @@ class RouletteView(discord.ui.View):
         for child in self.children:
             child.disabled = True
 
-        # Simulate spin
         number = random.randint(0, 36)
         color = "Grün" if number == 0 else ("Rot" if number % 2 == 1 else "Schwarz")
 
@@ -262,8 +261,6 @@ class EconomyCog(commands.Cog):
             """, ("currency_name", DEFAULT_CURRENCY))
             await db.commit()
 
-    # ==================== CURRENCY (renamable) ====================
-
     async def get_currency_name(self) -> str:
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
@@ -279,8 +276,6 @@ class EconomyCog(commands.Cog):
                 ON CONFLICT(key) DO UPDATE SET value = ?
             """, ("currency_name", name, name))
             await db.commit()
-
-    # ==================== BALANCE HELPERS ====================
 
     async def get_balance(self, user_id: int) -> int:
         async with aiosqlite.connect(self.db_path) as db:
@@ -362,8 +357,6 @@ class EconomyCog(commands.Cog):
             """, (user_id, timestamp, timestamp))
             await db.commit()
 
-    # ==================== EARNING ====================
-
     async def can_earn_chat(self, user_id: int) -> bool:
         last = await self.get_last_chat_earn(user_id)
         if last is None:
@@ -392,8 +385,6 @@ class EconomyCog(commands.Cog):
         await self.set_last_daily(user_id, int(time.time()))
         return amount
 
-    # ==================== VOICE EARNING (only active users) ====================
-
     async def _voice_earnings_loop(self):
         await self.bot.wait_until_ready()
         print("[Economy] Voice earnings task started (only active users).")
@@ -412,16 +403,12 @@ class EconomyCog(commands.Cog):
                 print(f"[Economy] Voice earnings error: {e}")
             await asyncio.sleep(60)
 
-    # ==================== LISTENERS ====================
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
         user_id = message.author.id
-        await self.claim_chat_earn(user_id)  # silent
-
-    # ==================== LEADERBOARD DATA METHODS ====================
+        await self.claim_chat_earn(user_id)
 
     async def get_total_users(self) -> int:
         async with aiosqlite.connect(self.db_path) as db:
@@ -452,8 +439,6 @@ class EconomyCog(commands.Cog):
                     return rank if bal > 0 else None
                 return None
 
-    # ==================== ADMIN: SET CURRENCY ====================
-
     @app_commands.command(name="set-currency", description="Ändere den Namen der Währung (Admin)")
     @app_commands.describe(name="Neuer Name der Währung (z.B. Q-Coins, Credits, Tokens)")
     @app_commands.default_permissions(manage_guild=True)
@@ -471,8 +456,6 @@ class EconomyCog(commands.Cog):
             color=discord.Color.green()
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    # ==================== ADMIN COMMAND GROUP ====================
 
     @app_commands.group(name="economy", description="Admin-Befehle für das Economy-System")
     @app_commands.default_permissions(manage_guild=True)
@@ -532,8 +515,6 @@ class EconomyCog(commands.Cog):
         embed.add_field(name="Neuer Stand", value=f"**{amount:,}** {currency}", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ==================== GAMBLING: COINFLIP ====================
-
     @app_commands.command(name="coinflip", description="Setze auf einen Münzwurf (50/50)")
     @app_commands.describe(bet="Einsatz in Währung (Min. 10)")
     @app_commands.checks.cooldown(1, 3.0, key=lambda interaction: interaction.user.id)
@@ -581,8 +562,6 @@ class EconomyCog(commands.Cog):
                 f"⏳ Warte noch **{error.retry_after:.1f}s**.", ephemeral=True)
         else:
             raise error
-
-    # ==================== GAMBLING: SLOTS ====================
 
     SLOT_SYMBOLS: List[str] = ["🍒", "🍋", "🔔", "⭐", "7️⃣", "💎"]
 
@@ -664,8 +643,6 @@ class EconomyCog(commands.Cog):
         else:
             raise error
 
-    # ==================== GAMBLING: ROULETTE (with buttons) ====================
-
     @app_commands.command(name="roulette", description="Spiele Roulette mit interaktiven Buttons")
     @app_commands.describe(bet="Dein Einsatz (Min. 10)")
     @app_commands.checks.cooldown(1, 5.0, key=lambda interaction: interaction.user.id)
@@ -687,9 +664,7 @@ class EconomyCog(commands.Cog):
 
         embed = discord.Embed(
             title="🎰 Roulette - Wähle deinen Einsatz",
-            description=f"Du hast **{bet:,} {currency}** gesetzt.
-
-Wähle jetzt, worauf du setzen möchtest:",
+            description="Du hast **{} {}** gesetzt.\n\nWähle jetzt, worauf du setzen möchtest:".format(bet, currency),
             color=discord.Color.gold()
         )
         embed.set_footer(text="Die Kugel rollt... • Timeout nach 2 Minuten")
@@ -706,8 +681,6 @@ Wähle jetzt, worauf du setzen möchtest:",
             )
         else:
             raise error
-
-    # ==================== LEADERBOARD (Interactive) ====================
 
     @app_commands.command(name="leaderboard", description="Zeigt das interaktive Leaderboard an")
     @app_commands.checks.cooldown(1, 60.0, key=lambda interaction: interaction.user.id)
@@ -733,8 +706,6 @@ Wähle jetzt, worauf du setzen möchtest:",
             )
         else:
             raise error
-
-    # ==================== USER COMMANDS ====================
 
     @app_commands.command(name="balance", description="Zeigt deinen aktuellen Kontostand")
     @app_commands.describe(user="Optional: anderer User")
