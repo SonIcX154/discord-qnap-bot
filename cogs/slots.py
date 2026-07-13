@@ -7,74 +7,63 @@ from typing import List, Tuple
 
 try:
     from utils.bet_mixin import BetAdjustableMixin
+    from utils.replay_mixin import ReplayMixin
 except ImportError:
     from ..utils.bet_mixin import BetAdjustableMixin
+    from ..utils.replay_mixin import ReplayMixin
 
 
-class SlotsView(BetAdjustableMixin, discord.ui.View):
-    """Interactive Slots view with bet adjustment and Play Again button."""
+class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
+    """Interactive Slots view with bet adjustment and replay."""
 
     def __init__(self, economy_cog, user_id: int, bet: int, currency: str):
         BetAdjustableMixin.__init__(self, economy_cog, user_id, bet, currency)
+        ReplayMixin.__init__(self, user_id)
         discord.ui.View.__init__(self, timeout=300)
-        self.playing = False
 
-    @discord.ui.button(label="🔄 Nochmal spielen", style=discord.ButtonStyle.success, row=1)
-    async def play_again(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Nur der Spieler darf den Button benutzen.", ephemeral=True)
+    async def _do_replay(self, interaction: discord.Interaction):
+        current_balance = await self.economy.get_balance(self.user_id)
+        if current_balance < self.bet:
+            await interaction.response.send_message(f"❌ Nicht genug {self.currency}! Du hast nur **{current_balance:,}**.", ephemeral=True)
             return
 
-        if self.playing:
-            await interaction.response.send_message("Bitte warte, bis die aktuelle Runde fertig ist.", ephemeral=True)
+        if not await self.economy.remove_coins(self.user_id, self.bet):
+            await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
             return
 
-        self.playing = True
-        try:
-            current_balance = await self.economy.get_balance(self.user_id)
-            if current_balance < self.bet:
-                await interaction.response.send_message(f"❌ Nicht genug {self.currency}! Du hast nur **{current_balance:,}**.", ephemeral=True)
-                return
+        spinning_embed = discord.Embed(title="🌀 Slots - Die Walzen drehen sich...", description="** | | | **", color=discord.Color.gold())
+        await interaction.response.edit_message(embed=spinning_embed, view=None)
 
-            if not await self.economy.remove_coins(self.user_id, self.bet):
-                await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
-                return
+        for _ in range(4):
+            temp_reels = [random.choice(SlotsCog.SLOT_SYMBOLS) for _ in range(3)]
+            spinning_embed.description = f"**{' | '.join(temp_reels)}**"
+            await interaction.edit_original_response(embed=spinning_embed)
+            await asyncio.sleep(0.28)
 
-            spinning_embed = discord.Embed(title="🌀 Slots - Die Walzen drehen sich...", description="** | | | **", color=discord.Color.gold())
-            await interaction.response.edit_message(embed=spinning_embed, view=None)
+        reels, multiplier, win_text = self._roll_slots()
+        winnings = int(self.bet * multiplier)
 
-            for _ in range(4):
-                temp_reels = [random.choice(SlotsCog.SLOT_SYMBOLS) for _ in range(3)]
-                spinning_embed.description = f"**{' | '.join(temp_reels)}**"
-                await interaction.edit_original_response(embed=spinning_embed)
-                await asyncio.sleep(0.28)
+        if multiplier > 0:
+            new_balance = await self.economy.add_coins(self.user_id, winnings)
+            color = discord.Color.green()
+            title = "🌀 SLOTS - GEWONNEN!"
+        else:
+            new_balance = await self.economy.get_balance(self.user_id)
+            color = discord.Color.red()
+            title = "🌀 SLOTS - Verloren"
 
-            reels, multiplier, win_text = self._roll_slots()
-            winnings = int(self.bet * multiplier)
+        final_embed = discord.Embed(title=title, color=color)
+        final_embed.description = f"**{' | '.join(reels)}**"
+        final_embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
+        if multiplier > 0:
+            final_embed.add_field(name="Gewinn", value=f"+{winnings:,} {self.currency} ({win_text})", inline=True)
+        else:
+            final_embed.add_field(name="Ergebnis", value=win_text, inline=True)
+        final_embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
+        final_embed.set_footer(text=f"Gespielt von {interaction.user.display_name} • RTP ~92%")
 
-            if multiplier > 0:
-                new_balance = await self.economy.add_coins(self.user_id, winnings)
-                color = discord.Color.green()
-                title = "🌀 SLOTS - GEWONNEN!"
-            else:
-                new_balance = await self.economy.get_balance(self.user_id)
-                color = discord.Color.red()
-                title = "🌀 SLOTS - Verloren"
-
-            final_embed = discord.Embed(title=title, color=color)
-            final_embed.description = f"**{' | '.join(reels)}**"
-            final_embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
-            if multiplier > 0:
-                final_embed.add_field(name="Gewinn", value=f"+{winnings:,} {self.currency} ({win_text})", inline=True)
-            else:
-                final_embed.add_field(name="Ergebnis", value=win_text, inline=True)
-            final_embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
-            final_embed.set_footer(text=f"Gespielt von {interaction.user.display_name} • RTP ~92%")
-
-            new_view = SlotsView(self.economy, self.user_id, self.bet, self.currency)
-            await interaction.edit_original_response(embed=final_embed, view=new_view)
-        finally:
-            self.playing = False
+        new_view = SlotsView(self.economy, self.user_id, self.bet, self.currency)
+        await interaction.edit_original_response(embed=final_embed, view=new_view)
 
     def _roll_slots(self) -> Tuple[List[str], int, str]:
         reels = [random.choice(SlotsCog.SLOT_SYMBOLS) for _ in range(3)]
