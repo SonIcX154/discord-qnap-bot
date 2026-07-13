@@ -23,9 +23,9 @@ LEADERBOARD_PER_PAGE = 10
 
 # Earning rates
 CHAT_COINS = 3
-CHAT_COOLDOWN_SECONDS = 60
+CHAT_HOURLY_LIMIT = 180          # Max Coins pro Stunde durch Chatten
 
-VOICE_COINS_PER_MINUTE = 3
+VOICE_COINS_PER_MINUTE = 2        # Reduziert auf 2 (nur bei ≥2 aktiven Personen)
 
 DAILY_COINS_MIN = 80
 DAILY_COINS_MAX = 150
@@ -202,12 +202,12 @@ class EconomyCog(commands.Cog):
     
     Handles:
     - User balances (global)
-    - Earning via chat and voice
+    - Earning via chat (max 180 Coins/Stunde) and voice (2 Coins/Min bei ≥2 aktiven Personen)
     - Daily rewards
     - Leaderboard with interactive pagination
     - Admin commands
     - Currency name management
-    - Coinflip (simple interactive game)
+    - Coinflip, Slots, Roulette
     """
 
     def __init__(self, bot: commands.Bot):
@@ -235,8 +235,7 @@ class EconomyCog(commands.Cog):
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
                     balance INTEGER NOT NULL DEFAULT 0,
-                    last_daily INTEGER,
-                    last_chat_earn INTEGER
+                    last_daily INTEGER
                 )
             """)
             await db.execute("""
@@ -248,6 +247,17 @@ class EconomyCog(commands.Cog):
             await db.execute("""
                 INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)
             """, ("currency_name", DEFAULT_CURRENCY))
+            await db.commit()
+
+            # Neue Tabelle für stündliches Chat-Limit Tracking
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS chat_earnings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    amount INTEGER NOT NULL,
+                    timestamp INTEGER NOT NULL
+                )
+            """)
             await db.commit()
 
     # ==================== PUBLIC METHODS (used by other cogs like Slots/Roulette) ====================
@@ -331,91 +341,49 @@ class EconomyCog(commands.Cog):
             """, (user_id, timestamp, timestamp))
             await db.commit()
 
-    async def get_last_chat_earn(self, user_id: int) -> Optional[int]:
+    # ==================== NEUES CHAT SYSTEM (max 180 Coins/Stunde) ====================
+
+    async def get_chat_coins_last_hour(self, user_id: int) -> int:
+        one_hour_ago = int(time.time()) - 3600
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
-                "SELECT last_chat_earn FROM users WHERE user_id = ?", (user_id,)
+                "SELECT COALESCE(SUM(amount), 0) FROM chat_earnings WHERE user_id = ? AND timestamp > ?",
+                (user_id, one_hour_ago)
             ) as cursor:
                 row = await cursor.fetchone()
-                return row[0] if row and row[0] is not None else None
-
-    async def set_last_chat_earn(self, user_id: int, timestamp: int):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                INSERT INTO users (user_id, last_chat_earn)
-                VALUES (?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET last_chat_earn = ?
-            """, (user_id, timestamp, timestamp))
-            await db.commit()
+                return row[0] if row else 0
 
     async def can_earn_chat(self, user_id: int) -> bool:
-        last = await self.get_last_chat_earn(user_id)
-        if last is None:
-            return True
-        return (int(time.time()) - last) >= CHAT_COOLDOWN_SECONDS
+        earned_last_hour = await self.get_chat_coins_last_hour(user_id)
+        return earned_last_hour + CHAT_COINS <= CHAT_HOURLY_LIMIT
 
     async def claim_chat_earn(self, user_id: int) -> int:
         if not await self.can_earn_chat(user_id):
             return 0
+
         amount = CHAT_COINS
         await self.add_coins(user_id, amount)
-        await self.set_last_chat_earn(user_id, int(time.time()))
+
+        # Loggen für stündliches Limit
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT INTO chat_earnings (user_id, amount, timestamp) VALUES (?, ?, ?)",
+                (user_id, amount, int(time.time()))
+            )
+            await db.commit()
+
         return amount
-
-    async def can_claim_daily(self, user_id: int) -> bool:
-        last = await self.get_last_daily(user_id)
-        if last is None:
-            return True
-        return (int(time.time()) - last) >= DAILY_COOLDOWN_SECONDS
-
-    async def claim_daily(self, user_id: int) -> int:
-        if not await self.can_claim_daily(user_id):
-            return 0
-        amount = random.randint(DAILY_COINS_MIN, DAILY_COINS_MAX)
-        new_balance = await self.add_coins(user_id, amount)
-        await self.set_last_daily(user_id, int(time.time()))
-        return amount
-
-    async def get_total_users(self) -> int:
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute("SELECT COUNT(*) FROM users WHERE balance > 0") as cursor:
-                row = await cursor.fetchone()
-                return row[0] if row else 0
-
-    async def get_leaderboard_page(self, page: int, per_page: int = 10) -> List[Tuple[int, int]]:
-        offset = (page - 1) * per_page
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(
-                "SELECT user_id, balance FROM users ORDER BY balance DESC LIMIT ? OFFSET ?",
-                (per_page, offset)
-            ) as cursor:
-                rows = await cursor.fetchall()
-                return [(row[0], row[1]) for row in rows]
-
-    async def get_user_rank(self, user_id: int) -> Optional[int]:
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(
-                "SELECT COUNT(*) + 1 FROM users WHERE balance > (SELECT balance FROM users WHERE user_id = ?)",
-                (user_id,)
-            ) as cursor:
-                row = await cursor.fetchone()
-                if row:
-                    rank = row[0]
-                    bal = await self.get_balance(user_id)
-                    return rank if bal > 0 else None
-                return None
 
     # ==================== BACKGROUND TASKS ====================
 
     async def _voice_earnings_loop(self):
         await self.bot.wait_until_ready()
-        print("[Economy] Voice earnings task started (only when others are active).")
+        print("[Economy] Voice earnings task started (2 Coins/Min bei ≥2 aktiven Personen).")
 
         while True:
             try:
                 for guild in self.bot.guilds:
                     for vc in guild.voice_channels:
-                        # Sammle alle aktiven (nicht deaf, nicht mute) Mitglieder im Channel
                         active_members = [
                             member for member in vc.members
                             if not member.bot
@@ -424,7 +392,6 @@ class EconomyCog(commands.Cog):
                             and not member.voice.self_mute
                         ]
 
-                        # Nur Coins geben, wenn mindestens 2 aktive Personen im Channel sind
                         if len(active_members) >= 2:
                             for member in active_members:
                                 await self.add_coins(member.id, VOICE_COINS_PER_MINUTE)
