@@ -87,6 +87,7 @@ class LeaderboardView(discord.ui.View):
             lines.append(f"{medal} {prefix}{name}{suffix} — {balance:,} {self.currency}")
 
         embed.description = "\n".join(lines) if lines else "Keine Daten vorhanden."
+        embed.set_footer(text="Global pro Bot-Instanz • Klicke auf 'Meine Position'")
         return embed
 
     @discord.ui.button(label="◀️ Zurück", style=discord.ButtonStyle.secondary)
@@ -711,9 +712,7 @@ class EconomyCog(commands.Cog):
 
         embed = discord.Embed(
             title="🪙 Coinflip - Wähle deine Seite",
-            description=f"Du hast **{bet:,} {currency}** gesetzt.
-
-Wähle **Kopf** oder **Zahl**:",
+            description=f"Du hast **{bet:,} {currency}** gesetzt.\n\nWähle **Kopf** oder **Zahl**:",
             color=discord.Color.gold()
         )
         embed.set_footer(text="Timeout nach 2 Minuten")
@@ -857,8 +856,7 @@ Wähle **Kopf** oder **Zahl**:",
         if isinstance(error, app_commands.CommandOnCooldown):
             await interaction.response.send_message(
                 f"⏳ Warte noch **{error.retry_after:.1f}s** bevor du wieder roulette spielst.",
-                ephemeral=True
-            )
+                ephemeral=True)
         else:
             raise error
 
@@ -882,9 +880,8 @@ Wähle **Kopf** oder **Zahl**:",
         if isinstance(error, app_commands.CommandOnCooldown):
             await interaction.response.send_message(
                 f"⏳ Das Leaderboard hat einen Cooldown von 60 Sekunden. Warte bitte noch **{error.retry_after:.0f}s**.",
-                ephemeral=True
-            )
-        else:
+                ephemeral=True)
+            else:
             raise error
 
     @app_commands.command(name="balance", description="Zeigt deinen aktuellen Kontostand")
