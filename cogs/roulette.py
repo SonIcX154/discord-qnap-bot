@@ -5,25 +5,35 @@ from discord import app_commands
 
 try:
     from utils.bet_mixin import BetAdjustableMixin
+    from utils.replay_mixin import ReplayMixin
 except ImportError:
     from ..utils.bet_mixin import BetAdjustableMixin
+    from ..utils.replay_mixin import ReplayMixin
 
 
-class RouletteView(BetAdjustableMixin, discord.ui.View):
-    """Interactive Roulette with bet adjustment and result."""
+class RouletteView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
+    """Interactive Roulette with bet adjustment and replay."""
 
     def __init__(self, economy_cog, interaction: discord.Interaction, bet: int, currency: str):
         BetAdjustableMixin.__init__(self, economy_cog, interaction.user.id, bet, currency)
+        ReplayMixin.__init__(self, interaction.user.id)
         discord.ui.View.__init__(self, timeout=180)
         self.interaction = interaction
-        self.bet_placed = False
+
+    async def _do_replay(self, interaction: discord.Interaction):
+        # Just create a fresh RouletteView with the same bet
+        new_view = RouletteView(self.economy, interaction, self.bet, self.currency)
+
+        embed = discord.Embed(
+            title="🌀 Roulette - Wähle deinen Einsatz",
+            description=f"Du hast **{self.bet:,} {self.currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann, worauf du setzen möchtest:",
+            color=discord.Color.gold()
+        )
+        embed.set_footer(text="Die Kugel rollt... • Timeout nach 3 Minuten")
+
+        await interaction.response.edit_message(embed=embed, view=new_view)
 
     async def resolve_bet(self, interaction: discord.Interaction, bet_type: str, multiplier: int, description: str):
-        if self.bet_placed:
-            await interaction.response.send_message("Du hast bereits gesetzt!", ephemeral=True)
-            return
-
-        self.bet_placed = True
         for child in self.children:
             child.disabled = True
 
@@ -66,7 +76,7 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
         embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
         embed.set_footer(text=f"Gespielt von {interaction.user.display_name}")
 
-        # Create new view with same bet for replay
+        # After result, show a fresh view for replay
         new_view = RouletteView(self.economy, interaction, self.bet, self.currency)
         await interaction.response.edit_message(embed=embed, view=new_view)
 
@@ -82,19 +92,19 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
     async def green_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.resolve_bet(interaction, "green", 36, "Grün (0)")
 
-    @discord.ui.button(label="Gerade (2x)", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="Gerade (2x)", style=discord.ButtonStyle.primary, row=1)
     async def even_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.resolve_bet(interaction, "even", 2, "Gerade")
 
-    @discord.ui.button(label="Ungerade (2x)", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="Ungerade (2x)", style=discord.ButtonStyle.primary, row=1)
     async def odd_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.resolve_bet(interaction, "odd", 2, "Ungerade")
 
-    @discord.ui.button(label="1-18 (2x)", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="1-18 (2x)", style=discord.ButtonStyle.secondary, row=2)
     async def low_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.resolve_bet(interaction, "low", 2, "1-18")
 
-    @discord.ui.button(label="19-36 (2x)", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="19-36 (2x)", style=discord.ButtonStyle.secondary, row=2)
     async def high_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.resolve_bet(interaction, "high", 2, "19-36")
 
