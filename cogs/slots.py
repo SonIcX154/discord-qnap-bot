@@ -5,52 +5,19 @@ from discord.ext import commands
 from discord import app_commands
 from typing import List, Tuple
 
+try:
+    from utils.bet_mixin import BetAdjustableMixin
+except ImportError:
+    from ..utils.bet_mixin import BetAdjustableMixin
 
-class SlotsView(discord.ui.View):
+
+class SlotsView(BetAdjustableMixin, discord.ui.View):
     """Interactive Slots view with bet adjustment and Play Again button."""
 
     def __init__(self, economy_cog, user_id: int, bet: int, currency: str):
-        super().__init__(timeout=300)
-        self.economy = economy_cog
-        self.user_id = user_id
-        self.bet = bet
-        self.currency = currency
+        BetAdjustableMixin.__init__(self, economy_cog, user_id, bet, currency)
+        discord.ui.View.__init__(self, timeout=300)
         self.playing = False
-
-    async def _update_bet(self, interaction: discord.Interaction, new_bet: int):
-        if new_bet < 10:
-            new_bet = 10
-        self.bet = new_bet
-        await interaction.response.send_message(f"✅ Neuer Einsatz: **{self.bet:,}** {self.currency}", ephemeral=True)
-
-    @discord.ui.button(label="➖ 10", style=discord.ButtonStyle.secondary, row=0)
-    async def decrease_10(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Nur der Spieler darf die Buttons benutzen.", ephemeral=True)
-            return
-        await self._update_bet(interaction, self.bet - 10)
-
-    @discord.ui.button(label="➕ 10", style=discord.ButtonStyle.secondary, row=0)
-    async def increase_10(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Nur der Spieler darf die Buttons benutzen.", ephemeral=True)
-            return
-        await self._update_bet(interaction, self.bet + 10)
-
-    @discord.ui.button(label="x2", style=discord.ButtonStyle.primary, row=0)
-    async def double_bet(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Nur der Spieler darf die Buttons benutzen.", ephemeral=True)
-            return
-        await self._update_bet(interaction, self.bet * 2)
-
-    @discord.ui.button(label="÷2", style=discord.ButtonStyle.primary, row=0)
-    async def halve_bet(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Nur der Spieler darf die Buttons benutzen.", ephemeral=True)
-            return
-        new_bet = max(10, self.bet // 2)
-        await self._update_bet(interaction, new_bet)
 
     @discord.ui.button(label="🔄 Nochmal spielen", style=discord.ButtonStyle.success, row=1)
     async def play_again(self, interaction: discord.Interaction, button: discord.ui.Button):
