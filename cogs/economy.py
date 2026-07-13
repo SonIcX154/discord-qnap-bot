@@ -881,7 +881,7 @@ class EconomyCog(commands.Cog):
             await interaction.response.send_message(
                 f"⏳ Das Leaderboard hat einen Cooldown von 60 Sekunden. Warte bitte noch **{error.retry_after:.0f}s**.",
                 ephemeral=True)
-            else:
+        else:
             raise error
 
     @app_commands.command(name="balance", description="Zeigt deinen aktuellen Kontostand")
