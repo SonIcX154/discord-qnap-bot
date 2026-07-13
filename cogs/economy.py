@@ -28,7 +28,8 @@ class EconomyCog(commands.Cog):
     - Global user balances (one DB per bot instance / per guild container)
     - Earn coins via chat (cooldown) and voice activity
     - /daily command
-    - Prepared for Coinflip, Slots, Roulette
+    - Coinflip gambling game
+    - Prepared for Slots, Roulette
     """
 
     def __init__(self, bot: commands.Bot):
@@ -201,6 +202,90 @@ class EconomyCog(commands.Cog):
                 print(f"[Economy] Voice earnings error: {e}")
 
             await asyncio.sleep(60)
+
+    # ==================== LISTENERS ====================
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Award coins for chatting (with cooldown)."""
+        if message.author.bot:
+            return
+        if not message.guild:
+            return  # Only earn in guilds
+
+        user_id = message.author.id
+        earned = await self.claim_chat_earn(user_id)
+        # Silent earn - no spam in chat. User sees success via /balance
+        if earned > 0:
+            # Optional debug log (uncomment if needed)
+            # print(f"[Economy] {message.author} earned {earned} coins from chat")
+            pass
+
+    # ==================== GAMBLING: COINFLIP ====================
+
+    @app_commands.command(name="coinflip", description="Setze Coins auf einen Münzwurf (50/50 Chance)")
+    @app_commands.describe(bet="Wie viele Coins willst du setzen? (Minimum 10)")
+    @app_commands.checks.cooldown(1, 3.0, key=lambda interaction: interaction.user.id)
+    async def coinflip(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]):
+        user_id = interaction.user.id
+
+        # Check if user has enough coins
+        current_balance = await self.get_balance(user_id)
+        if current_balance < bet:
+            await interaction.response.send_message(
+                f"❌ Du hast nicht genug Coins! Dein Kontostand: **{current_balance:,}** Coins.",
+                ephemeral=True
+            )
+            return
+
+        # Atomic remove bet
+        success = await self.remove_coins(user_id, bet)
+        if not success:
+            await interaction.response.send_message(
+                "❌ Konnte den Einsatz nicht abziehen. Bitte versuche es erneut.",
+                ephemeral=True
+            )
+            return
+
+        # 50/50 flip
+        result = random.choice(["Kopf", "Zahl"])
+        won = random.random() < 0.5  # True = win
+
+        if won:
+            # Win: get bet back + bet profit
+            new_balance = await self.add_coins(user_id, bet)
+            embed = discord.Embed(
+                title="🪙 Coinflip - Gewonnen!",
+                description=f"Die Münze ist auf **{result}** gelandet.",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Einsatz", value=f"{bet:,} Coins", inline=True)
+            embed.add_field(name="Gewinn", value=f"+{bet:,} Coins", inline=True)
+            embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** Coins", inline=False)
+        else:
+            new_balance = await self.get_balance(user_id)
+            embed = discord.Embed(
+                title="🪙 Coinflip - Verloren",
+                description=f"Die Münze ist auf **{result}** gelandet.",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="Einsatz", value=f"{bet:,} Coins", inline=True)
+            embed.add_field(name="Verlust", value=f"-{bet:,} Coins", inline=True)
+            embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** Coins", inline=False)
+
+        embed.set_footer(text=f"Gespielt von {interaction.user.display_name} • 50/50 Chance")
+        await interaction.response.send_message(embed=embed)
+
+    @coinflip.error
+    async def coinflip_error(self, interaction: discord.Interaction, error):
+        if isinstance(error, app_commands.CommandOnCooldown):
+            await interaction.response.send_message(
+                f"⏳ Warte noch **{error.retry_after:.1f} Sekunden** bevor du wieder coinflipst.",
+                ephemeral=True
+            )
+        else:
+            # Let other errors propagate (or handle more specifically)
+            raise error
 
     # ==================== SLASH COMMANDS ====================
 
