@@ -2,3 +2,4 @@
 data/birthdays.json
 docker-compose.yml
 .vscode/settings.json
+data/economy.db
