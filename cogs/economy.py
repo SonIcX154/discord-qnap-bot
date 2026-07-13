@@ -216,7 +216,7 @@ class EconomyCog(commands.Cog):
     - Global user balances (one DB per bot instance)
     - Earn via chat + voice (only active users: not deaf/mute)
     - Interactive /leaderboard with pagination + My Position
-    - Coinflip + Slots + Roulette (with buttons)
+    - Coinflip + Slots (with animation) + Roulette (with buttons)
     - Admin commands (/economy-give, /economy-take, /economy-set)
     - Currency name changeable by admins
     """
@@ -457,8 +457,6 @@ class EconomyCog(commands.Cog):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ==================== ADMIN COMMANDS (separate for compatibility) ====================
-
     @app_commands.command(name="economy-give", description="Gib einem User Coins (Admin)")
     @app_commands.describe(user="User der Coins bekommen soll", amount="Anzahl der Coins")
     @app_commands.default_permissions(manage_guild=True)
@@ -593,9 +591,9 @@ class EconomyCog(commands.Cog):
 
         return reels, multiplier, win_text
 
-    @app_commands.command(name="slots", description="Spiele Slots mit 3 Walzen")
+    @app_commands.command(name="slots", description="Spiele Slots mit animierten Walzen")
     @app_commands.describe(bet="Einsatz (Min. 10)")
-    @app_commands.checks.cooldown(1, 3.0, key=lambda interaction: interaction.user.id)
+    @app_commands.checks.cooldown(1, 4.0, key=lambda interaction: interaction.user.id)
     async def slots(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]):
         user_id = interaction.user.id
         currency = await self.get_currency_name()
@@ -612,6 +610,22 @@ class EconomyCog(commands.Cog):
             await interaction.response.send_message("❌ Fehler beim Einsatz.", ephemeral=True)
             return
 
+        # Initial spinning message
+        spinning_embed = discord.Embed(
+            title="🎰 Slots - Die Walzen drehen sich...",
+            description="** | | | **",
+            color=discord.Color.gold()
+        )
+        await interaction.response.send_message(embed=spinning_embed)
+
+        # Animation: 6 spins
+        for _ in range(6):
+            temp_reels = [random.choice(self.SLOT_SYMBOLS) for _ in range(3)]
+            spinning_embed.description = f"**{' | '.join(temp_reels)}**"
+            await interaction.edit_original_response(embed=spinning_embed)
+            await asyncio.sleep(0.38)
+
+        # Final result
         reels, multiplier, win_text = self._roll_slots()
         winnings = int(bet * multiplier)
 
@@ -624,17 +638,17 @@ class EconomyCog(commands.Cog):
             color = discord.Color.red()
             title = "🎰 SLOTS - Verloren"
 
-        embed = discord.Embed(title=title, color=color)
-        embed.description = f"**{' | '.join(reels)}**"
-        embed.add_field(name="Einsatz", value=f"{bet:,} {currency}", inline=True)
+        final_embed = discord.Embed(title=title, color=color)
+        final_embed.description = f"**{' | '.join(reels)}**"
+        final_embed.add_field(name="Einsatz", value=f"{bet:,} {currency}", inline=True)
         if multiplier > 0:
-            embed.add_field(name="Gewinn", value=f"+{winnings:,} {currency} ({win_text})", inline=True)
+            final_embed.add_field(name="Gewinn", value=f"+{winnings:,} {currency} ({win_text})", inline=True)
         else:
-            embed.add_field(name="Ergebnis", value=win_text, inline=True)
-        embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
-        embed.set_footer(text=f"Gespielt von {interaction.user.display_name} • RTP ~92%")
+            final_embed.add_field(name="Ergebnis", value=win_text, inline=True)
+        final_embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
+        final_embed.set_footer(text=f"Gespielt von {interaction.user.display_name} • RTP ~92%")
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.edit_original_response(embed=final_embed)
 
     @slots.error
     async def slots_error(self, interaction: discord.Interaction, error):
