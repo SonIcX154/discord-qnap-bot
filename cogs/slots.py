@@ -37,12 +37,20 @@ class SlotsView(discord.ui.View):
             return
         await self._update_bet(interaction, self.bet + 10)
 
-    @discord.ui.button(label="2x", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="x2", style=discord.ButtonStyle.primary, row=0)
     async def double_bet(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Nur der Spieler darf die Buttons benutzen.", ephemeral=True)
             return
         await self._update_bet(interaction, self.bet * 2)
+
+    @discord.ui.button(label="÷2", style=discord.ButtonStyle.primary, row=0)
+    async def halve_bet(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Nur der Spieler darf die Buttons benutzen.", ephemeral=True)
+            return
+        new_bet = max(10, self.bet // 2)
+        await self._update_bet(interaction, new_bet)
 
     @discord.ui.button(label="🔄 Nochmal spielen", style=discord.ButtonStyle.success, row=1)
     async def play_again(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -65,7 +73,7 @@ class SlotsView(discord.ui.View):
                 await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
                 return
 
-            spinning_embed = discord.Embed(title="🎰 Slots - Die Walzen drehen sich...", description="** | | | **", color=discord.Color.gold())
+            spinning_embed = discord.Embed(title="🌀 Slots - Die Walzen drehen sich...", description="** | | | **", color=discord.Color.gold())
             await interaction.response.edit_message(embed=spinning_embed, view=None)
 
             for _ in range(4):
@@ -80,11 +88,11 @@ class SlotsView(discord.ui.View):
             if multiplier > 0:
                 new_balance = await self.economy.add_coins(self.user_id, winnings)
                 color = discord.Color.green()
-                title = "🎰 SLOTS - GEWONNEN!"
+                title = "🌀 SLOTS - GEWONNEN!"
             else:
                 new_balance = await self.economy.get_balance(self.user_id)
                 color = discord.Color.red()
-                title = "🎰 SLOTS - Verloren"
+                title = "🌀 SLOTS - Verloren"
 
             final_embed = discord.Embed(title=title, color=color)
             final_embed.description = f"**{' | '.join(reels)}**"
@@ -149,9 +157,7 @@ class SlotsCog(commands.Cog):
     @app_commands.describe(bet="Einsatz (Min. 10)")
     @app_commands.checks.cooldown(1, 4.0, key=lambda interaction: interaction.user.id)
     async def slots(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]):
-        economy = getattr(self.bot, "_economy_cog", None)
-        if not economy:
-            economy = self.bot.get_cog("EconomyCog")
+        economy = self.bot.get_cog("Economy")
         if not economy:
             await interaction.response.send_message("Economy system nicht verfügbar.", ephemeral=True)
             return
@@ -168,7 +174,7 @@ class SlotsCog(commands.Cog):
             await interaction.response.send_message("❌ Fehler beim Einsatz.", ephemeral=True)
             return
 
-        spinning_embed = discord.Embed(title="🎰 Slots - Die Walzen drehen sich...", description="** | | | **", color=discord.Color.gold())
+        spinning_embed = discord.Embed(title="🌀 Slots - Die Walzen drehen sich...", description="** | | | **", color=discord.Color.gold())
         await interaction.response.send_message(embed=spinning_embed)
 
         for _ in range(4):
@@ -183,11 +189,11 @@ class SlotsCog(commands.Cog):
         if multiplier > 0:
             new_balance = await economy.add_coins(user_id, winnings)
             color = discord.Color.green()
-            title = "🎰 SLOTS - GEWONNEN!"
+            title = "🌀 SLOTS - GEWONNEN!"
         else:
             new_balance = await economy.get_balance(user_id)
             color = discord.Color.red()
-            title = "🎰 SLOTS - Verloren"
+            title = "🌀 SLOTS - Verloren"
 
         final_embed = discord.Embed(title=title, color=color)
         final_embed.description = f"**{' | '.join(reels)}**"
