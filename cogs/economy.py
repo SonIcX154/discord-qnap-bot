@@ -227,7 +227,7 @@ class EconomyCog(commands.Cog):
                     key TEXT PRIMARY KEY,
                     value TEXT
                 )
-            """)
+            "")
             await db.execute("""
                 INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)
             """, ("currency_name", DEFAULT_CURRENCY))
@@ -392,20 +392,29 @@ class EconomyCog(commands.Cog):
 
     async def _voice_earnings_loop(self):
         await self.bot.wait_until_ready()
-        print("[Economy] Voice earnings task started.")
+        print("[Economy] Voice earnings task started (only when others are active).")
 
         while True:
             try:
                 for guild in self.bot.guilds:
                     for vc in guild.voice_channels:
-                        for member in vc.members:
-                            if member.bot:
-                                continue
-                            voice_state = member.voice
-                            if voice_state and not voice_state.self_deaf and not voice_state.self_mute:
+                        # Sammle alle aktiven (nicht deaf, nicht mute) Mitglieder im Channel
+                        active_members = [
+                            member for member in vc.members
+                            if not member.bot
+                            and member.voice
+                            and not member.voice.self_deaf
+                            and not member.voice.self_mute
+                        ]
+
+                        # Nur Coins geben, wenn mindestens 2 aktive Personen im Channel sind
+                        if len(active_members) >= 2:
+                            for member in active_members:
                                 await self.add_coins(member.id, VOICE_COINS_PER_MINUTE)
+
             except Exception as e:
                 print(f"[Economy] Voice earnings error: {e}")
+
             await asyncio.sleep(60)
 
     @commands.Cog.listener()
@@ -571,6 +580,4 @@ class EconomyCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    cog = EconomyCog(bot)
-    await bot.add_cog(cog)
-    bot._economy_cog = cog
+    await bot.add_cog(EconomyCog(bot), name="Economy")
