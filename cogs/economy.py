@@ -217,7 +217,7 @@ class EconomyCog(commands.Cog):
     - Earn via chat + voice (only active users: not deaf/mute)
     - Interactive /leaderboard with pagination + My Position
     - Coinflip + Slots + Roulette (with buttons)
-    - Admin commands (/economy give/take/set)
+    - Admin commands (/economy-give, /economy-take, /economy-set)
     - Currency name changeable by admins
     """
 
@@ -457,13 +457,11 @@ class EconomyCog(commands.Cog):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.group(name="economy", description="Admin-Befehle für das Economy-System")
-    @app_commands.default_permissions(manage_guild=True)
-    async def economy_group(self, interaction: discord.Interaction):
-        pass
+    # ==================== ADMIN COMMANDS (separate for compatibility) ====================
 
-    @economy_group.command(name="give", description="Gib einem User Coins (Admin)")
+    @app_commands.command(name="economy-give", description="Gib einem User Coins (Admin)")
     @app_commands.describe(user="User der Coins bekommen soll", amount="Anzahl der Coins")
+    @app_commands.default_permissions(manage_guild=True)
     async def economy_give(self, interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None]):
         currency = await self.get_currency_name()
         old_balance = await self.get_balance(user.id)
@@ -475,8 +473,9 @@ class EconomyCog(commands.Cog):
         embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency} (vorher: {old_balance:,})", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @economy_group.command(name="take", description="Nimm einem User Coins weg (Admin)")
+    @app_commands.command(name="economy-take", description="Nimm einem User Coins weg (Admin)")
     @app_commands.describe(user="User von dem Coins abgezogen werden sollen", amount="Anzahl der Coins")
+    @app_commands.default_permissions(manage_guild=True)
     async def economy_take(self, interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None]):
         currency = await self.get_currency_name()
         old_balance = await self.get_balance(user.id)
@@ -496,8 +495,9 @@ class EconomyCog(commands.Cog):
         embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency} (vorher: {old_balance:,})", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @economy_group.command(name="set", description="Setze den exakten Kontostand eines Users (Admin)")
+    @app_commands.command(name="economy-set", description="Setze den exakten Kontostand eines Users (Admin)")
     @app_commands.describe(user="User", amount="Neuer exakter Kontostand")
+    @app_commands.default_permissions(manage_guild=True)
     async def economy_set(self, interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 0, None]):
         currency = await self.get_currency_name()
         old_balance = await self.get_balance(user.id)
