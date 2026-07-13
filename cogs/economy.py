@@ -27,8 +27,8 @@ class EconomyCog(commands.Cog):
     
     Features:
     - Global user balances (one DB per bot instance)
-    - Earn via chat + voice
-    - /daily, /balance
+    - Earn via chat + voice (only active users: not deaf/mute)
+    - /daily, /balance, /leaderboard
     - Coinflip + Slots
     - Currency name changeable by admins (/set-currency)
     """
@@ -54,7 +54,6 @@ class EconomyCog(commands.Cog):
 
     async def _init_db(self):
         async with aiosqlite.connect(self.db_path) as db:
-            # Users table
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id INTEGER PRIMARY KEY,
@@ -63,14 +62,12 @@ class EconomyCog(commands.Cog):
                     last_chat_earn INTEGER
                 )
             """)
-            # Config table for renamable currency etc.
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS config (
                     key TEXT PRIMARY KEY,
                     value TEXT
                 )
             """)
-            # Set default currency if not exists
             await db.execute("""
                 INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)
             """, ("currency_name", DEFAULT_CURRENCY))
@@ -79,7 +76,6 @@ class EconomyCog(commands.Cog):
     # ==================== CURRENCY (renamable) ====================
 
     async def get_currency_name(self) -> str:
-        """Returns the current currency name (admin can change it)."""
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 "SELECT value FROM config WHERE key = ?", ("currency_name",)
@@ -88,7 +84,6 @@ class EconomyCog(commands.Cog):
                 return row[0] if row else DEFAULT_CURRENCY
 
     async def set_currency_name(self, name: str):
-        """Admin sets a new currency name."""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 INSERT INTO config (key, value) VALUES (?, ?)
@@ -208,11 +203,11 @@ class EconomyCog(commands.Cog):
         await self.set_last_daily(user_id, int(time.time()))
         return amount
 
-    # ==================== VOICE EARNING ====================
+    # ==================== VOICE EARNING (only active users) ====================
 
     async def _voice_earnings_loop(self):
         await self.bot.wait_until_ready()
-        print("[Economy] Voice earnings task started.")
+        print("[Economy] Voice earnings task started (only active users).")
 
         while True:
             try:
@@ -221,7 +216,10 @@ class EconomyCog(commands.Cog):
                         for member in vc.members:
                             if member.bot:
                                 continue
-                            await self.add_coins(member.id, VOICE_COINS_PER_MINUTE)
+                            # Only award if user is actively in voice (not self-deaf and not self-mute)
+                            voice_state = member.voice
+                            if voice_state and not voice_state.self_deaf and not voice_state.self_mute:
+                                await self.add_coins(member.id, VOICE_COINS_PER_MINUTE)
             except Exception as e:
                 print(f"[Economy] Voice earnings error: {e}")
             await asyncio.sleep(60)
@@ -311,12 +309,9 @@ class EconomyCog(commands.Cog):
     SLOT_SYMBOLS: List[str] = ["🍒", "🍋", "🔔", "⭐", "7️⃣", "💎"]
 
     def _roll_slots(self) -> Tuple[List[str], int, str]:
-        """Roll 3 slots and calculate winnings multiplier."""
         reels = [random.choice(self.SLOT_SYMBOLS) for _ in range(3)]
 
-        # Calculate multiplier
         if reels[0] == reels[1] == reels[2]:
-            # Three of a kind
             if reels[0] == "💎":
                 multiplier = 10
                 win_text = "JACKPOT! 10x 💎"
@@ -333,7 +328,6 @@ class EconomyCog(commands.Cog):
                 multiplier = 3
                 win_text = "3x Gleich!"
         elif reels[0] == reels[1] or reels[1] == reels[2] or reels[0] == reels[2]:
-            # Two of a kind
             multiplier = 2
             win_text = "2x Gleich!"
         else:
@@ -392,6 +386,54 @@ class EconomyCog(commands.Cog):
         else:
             raise error
 
+    # ==================== LEADERBOARD ====================
+
+    async def get_top_users(self, limit: int = 10) -> List[Tuple[int, int]]:
+        """Returns list of (user_id, balance) sorted by balance DESC."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT user_id, balance FROM users ORDER BY balance DESC LIMIT ?", (limit,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [(row[0], row[1]) for row in rows]
+
+    @app_commands.command(name="leaderboard", description="Zeigt die Top 10 reichsten User an")
+    async def leaderboard(self, interaction: discord.Interaction):
+        currency = await self.get_currency_name()
+        top_users = await self.get_top_users(10)
+
+        if not top_users:
+            await interaction.response.send_message("Noch keine Daten im Leaderboard.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=f"🏆 {currency} Leaderboard (Top 10)",
+            color=discord.Color.gold()
+        )
+
+        lines = []
+        for i, (user_id, balance) in enumerate(top_users, 1):
+            # Try to get nice name
+            member = interaction.guild.get_member(user_id) if interaction.guild else None
+            if member:
+                name = member.display_name
+            else:
+                try:
+                    if interaction.guild:
+                        member = await interaction.guild.fetch_member(user_id)
+                        name = member.display_name
+                    else:
+                        name = f"User {user_id}"
+                except:
+                    name = f"User {user_id}"
+
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+            lines.append(f"{medal} **{name}** — {balance:,} {currency}")
+
+        embed.description = "\n".join(lines)
+        embed.set_footer(text="Global pro Bot-Instanz • /balance für deinen Stand")
+        await interaction.response.send_message(embed=embed)
+
     # ==================== USER COMMANDS ====================
 
     @app_commands.command(name="balance", description="Zeigt deinen aktuellen Kontostand")
@@ -406,7 +448,7 @@ class EconomyCog(commands.Cog):
             description=f"**{bal:,}** {currency}",
             color=discord.Color.gold()
         )
-        embed.set_footer(text="/daily • /coinflip • /slots")
+        embed.set_footer(text="/daily • /coinflip • /slots • /leaderboard")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="daily", description="Täglicher Bonus (einmal alle 24h)")
