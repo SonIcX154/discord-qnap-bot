@@ -30,7 +30,8 @@ class EconomyCog(commands.Cog):
     - Earn via chat + voice (only active users: not deaf/mute)
     - /daily, /balance, /leaderboard
     - Coinflip + Slots
-    - Currency name changeable by admins (/set-currency)
+    - Admin commands (/economy give/take/set)
+    - Currency name changeable by admins
     """
 
     def __init__(self, bot: commands.Bot):
@@ -216,7 +217,6 @@ class EconomyCog(commands.Cog):
                         for member in vc.members:
                             if member.bot:
                                 continue
-                            # Only award if user is actively in voice (not self-deaf and not self-mute)
                             voice_state = member.voice
                             if voice_state and not voice_state.self_deaf and not voice_state.self_mute:
                                 await self.add_coins(member.id, VOICE_COINS_PER_MINUTE)
@@ -251,6 +251,68 @@ class EconomyCog(commands.Cog):
             description=f"Die Währung heißt jetzt **{currency}**.",
             color=discord.Color.green()
         )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ==================== ADMIN COMMAND GROUP ====================
+
+    @app_commands.group(name="economy", description="Admin-Befehle für das Economy-System")
+    @app_commands.default_permissions(manage_guild=True)
+    async def economy_group(self, interaction: discord.Interaction):
+        """Base group for economy admin commands."""
+        pass
+
+    @economy_group.command(name="give", description="Gib einem User Coins (Admin)")
+    @app_commands.describe(user="User der Coins bekommen soll", amount="Anzahl der Coins")
+    async def economy_give(self, interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None]):
+        currency = await self.get_currency_name()
+        old_balance = await self.get_balance(user.id)
+        new_balance = await self.add_coins(user.id, amount)
+
+        embed = discord.Embed(title="✅ Coins gegeben", color=discord.Color.green())
+        embed.add_field(name="User", value=user.mention, inline=True)
+        embed.add_field(name="Betrag", value=f"+{amount:,} {currency}", inline=True)
+        embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency} (vorher: {old_balance:,})", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @economy_group.command(name="take", description="Nimm einem User Coins weg (Admin)")
+    @app_commands.describe(user="User von dem Coins abgezogen werden sollen", amount="Anzahl der Coins")
+    async def economy_take(self, interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None]):
+        currency = await self.get_currency_name()
+        old_balance = await self.get_balance(user.id)
+
+        success = await self.remove_coins(user.id, amount)
+        if not success:
+            await interaction.response.send_message(
+                f"❌ {user.mention} hat nicht genug {currency} (hat nur {old_balance:,}).",
+                ephemeral=True
+            )
+            return
+
+        new_balance = await self.get_balance(user.id)
+        embed = discord.Embed(title="✅ Coins abgezogen", color=discord.Color.orange())
+        embed.add_field(name="User", value=user.mention, inline=True)
+        embed.add_field(name="Betrag", value=f"-{amount:,} {currency}", inline=True)
+        embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency} (vorher: {old_balance:,})", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @economy_group.command(name="set", description="Setze den exakten Kontostand eines Users (Admin)")
+    @app_commands.describe(user="User", amount="Neuer exakter Kontostand")
+    async def economy_set(self, interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 0, None]):
+        currency = await self.get_currency_name()
+        old_balance = await self.get_balance(user.id)
+
+        # Set balance directly
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT INTO users (user_id, balance) VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET balance = ?
+            """, (user.id, amount, amount))
+            await db.commit()
+
+        embed = discord.Embed(title="✅ Kontostand gesetzt", color=discord.Color.blue())
+        embed.add_field(name="User", value=user.mention, inline=True)
+        embed.add_field(name="Alter Stand", value=f"{old_balance:,} {currency}", inline=True)
+        embed.add_field(name="Neuer Stand", value=f"**{amount:,}** {currency}", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ==================== GAMBLING: COINFLIP ====================
@@ -359,11 +421,11 @@ class EconomyCog(commands.Cog):
         winnings = int(bet * multiplier)
 
         if multiplier > 0:
-            new_balance = await self.add_coins(user_id, winnings)
+            new_balance = await self.add_coins(user.id, winnings)
             color = discord.Color.green()
             title = "🎰 SLOTS - GEWONNEN!"
         else:
-            new_balance = await self.get_balance(user_id)
+            new_balance = await self.get_balance(user.id)
             color = discord.Color.red()
             title = "🎰 SLOTS - Verloren"
 
@@ -389,7 +451,6 @@ class EconomyCog(commands.Cog):
     # ==================== LEADERBOARD ====================
 
     async def get_top_users(self, limit: int = 10) -> List[Tuple[int, int]]:
-        """Returns list of (user_id, balance) sorted by balance DESC."""
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 "SELECT user_id, balance FROM users ORDER BY balance DESC LIMIT ?", (limit,)
@@ -413,7 +474,6 @@ class EconomyCog(commands.Cog):
 
         lines = []
         for i, (user_id, balance) in enumerate(top_users, 1):
-            # Try to get nice name
             member = interaction.guild.get_member(user_id) if interaction.guild else None
             if member:
                 name = member.display_name
