@@ -218,6 +218,174 @@ class RouletteView(discord.ui.View):
             child.disabled = True
 
 
+class SlotsView(discord.ui.View):
+    """View with bet adjustment + Play Again button for Slots."""
+
+    def __init__(self, cog: "EconomyCog", user_id: int, bet: int, currency: str):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.user_id = user_id
+        self.bet = bet
+        self.currency = currency
+        self.playing = False
+
+    async def _update_bet(self, interaction: discord.Interaction, new_bet: int):
+        if new_bet < 10:
+            new_bet = 10
+        self.bet = new_bet
+
+        await interaction.response.send_message(
+            f"✅ Neuer Einsatz: **{self.bet:,}** {self.currency}",
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="➖ 10", style=discord.ButtonStyle.secondary, row=0)
+    async def decrease_10(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Nur der Spieler darf die Buttons benutzen.", ephemeral=True)
+            return
+        await self._update_bet(interaction, self.bet - 10)
+
+    @discord.ui.button(label="➕ 10", style=discord.ButtonStyle.secondary, row=0)
+    async def increase_10(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Nur der Spieler darf die Buttons benutzen.", ephemeral=True)
+            return
+        await self._update_bet(interaction, self.bet + 10)
+
+    @discord.ui.button(label="2x", style=discord.ButtonStyle.primary, row=0)
+    async def double_bet(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Nur der Spieler darf die Buttons benutzen.", ephemeral=True)
+            return
+        await self._update_bet(interaction, self.bet * 2)
+
+    @discord.ui.button(label="🔄 Nochmal spielen", style=discord.ButtonStyle.success, row=1)
+    async def play_again(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Nur der Spieler darf den Button benutzen.", ephemeral=True)
+            return
+
+        if self.playing:
+            await interaction.response.send_message("Bitte warte, bis die aktuelle Runde fertig ist.", ephemeral=True)
+            return
+
+        self.playing = True
+
+        current_balance = await self.cog.get_balance(self.user_id)
+        if current_balance < self.bet:
+            await interaction.response.send_message(
+                f"❌ Nicht genug {self.currency}! Du hast nur **{current_balance:,}**.",
+                ephemeral=True
+            )
+            self.playing = False
+            return
+
+        if not await self.cog.remove_coins(self.user_id, self.bet):
+            await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
+            self.playing = False
+            return
+
+        spinning_embed = discord.Embed(
+            title="🎰 Slots - Die Walzen drehen sich...",
+            description="** | | | **",
+            color=discord.Color.gold()
+        )
+        await interaction.response.edit_message(embed=spinning_embed, view=None)
+
+        for _ in range(4):
+            temp_reels = [random.choice(self.cog.SLOT_SYMBOLS) for _ in range(3)]
+            spinning_embed.description = f"**{' | '.join(temp_reels)}**"
+            await interaction.edit_original_response(embed=spinning_embed)
+            await asyncio.sleep(0.28)
+
+        reels, multiplier, win_text = self.cog._roll_slots()
+        winnings = int(self.bet * multiplier)
+
+        if multiplier > 0:
+            new_balance = await self.cog.add_coins(self.user_id, winnings)
+            color = discord.Color.green()
+            title = "🎰 SLOTS - GEWONNEN!"
+        else:
+            new_balance = await self.cog.get_balance(self.user_id)
+            color = discord.Color.red()
+            title = "🎰 SLOTS - Verloren"
+
+        final_embed = discord.Embed(title=title, color=color)
+        final_embed.description = f"**{' | '.join(reels)}**"
+        final_embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
+        if multiplier > 0:
+            final_embed.add_field(name="Gewinn", value=f"+{winnings:,} {self.currency} ({win_text})", inline=True)
+        else:
+            final_embed.add_field(name="Ergebnis", value=win_text, inline=True)
+        final_embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
+        final_embed.set_footer(text=f"Gespielt von {interaction.user.display_name} • RTP ~92%")
+
+        new_view = SlotsView(self.cog, self.user_id, self.bet, self.currency)
+        await interaction.edit_original_response(embed=final_embed, view=new_view)
+        self.playing = False
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
+class CoinflipView(discord.ui.View):
+    """Interactive Coinflip with choice of Kopf or Zahl."""
+
+    def __init__(self, cog: "EconomyCog", interaction: discord.Interaction, bet: int, currency: str):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.user_id = interaction.user.id
+        self.bet = bet
+        self.currency = currency
+
+    async def _resolve(self, interaction: discord.Interaction, choice: str):
+        for child in self.children:
+            child.disabled = True
+
+        result = random.choice(["Kopf", "Zahl"])
+        won = (choice == result)
+
+        if won:
+            new_balance = await self.cog.add_coins(self.user_id, self.bet)
+            color = discord.Color.green()
+            title = "🪙 Coinflip - Gewonnen!"
+            win_text = f"+{self.bet:,} {self.currency}"
+        else:
+            new_balance = await self.cog.get_balance(self.user_id)
+            color = discord.Color.red()
+            title = "🪙 Coinflip - Verloren"
+            win_text = f"-{self.bet:,} {self.currency}"
+
+        embed = discord.Embed(title=title, color=color)
+        embed.description = f"Die Münze ist auf **{result}** gelandet."
+        embed.add_field(name="Deine Wahl", value=choice, inline=True)
+        embed.add_field(name="Ergebnis", value=win_text, inline=True)
+        embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
+        embed.set_footer(text=f"Gespielt von {interaction.user.display_name}")
+
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="🪙 Kopf", style=discord.ButtonStyle.primary, row=0)
+    async def choose_kopf(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Nur der Spieler darf wählen.", ephemeral=True)
+            return
+        await self._resolve(interaction, "Kopf")
+
+    @discord.ui.button(label="🪙 Zahl", style=discord.ButtonStyle.primary, row=0)
+    async def choose_zahl(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Nur der Spieler darf wählen.", ephemeral=True)
+            return
+        await self._resolve(interaction, "Zahl")
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
 class EconomyCog(commands.Cog):
     """Economy & Gambling system with fictional (renamable) currency.
     
@@ -225,7 +393,7 @@ class EconomyCog(commands.Cog):
     - Global user balances (one DB per bot instance)
     - Earn via chat + voice (only active users: not deaf/mute)
     - Interactive /leaderboard with pagination + My Position
-    - Coinflip + Slots (with fast animation) + Roulette (with buttons)
+    - Coinflip (choose Kopf/Zahl) + Slots (with bet buttons) + Roulette (with buttons)
     - Admin commands (/economy-give, /economy-take, /economy-set)
     - Currency name changeable by admins
     """
@@ -264,7 +432,7 @@ class EconomyCog(commands.Cog):
                     key TEXT PRIMARY KEY,
                     value TEXT
                 )
-            """)
+            "")
             await db.execute("""
                 INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)
             """, ("currency_name", DEFAULT_CURRENCY))
@@ -522,7 +690,7 @@ class EconomyCog(commands.Cog):
         embed.add_field(name="Neuer Stand", value=f"**{amount:,}** {currency}", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="coinflip", description="Setze auf einen Münzwurf (50/50)")
+    @app_commands.command(name="coinflip", description="Wähle Kopf oder Zahl und gewinne den 2x Einsatz")
     @app_commands.describe(bet="Einsatz in Währung (Min. 10)")
     @app_commands.checks.cooldown(1, 3.0, key=lambda interaction: interaction.user.id)
     async def coinflip(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]):
@@ -541,26 +709,17 @@ class EconomyCog(commands.Cog):
             await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
             return
 
-        result = random.choice(["Kopf", "Zahl"])
-        won = random.random() < 0.5
+        embed = discord.Embed(
+            title="🪙 Coinflip - Wähle deine Seite",
+            description=f"Du hast **{bet:,} {currency}** gesetzt.
 
-        if won:
-            new_balance = await self.add_coins(user_id, bet)
-            embed = discord.Embed(title="🪙 Coinflip - Gewonnen!", color=discord.Color.green())
-            embed.description = f"Die Münze ist auf **{result}** gelandet."
-            embed.add_field(name="Einsatz", value=f"{bet:,} {currency}", inline=True)
-            embed.add_field(name="Gewinn", value=f"+{bet:,} {currency}", inline=True)
-            embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
-        else:
-            new_balance = await self.get_balance(user_id)
-            embed = discord.Embed(title="🪙 Coinflip - Verloren", color=discord.Color.red())
-            embed.description = f"Die Münze ist auf **{result}** gelandet."
-            embed.add_field(name="Einsatz", value=f"{bet:,} {currency}", inline=True)
-            embed.add_field(name="Verlust", value=f"-{bet:,} {currency}", inline=True)
-            embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
+Wähle **Kopf** oder **Zahl**:",
+            color=discord.Color.gold()
+        )
+        embed.set_footer(text="Timeout nach 2 Minuten")
 
-        embed.set_footer(text=f"Gespielt von {interaction.user.display_name}")
-        await interaction.response.send_message(embed=embed)
+        view = CoinflipView(self, interaction, bet, currency)
+        await interaction.response.send_message(embed=embed, view=view)
 
     @coinflip.error
     async def coinflip_error(self, interaction: discord.Interaction, error):
@@ -600,7 +759,7 @@ class EconomyCog(commands.Cog):
 
         return reels, multiplier, win_text
 
-    @app_commands.command(name="slots", description="Spiele Slots mit animierten Walzen")
+    @app_commands.command(name="slots", description="Spiele Slots mit animierten Walzen + Bet Buttons")
     @app_commands.describe(bet="Einsatz (Min. 10)")
     @app_commands.checks.cooldown(1, 4.0, key=lambda interaction: interaction.user.id)
     async def slots(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]):
@@ -619,7 +778,6 @@ class EconomyCog(commands.Cog):
             await interaction.response.send_message("❌ Fehler beim Einsatz.", ephemeral=True)
             return
 
-        # Fast spinning animation (4 spins, ~1 second total)
         spinning_embed = discord.Embed(
             title="🎰 Slots - Die Walzen drehen sich...",
             description="** | | | **",
@@ -633,7 +791,6 @@ class EconomyCog(commands.Cog):
             await interaction.edit_original_response(embed=spinning_embed)
             await asyncio.sleep(0.28)
 
-        # Final result
         reels, multiplier, win_text = self._roll_slots()
         winnings = int(bet * multiplier)
 
@@ -650,13 +807,14 @@ class EconomyCog(commands.Cog):
         final_embed.description = f"**{' | '.join(reels)}**"
         final_embed.add_field(name="Einsatz", value=f"{bet:,} {currency}", inline=True)
         if multiplier > 0:
-            final_embed.add_field(name="Gewinn", value=f"+{winnings:,} {currency} ({win_text})", inline=True)
+            final_embed.add_field(name="Gewinn", value=f"+{winnings:,} {self.currency} ({win_text})", inline=True)
         else:
             final_embed.add_field(name="Ergebnis", value=win_text, inline=True)
         final_embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
         final_embed.set_footer(text=f"Gespielt von {interaction.user.display_name} • RTP ~92%")
 
-        await interaction.edit_original_response(embed=final_embed)
+        view = SlotsView(self, user_id, bet, currency)
+        await interaction.edit_original_response(embed=final_embed, view=view)
 
     @slots.error
     async def slots_error(self, interaction: discord.Interaction, error):
@@ -746,7 +904,7 @@ class EconomyCog(commands.Cog):
 
     @app_commands.command(name="daily", description="Täglicher Bonus (einmal alle 24h)")
     async def daily(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=False)  # public message
+        await interaction.response.defer(ephemeral=False)
 
         user_id = interaction.user.id
         currency = await self.get_currency_name()
@@ -758,7 +916,7 @@ class EconomyCog(commands.Cog):
             minutes = (remaining % 3600) // 60
             await interaction.followup.send(
                 f"⏳ Daily schon geholt. Nächster in **{hours}h {minutes}m**.",
-                ephemeral=True   # cooldown message remains private
+                ephemeral=True
             )
             return
 
@@ -769,7 +927,7 @@ class EconomyCog(commands.Cog):
         embed.description = f"**{interaction.user.mention}** hat **{amount} {currency}** erhalten!"
         embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
         embed.set_footer(text="Bis morgen! 💰")
-        await interaction.followup.send(embed=embed, ephemeral=False)  # public reward message
+        await interaction.followup.send(embed=embed, ephemeral=False)
 
 
 async def setup(bot: commands.Bot):
