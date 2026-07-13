@@ -227,7 +227,7 @@ class EconomyCog(commands.Cog):
                     key TEXT PRIMARY KEY,
                     value TEXT
                 )
-            """)
+            "")
             await db.execute("""
                 INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)
             """, ("currency_name", DEFAULT_CURRENCY))
@@ -484,7 +484,7 @@ class EconomyCog(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="coinflip", description="Wähle Kopf oder Zahl und gewinne den 2x Einsatz")
-    @app_commands.describe(bet="Einsatz (Min. 10)")
+    @app_commands.describe(bet="Einsatz in Währung (Min. 10)")
     @app_commands.checks.cooldown(1, 3.0, key=lambda interaction: interaction.user.id)
     async def coinflip(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]):
         user_id = interaction.user.id
@@ -571,4 +571,6 @@ class EconomyCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(EconomyCog(bot))
+    # Wichtig: Wir registrieren den Cog explizit unter dem Namen "Economy",
+    # damit andere Cogs (Slots, Roulette) ihn mit get_cog("Economy") finden.
+    await bot.add_cog(EconomyCog(bot), name="Economy")
