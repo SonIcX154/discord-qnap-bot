@@ -227,7 +227,7 @@ class EconomyCog(commands.Cog):
                     key TEXT PRIMARY KEY,
                     value TEXT
                 )
-            "")
+            """)
             await db.execute("""
                 INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)
             """, ("currency_name", DEFAULT_CURRENCY))
