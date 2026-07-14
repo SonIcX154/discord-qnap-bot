@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import os
+import time
 import random
 import asyncio
 import aiosqlite
 import discord
 from discord import app_commands
 from discord.ext import commands
-from typing import Optional, TYPE_CHECKING
+from discord import app_commands
+from typing import Optional, TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from utils.bet_mixin import BetAdjustableMixin
@@ -103,14 +105,14 @@ class LeaderboardView(discord.ui.View):
         return embed
 
     @discord.ui.button(label="◀️ Zurück", style=discord.ButtonStyle.secondary)
-    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         if self.current_page > 1:
             self.current_page -= 1
         embed = await self.update_embed()
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="▶️ Weiter", style=discord.ButtonStyle.secondary)
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         total = await self.get_total_pages()
         if self.current_page < total:
             self.current_page += 1
@@ -118,7 +120,7 @@ class LeaderboardView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="📍 Meine Position", style=discord.ButtonStyle.primary)
-    async def my_position_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def my_position_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         rank = await self.cog.get_user_rank(interaction.user.id)
         if rank is None:
             await interaction.response.send_message("Du hast noch keine Coins.", ephemeral=True)
@@ -184,14 +186,14 @@ class CoinflipView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=new_view)
 
     @discord.ui.button(label="🪙 Kopf", style=discord.ButtonStyle.primary, row=1)
-    async def choose_kopf(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def choose_kopf(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Nur der Spieler darf wählen.", ephemeral=True)
             return
         await self._resolve(interaction, "Kopf")
 
     @discord.ui.button(label="🪙 Zahl", style=discord.ButtonStyle.primary, row=1)
-    async def choose_zahl(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def choose_zahl(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Nur der Spieler darf wählen.", ephemeral=True)
             return
@@ -346,6 +348,30 @@ class EconomyCog(commands.Cog):
             """, (user_id, timestamp, timestamp))
             await db.commit()
 
+    async def get_total_users(self) -> int:
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("SELECT COUNT(*) FROM users") as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else 0
+
+    async def get_leaderboard_page(self, page: int, per_page: int) -> list[tuple[int, int]]:
+        offset = (page - 1) * per_page
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT user_id, balance FROM users ORDER BY balance DESC LIMIT ? OFFSET ?",
+                (per_page, offset)
+            ) as cursor:
+                return await cursor.fetchall()
+
+    async def get_user_rank(self, user_id: int) -> int | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT COUNT(*) + 1 FROM users WHERE balance > (SELECT balance FROM users WHERE user_id = ?)",
+                (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else None
+
     # ==================== NEUES CHAT SYSTEM (max 180 Coins/Stunde) ====================
 
     async def get_chat_coins_last_hour(self, user_id: int) -> int:
@@ -377,6 +403,18 @@ class EconomyCog(commands.Cog):
             )
             await db.commit()
 
+        return amount
+
+    async def can_claim_daily(self, user_id: int) -> bool:
+        last = await self.get_last_daily(user_id)
+        if last is None:
+            return True
+        return (int(time.time()) - last) >= DAILY_COOLDOWN_SECONDS
+
+    async def claim_daily(self, user_id: int) -> int:
+        amount = random.randint(DAILY_COINS_MIN, DAILY_COINS_MAX)
+        await self.add_coins(user_id, amount)
+        await self.set_last_daily(user_id, int(time.time()))
         return amount
 
     # ==================== BACKGROUND TASKS ====================
