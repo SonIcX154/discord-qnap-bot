@@ -1,13 +1,15 @@
 #!/bin/bash
 
 # ==============================================
-# Rebuild Script für alle 3 Discord Bots
-# Einfach die Pfade unten anpassen und ausführen
+# Rebuild Script für alle Discord Bots (QNAP-kompatibel)
 # ==============================================
 
-BOT1_PATH="/share/Container/discord-bot-1"   # <-- Hier anpassen
-BOT2_PATH="/share/Container/discord-bot-2"   # <-- Hier anpassen
-BOT3_PATH="/share/Container/discord-bot-3"   # <-- Hier anpassen
+export PATH=$PATH:/share/CACHEDEV1_DATA/.qpkg/container-station/bin
+
+# Pfade zu deinen Bot-Ordnern (einfach anpassen)
+BOT1_PATH="/share/Container/LostBot"      # <-- Hier anpassen
+BOT2_PATH="/share/Container/JuliaNPC"     # <-- Hier anpassen
+BOT3_PATH="/share/Container/TestBot"      # <-- Hier anpassen
 
 BOTS=("$BOT1_PATH" "$BOT2_PATH" "$BOT3_PATH")
 
@@ -18,10 +20,9 @@ for bot in "${BOTS[@]}"; do
     if [ -d "$bot" ]; then
         echo ""
         echo "🔄 Rebuild für: $bot"
-        cd "$bot" || { echo "❌ Konnte Ordner nicht betreten"; continue; }
 
-        docker compose down
-        docker compose up --build -d
+        docker compose -f "$bot/docker-compose.yml" down
+        docker compose -f "$bot/docker-compose.yml" up --build -d
 
         echo "✅ $bot erfolgreich neu gebaut"
     else
