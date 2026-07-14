@@ -146,6 +146,14 @@ class CoinflipView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         discord.ui.View.__init__(self, timeout=120)
 
     async def _do_replay(self, interaction: discord.Interaction) -> None:
+        # WICHTIG: Bei jedem Replay den Einsatz wieder abziehen
+        if not await self.economy.remove_coins(self.user_id, self.bet):
+            await interaction.response.send_message(
+                f"❌ Du hast nicht genug {self.currency} für einen neuen Versuch.", 
+                ephemeral=True
+            )
+            return
+
         embed = discord.Embed(
             title="🪙 Coinflip - Wähle deine Seite",
             description=f"Du hast **{self.bet:,} {self.currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann **Kopf** oder **Zahl**:",
