@@ -6,7 +6,6 @@ import random
 import asyncio
 import aiosqlite
 import discord
-from discord import app_commands
 from discord.ext import commands
 from discord import app_commands
 from typing import Optional, TYPE_CHECKING, Any
@@ -135,7 +134,7 @@ class LeaderboardView(discord.ui.View):
 
     async def on_timeout(self) -> None:
         for child in self.children:
-            child.disabled = True
+            child.disabled = True  # type: ignore[attr-defined]
 
 
 class CoinflipView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
@@ -159,7 +158,7 @@ class CoinflipView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
 
     async def _resolve(self, interaction: discord.Interaction, choice: str) -> None:
         for child in self.children:
-            child.disabled = True
+            child.disabled = True  # type: ignore[attr-defined]
 
         result = random.choice(["Kopf", "Zahl"])
         won = (choice == result)
@@ -201,7 +200,7 @@ class CoinflipView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
 
     async def on_timeout(self) -> None:
         for child in self.children:
-            child.disabled = True
+            child.disabled = True  # type: ignore[attr-defined]
 
 
 class EconomyCog(commands.Cog):
@@ -250,7 +249,7 @@ class EconomyCog(commands.Cog):
                     key TEXT PRIMARY KEY,
                     value TEXT
                 )
-            """)
+            "")
             await db.execute("""
                 INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)
             """, ("currency_name", DEFAULT_CURRENCY))
@@ -361,7 +360,8 @@ class EconomyCog(commands.Cog):
                 "SELECT user_id, balance FROM users ORDER BY balance DESC LIMIT ? OFFSET ?",
                 (per_page, offset)
             ) as cursor:
-                return await cursor.fetchall()
+                rows = await cursor.fetchall()
+                return [(int(r[0]), int(r[1])) for r in rows]
 
     async def get_user_rank(self, user_id: int) -> int | None:
         async with aiosqlite.connect(self.db_path) as db:
@@ -370,7 +370,7 @@ class EconomyCog(commands.Cog):
                 (user_id,)
             ) as cursor:
                 row = await cursor.fetchone()
-                return row[0] if row else None
+                return int(row[0]) if row else None
 
     # ==================== NEUES CHAT SYSTEM (max 180 Coins/Stunde) ====================
 
@@ -611,5 +611,4 @@ class EconomyCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(EconomyCog(bot))
-
+    await bot.add_cog(EconomyCog(bot), name="Economy")
