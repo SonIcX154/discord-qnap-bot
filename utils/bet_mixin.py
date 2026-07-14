@@ -9,6 +9,9 @@ class BetAdjustableMixin:
     """
     Mixin for Views that allow adjusting the bet amount.
     Provides +10, -10, x2 and ÷2 buttons.
+    
+    Subclasses should override _get_updated_embed() to enable live embed updates
+    when the bet is changed.
     """
 
     def __init__(self, economy_cog: "EconomyCog", user_id: int, bet: int, currency: str) -> None:
@@ -17,14 +20,21 @@ class BetAdjustableMixin:
         self.bet = bet
         self.currency = currency
 
+    async def _get_updated_embed(self) -> discord.Embed | None:
+        """Override this in subclass to return an updated embed with current self.bet."""
+        return None
+
     async def _update_bet(self, interaction: discord.Interaction, new_bet: int) -> None:
         if new_bet < 10:
             new_bet = 10
         self.bet = new_bet
-        await interaction.response.send_message(
-            f"✅ Neuer Einsatz: **{self.bet:,}** {self.currency}",
-            ephemeral=True
-        )
+
+        embed = await self._get_updated_embed()
+        if embed:
+            await interaction.response.edit_message(embed=embed)
+        else:
+            # Fallback: just acknowledge silently if no embed update is provided
+            await interaction.response.defer()
 
     @discord.ui.button(label="➖ 10", style=discord.ButtonStyle.secondary, row=0)
     async def decrease_10(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
