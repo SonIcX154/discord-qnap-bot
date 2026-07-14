@@ -537,7 +537,7 @@ class EconomyCog(commands.Cog):
 
         embed = discord.Embed(
             title="🪙 Coinflip - Wähle deine Seite",
-            description=f"Du hast **{bet:,} {self.currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann **Kopf** oder **Zahl**:",
+            description=f"Du hast **{bet:,} {currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann **Kopf** oder **Zahl**:",
             color=discord.Color.gold()
         )
         embed.set_footer(text="Timeout nach 2 Minuten")
@@ -611,4 +611,4 @@ class EconomyCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(EconomyCog(bot), name="Economy")
+    await bot.add_cog(EconomyCog(bot))
