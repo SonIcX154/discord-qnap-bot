@@ -90,7 +90,7 @@ class SlotsCog(commands.Cog):
     @app_commands.describe(bet="Einsatz (Min. 10)")
     @app_commands.checks.cooldown(1, 4.0, key=lambda interaction: interaction.user.id)
     async def slots(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]) -> None:
-        economy = self.bot.get_cog("Economy")
+        economy = self.bot.get_cog("EconomyCog")
         if not economy:
             await interaction.response.send_message("Economy system nicht verfügbar.", ephemeral=True)
             return
