@@ -36,7 +36,7 @@ class BetAdjustableMixin:
             # Fallback: just acknowledge silently if no embed update is provided
             await interaction.response.defer()
 
-    @discord.ui.button(label="➖ 10", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="➖ 10", style=discord.ButtonStyle.danger, row=0)
     async def decrease_10(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
@@ -46,7 +46,7 @@ class BetAdjustableMixin:
             return
         await self._update_bet(interaction, self.bet - 10)
 
-    @discord.ui.button(label="➕ 10", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="➕ 10", style=discord.ButtonStyle.success, row=0)
     async def increase_10(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
@@ -56,7 +56,7 @@ class BetAdjustableMixin:
             return
         await self._update_bet(interaction, self.bet + 10)
 
-    @discord.ui.button(label="x2", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="x2", style=discord.ButtonStyle.secondary, row=0)
     async def double_bet(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
@@ -66,7 +66,7 @@ class BetAdjustableMixin:
             return
         await self._update_bet(interaction, self.bet * 2)
 
-    @discord.ui.button(label="÷2", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="÷2", style=discord.ButtonStyle.secondary, row=0)
     async def halve_bet(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
