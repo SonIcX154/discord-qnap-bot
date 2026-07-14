@@ -36,7 +36,15 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
             await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
             return
 
-        spinning_embed = discord.Embed(title="🔀 Slots - Die Walzen drehen sich...", description="** | | | **", color=discord.Color.gold())
+        # Stabileres Embed mit gleichen Feldern wie am Ende
+        spinning_embed = discord.Embed(
+            title="🔀 Slots - Die Walzen drehen sich...",
+            color=discord.Color.gold()
+        )
+        spinning_embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
+        spinning_embed.add_field(name="Dein Kontostand", value=f"**{current_balance - self.bet:,}** {self.currency}", inline=True)
+        spinning_embed.description = "** | | | **"
+
         await interaction.response.edit_message(embed=spinning_embed, view=None)
 
         for _ in range(4):
@@ -96,18 +104,26 @@ class SlotsCog(commands.Cog):
             return
 
         user_id = interaction.user.id
-        currency = await economy.get_currency_name()  # type: ignore[union-attr]
+        currency = await economy.get_currency_name()
 
-        current = await economy.get_balance(user_id)  # type: ignore[union-attr]
+        current = await economy.get_balance(user_id)
         if current < bet:
             await interaction.response.send_message(f"❌ Nicht genug {currency}! Du hast **{current:,}** {currency}.", ephemeral=True)
             return
 
-        if not await economy.remove_coins(user_id, bet):  # type: ignore[union-attr]
+        if not await economy.remove_coins(user_id, bet):
             await interaction.response.send_message("❌ Fehler beim Einsatz.", ephemeral=True)
             return
 
-        spinning_embed = discord.Embed(title="🔀 Slots - Die Walzen drehen sich...", description="** | | | **", color=discord.Color.gold())
+        # Stabileres Spin-Embed mit gleichen Feldern wie das Endergebnis
+        spinning_embed = discord.Embed(
+            title="🔀 Slots - Die Walzen drehen sich...",
+            color=discord.Color.gold()
+        )
+        spinning_embed.add_field(name="Einsatz", value=f"{bet:,} {currency}", inline=True)
+        spinning_embed.add_field(name="Dein Kontostand", value=f"**{current - bet:,}** {currency}", inline=True)
+        spinning_embed.description = "** | | | **"
+
         await interaction.response.send_message(embed=spinning_embed)
 
         for _ in range(4):
@@ -120,11 +136,11 @@ class SlotsCog(commands.Cog):
         winnings = int(bet * multiplier)
 
         if multiplier > 0:
-            new_balance = await economy.add_coins(user_id, winnings)  # type: ignore[union-attr]
+            new_balance = await economy.add_coins(user_id, winnings)
             color = discord.Color.green()
             title = "🔀 SLOTS - GEWONNEN!"
         else:
-            new_balance = await economy.get_balance(user_id)  # type: ignore[union-attr]
+            new_balance = await economy.get_balance(user_id)
             color = discord.Color.red()
             title = "🔀 SLOTS - Verloren"
 
