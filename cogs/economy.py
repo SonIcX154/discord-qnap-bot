@@ -5,6 +5,7 @@ import random
 import asyncio
 import aiosqlite
 import discord
+from discord import app_commands
 from discord.ext import commands
 from typing import Optional, TYPE_CHECKING
 
@@ -247,7 +248,7 @@ class EconomyCog(commands.Cog):
                     key TEXT PRIMARY KEY,
                     value TEXT
                 )
-            "")
+            """)
             await db.execute("""
                 INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)
             """, ("currency_name", DEFAULT_CURRENCY))
@@ -572,4 +573,5 @@ class EconomyCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(EconomyCog(bot), name="Economy")
+    await bot.add_cog(EconomyCog(bot))
+
