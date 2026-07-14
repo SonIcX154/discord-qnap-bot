@@ -5,9 +5,9 @@
 # Einfach die Pfade unten anpassen und ausführen
 # ==============================================
 
-BOT1_PATH="/share/Container/discord-bot-1"   # <-- Hier anpassen
-BOT2_PATH="/share/Container/discord-bot-2"   # <-- Hier anpassen
-BOT3_PATH="/share/Container/discord-bot-3"   # <-- Hier anpassen
+BOT1_PATH="/share/Container/LostBot"
+BOT2_PATH="/share/Container/JuliaNPC"
+BOT3_PATH="/share/Container/TestBot"
 
 BOTS=("$BOT1_PATH" "$BOT2_PATH" "$BOT3_PATH")
 

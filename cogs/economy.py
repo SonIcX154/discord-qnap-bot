@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import os
-import time
 import random
 import asyncio
 import aiosqlite
 import discord
 from discord.ext import commands
-from discord import app_commands
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
