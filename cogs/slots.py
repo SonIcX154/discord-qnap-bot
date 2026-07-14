@@ -36,13 +36,14 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
             await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
             return
 
-        # Stabileres Embed mit gleichen Feldern wie am Ende
+        # Stabileres Embed mit 3 Feldern (wie am Ende)
         spinning_embed = discord.Embed(
-            title="🎰 Slots - Die Walzen drehen sich...",
+            title="🍠 Slots - Die Walzen drehen sich...",
             color=discord.Color.gold()
         )
         spinning_embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
         spinning_embed.add_field(name="Dein Kontostand", value=f"**{current_balance - self.bet:,}** {self.currency}", inline=True)
+        spinning_embed.add_field(name="Gewinn", value="...", inline=True)
         spinning_embed.description = "** | | | **"
 
         await interaction.response.edit_message(embed=spinning_embed, view=None)
@@ -59,11 +60,11 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         if multiplier > 0:
             new_balance = await self.economy.add_coins(self.user_id, winnings)
             color = discord.Color.green()
-            title = "🎰 SLOTS - GEWONNEN!"
+            title = "🍠 SLOTS - GEWONNEN!"
         else:
             new_balance = await self.economy.get_balance(self.user_id)
             color = discord.Color.red()
-            title = "🎰 SLOTS - Verloren"
+            title = "🍠 SLOTS - Verloren"
 
         final_embed = discord.Embed(title=title, color=color)
         final_embed.description = f"**{' | '.join(reels)}**"
@@ -115,13 +116,14 @@ class SlotsCog(commands.Cog):
             await interaction.response.send_message("❌ Fehler beim Einsatz.", ephemeral=True)
             return
 
-        # Stabileres Spin-Embed mit gleichen Feldern wie das Endergebnis
+        # Stabileres Spin-Embed mit 3 Feldern (wie am Ende)
         spinning_embed = discord.Embed(
-            title="🎰 Slots - Die Walzen drehen sich...",
+            title="🍠 Slots - Die Walzen drehen sich...",
             color=discord.Color.gold()
         )
         spinning_embed.add_field(name="Einsatz", value=f"{bet:,} {currency}", inline=True)
         spinning_embed.add_field(name="Dein Kontostand", value=f"**{current - bet:,}** {currency}", inline=True)
+        spinning_embed.add_field(name="Gewinn", value="...", inline=True)
         spinning_embed.description = "** | | | **"
 
         await interaction.response.send_message(embed=spinning_embed)
@@ -138,11 +140,11 @@ class SlotsCog(commands.Cog):
         if multiplier > 0:
             new_balance = await economy.add_coins(user_id, winnings)
             color = discord.Color.green()
-            title = "🎰 SLOTS - GEWONNEN!"
+            title = "🍠 SLOTS - GEWONNEN!"
         else:
             new_balance = await economy.get_balance(user_id)
             color = discord.Color.red()
-            title = "🎰 SLOTS - Verloren"
+            title = "🍠 SLOTS - Verloren"
 
         final_embed = discord.Embed(title=title, color=color)
         final_embed.description = f"**{' | '.join(reels)}**"
