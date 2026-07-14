@@ -45,7 +45,7 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
             await interaction.edit_original_response(embed=spinning_embed)
             await asyncio.sleep(0.28)
 
-        reels, multiplier, win_text = SlotsCog._roll_slots()
+        reels, multiplier, win_text = SlotsCog.roll_slots()
         winnings = int(self.bet * multiplier)
 
         if multiplier > 0:
@@ -116,7 +116,7 @@ class SlotsCog(commands.Cog):
             await interaction.edit_original_response(embed=spinning_embed)
             await asyncio.sleep(0.28)
 
-        reels, multiplier, win_text = self._roll_slots()
+        reels, multiplier, win_text = self.roll_slots()
         winnings = int(bet * multiplier)
 
         if multiplier > 0:
@@ -142,7 +142,7 @@ class SlotsCog(commands.Cog):
         await interaction.edit_original_response(embed=final_embed, view=view)
 
     @staticmethod
-    def _roll_slots() -> tuple[list[str], int, str]:
+    def roll_slots() -> tuple[list[str], int, str]:
         reels = [random.choice(SlotsCog.SLOT_SYMBOLS) for _ in range(3)]
 
         if reels[0] == reels[1] == reels[2]:
