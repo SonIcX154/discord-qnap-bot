@@ -27,15 +27,20 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         discord.ui.View.__init__(self, timeout=300)
 
     async def _get_updated_embed(self) -> discord.Embed:
-        """Return embed with current bet for live updates."""
+        """Live update embed when adjusting bet - stable layout."""
+        current_balance = await self.economy.get_balance(self.user_id)
+
         embed = discord.Embed(
-            title="🎰 SLOTS - Drehen...",
+            title="🎰 SLOTS",
             color=discord.Color.gold()
         )
         embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
         embed.add_field(name="Gewinn", value="...", inline=True)
-        embed.add_field(name="Dein Kontostand", value=f"**{self.bet:,}** {self.currency} (wird abgezogen)", inline=False)
-        embed.description = "** | | | **"
+        embed.add_field(
+            name="Dein Kontostand", 
+            value=f"**{current_balance:,}** {self.currency}", 
+            inline=False
+        )
         embed.set_footer(text="Passe deinen Einsatz an und drücke dann Spin")
         return embed
 
@@ -166,7 +171,7 @@ class SlotsCog(commands.Cog):
 
         final_embed = discord.Embed(title=title, color=color)
         final_embed.description = f"**{' | '.join(reels)}**"
-        final_embed.add_field(name="Einsatz", value=f"{bet:,} {currency}", inline=True)
+        final_embed.add_field(name="Einsatz", value=f"{self.bet:,} {currency}", inline=True)
         final_embed.add_field(name="Gewinn", value=gewinn_text, inline=True)
         final_embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
         final_embed.set_footer(text=f"Gespielt von {player_name} • RTP ~92%")
