@@ -137,8 +137,12 @@ class LeaderboardView(discord.ui.View):
             child.disabled = True  # type: ignore[attr-defined]
 
 
-class CoinflipView(BetAdjustableMixin, discord.ui.View):   # ReplayMixin entfernt - Replay erfolgt direkt über Kopf/Zahl
-    """Interactive Coinflip. Replay by pressing Kopf/Zahl again (bet is deducted each time)."""
+class CoinflipView(BetAdjustableMixin, discord.ui.View):
+    """Interactive Coinflip.
+    
+    Replay by pressing Kopf or Zahl again after seeing the result.
+    Bet is deducted every time you press a choice button.
+    """
 
     def __init__(self, economy_cog: "EconomyCog", interaction: discord.Interaction, bet: int, currency: str) -> None:
         BetAdjustableMixin.__init__(self, economy_cog, interaction.user.id, bet, currency)
@@ -152,10 +156,12 @@ class CoinflipView(BetAdjustableMixin, discord.ui.View):   # ReplayMixin entfern
         won = (choice == result)
 
         if won:
-            new_balance = await self.economy.add_coins(self.user_id, self.bet)
+            # Wir haben den Einsatz bereits beim Button-Klick abgezogen.
+            # Bei Gewinn bekommen wir 2x den Einsatz zurück (Einsatz + Gewinn).
+            new_balance = await self.economy.add_coins(self.user_id, self.bet * 2)
             color = discord.Color.green()
             title = "🪙 Coinflip - Gewonnen!"
-            win_text = f"+{self.bet:,} {self.currency}"
+            win_text = f"+{self.bet:,} {self.currency} (Gewinn)"
         else:
             new_balance = await self.economy.get_balance(self.user_id)
             color = discord.Color.red()
@@ -169,7 +175,6 @@ class CoinflipView(BetAdjustableMixin, discord.ui.View):   # ReplayMixin entfern
         embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
         embed.set_footer(text=f"Gespielt von {interaction.user.display_name} \n\nDrücke Kopf oder Zahl um erneut zu spielen (Einsatz wird abgezogen)")
 
-        # Neues View mit gleichen Buttons - nächster Klick zieht wieder Geld ab
         new_view = CoinflipView(self.economy, interaction, self.bet, self.currency)
         await interaction.response.edit_message(embed=embed, view=new_view)
 
@@ -179,7 +184,6 @@ class CoinflipView(BetAdjustableMixin, discord.ui.View):   # ReplayMixin entfern
             await interaction.response.send_message("Nur der Spieler darf wählen.", ephemeral=True)
             return
 
-        # Geld abziehen für diese Runde (auch beim erneuten Spielen nach Ergebnis)
         if not await self.economy.remove_coins(self.user_id, self.bet):
             await interaction.response.send_message(
                 f"❌ Du hast nicht genug {self.currency} mehr.", 
@@ -195,7 +199,6 @@ class CoinflipView(BetAdjustableMixin, discord.ui.View):   # ReplayMixin entfern
             await interaction.response.send_message("Nur der Spieler darf wählen.", ephemeral=True)
             return
 
-        # Geld abziehen für diese Runde (auch beim erneuten Spielen nach Ergebnis)
         if not await self.economy.remove_coins(self.user_id, self.bet):
             await interaction.response.send_message(
                 f"❌ Du hast nicht genug {self.currency} mehr.", 
