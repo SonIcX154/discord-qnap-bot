@@ -3,6 +3,7 @@ import asyncio
 import discord
 from discord.ext import commands
 from discord import app_commands
+from typing import Optional
 
 
 # ====================== ADMIN CONFIG ======================
@@ -28,14 +29,14 @@ class VoiceStayer(commands.Cog):
     Use /voice-stayer to toggle this behavior on or off.
     """
 
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.voice_channel_id = int(os.getenv("VOICE_CHANNEL_ID", "0"))
-        self._voice_task = None
+        self._voice_task: Optional[asyncio.Task[None]] = None
         self._running = True
         self.enabled = True   # Can be toggled with /voice-stayer
 
-    async def cog_load(self):
+    async def cog_load(self) -> None:
         """Start the background task when the cog is loaded."""
         if self.voice_channel_id == 0:
             print("WARNING: VOICE_CHANNEL_ID is not set in .env - voice stayer disabled.")
@@ -43,7 +44,7 @@ class VoiceStayer(commands.Cog):
         self._voice_task = asyncio.create_task(self._stay_in_voice_channel())
         print(f"VoiceStayer initialized. Target channel ID: {self.voice_channel_id}")
 
-    async def cog_unload(self):
+    async def cog_unload(self) -> None:
         """Clean up the task when the cog is unloaded."""
         self._running = False
         if self._voice_task and not self._voice_task.done():
@@ -58,7 +59,7 @@ class VoiceStayer(commands.Cog):
         name="voice-stayer",
         description="Toggle the automatic voice stayer on or off (Admin only)"
     )
-    async def toggle_voice_stayer(self, interaction: discord.Interaction):
+    async def toggle_voice_stayer(self, interaction: discord.Interaction) -> None:
         self.enabled = not self.enabled
 
         if self.enabled:
@@ -71,7 +72,7 @@ class VoiceStayer(commands.Cog):
             voice_client = discord.utils.get(
                 self.bot.voice_clients, guild=interaction.guild
             )
-            if voice_client and voice_client.is_connected(): # type: ignore
+            if voice_client and voice_client.is_connected():  # type: ignore[attr-defined]
                 try:
                     await voice_client.disconnect(force=True)
                     print(f"[VoiceStayer] Disconnected from voice channel (stayer disabled by {interaction.user})")
@@ -84,7 +85,7 @@ class VoiceStayer(commands.Cog):
             )
 
     @toggle_voice_stayer.error
-    async def toggle_voice_stayer_error(self, interaction: discord.Interaction, error): # type: ignore
+    async def toggle_voice_stayer_error(self, interaction: discord.Interaction, error: Exception) -> None:  # type: ignore[misc]
         if isinstance(error, app_commands.CheckFailure):
             await interaction.response.send_message(
                 "❌ You need **Manage Guild** permission or be the bot admin to use this command.",
@@ -93,7 +94,7 @@ class VoiceStayer(commands.Cog):
         else:
             raise error
 
-    async def _stay_in_voice_channel(self):
+    async def _stay_in_voice_channel(self) -> None:
         """Background loop that ensures the bot stays connected to the target VC."""
         await self.bot.wait_until_ready()
         print("Voice stayer task started.")
@@ -120,9 +121,9 @@ class VoiceStayer(commands.Cog):
 
                 if voice_client is None:
                     needs_reconnect = True
-                elif not voice_client.is_connected(): # type: ignore
+                elif not voice_client.is_connected():  # type: ignore[attr-defined]
                     needs_reconnect = True
-                elif voice_client.channel.id != self.voice_channel_id: # type: ignore
+                elif voice_client.channel.id != self.voice_channel_id:  # type: ignore[attr-defined]
                     # Connected to wrong channel - disconnect and move
                     try:
                         await voice_client.disconnect(force=True)
@@ -132,7 +133,7 @@ class VoiceStayer(commands.Cog):
 
                 if needs_reconnect:
                     try:
-                        if voice_client and voice_client.is_connected(): # type: ignore
+                        if voice_client and voice_client.is_connected():  # type: ignore[attr-defined]
                             await voice_client.disconnect(force=True)
                         await channel.connect(reconnect=True)
                         print(f"✅ [VoiceStayer] Connected to voice channel: {channel.name} ({channel.id})")
@@ -148,5 +149,5 @@ class VoiceStayer(commands.Cog):
             await asyncio.sleep(1)
 
 
-async def setup(bot: commands.Bot):
+async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(VoiceStayer(bot))

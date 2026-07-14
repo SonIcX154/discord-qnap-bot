@@ -7,7 +7,7 @@ class ReplayMixin:
     Subclasses must implement the async method _do_replay(interaction).
     """
 
-    def __init__(self, user_id: int):
+    def __init__(self, user_id: int) -> None:
         self.user_id = user_id
         self.playing = False
 
@@ -15,16 +15,18 @@ class ReplayMixin:
         return interaction.user.id == self.user_id
 
     @discord.ui.button(label="🔄 Nochmal spielen", style=discord.ButtonStyle.success, row=1)
-    async def play_again(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def play_again(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not self._can_replay(interaction):
             await interaction.response.send_message(
-                "Nur der Spieler darf den Button benutzen.", ephemeral=True
+                "Nur der Spieler darf den Button benutzen.",
+                ephemeral=True
             )
             return
 
         if getattr(self, "playing", False):
             await interaction.response.send_message(
-                "Bitte warte, bis die aktuelle Runde fertig ist.", ephemeral=True
+                "Bitte warte, bis die aktuelle Runde fertig ist.",
+                ephemeral=True
             )
             return
 
@@ -34,6 +36,6 @@ class ReplayMixin:
         finally:
             self.playing = False
 
-    async def _do_replay(self, interaction: discord.Interaction):
+    async def _do_replay(self, interaction: discord.Interaction) -> None:
         """Must be implemented by subclasses."""
         raise NotImplementedError("Subclasses must implement _do_replay")
