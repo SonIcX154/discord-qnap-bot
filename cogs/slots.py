@@ -5,7 +5,10 @@ import asyncio
 import discord
 from discord.ext import commands
 from discord import app_commands
-from typing import List, Tuple
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from cogs.economy import EconomyCog
 
 try:
     from utils.bet_mixin import BetAdjustableMixin
@@ -33,7 +36,7 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
             await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
             return
 
-        spinning_embed = discord.Embed(title="🌀 Slots - Die Walzen drehen sich...", description="** | | | **", color=discord.Color.gold())
+        spinning_embed = discord.Embed(title="🔀 Slots - Die Walzen drehen sich...", description="** | | | **", color=discord.Color.gold())
         await interaction.response.edit_message(embed=spinning_embed, view=None)
 
         for _ in range(4):
@@ -48,11 +51,11 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         if multiplier > 0:
             new_balance = await self.economy.add_coins(self.user_id, winnings)
             color = discord.Color.green()
-            title = "🌀 SLOTS - GEWONNEN!"
+            title = "🔀 SLOTS - GEWONNEN!"
         else:
             new_balance = await self.economy.get_balance(self.user_id)
             color = discord.Color.red()
-            title = "🌀 SLOTS - Verloren"
+            title = "🔀 SLOTS - Verloren"
 
         final_embed = discord.Embed(title=title, color=color)
         final_embed.description = f"**{' | '.join(reels)}**"
@@ -69,13 +72,13 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
 
     async def on_timeout(self) -> None:
         for child in self.children:
-            child.disabled = True
+            child.disabled = True  # type: ignore[attr-defined]
 
 
 class SlotsCog(commands.Cog):
     """Slots minigame cog."""
 
-    SLOT_SYMBOLS: List[str] = ["🍒", "🍋", "🔔", "⭐", "7️⃣", "💎"]
+    SLOT_SYMBOLS: list[str] = ["🍒", "🍋", "🔔", "⭐", "7️⃣", "💎"]
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -104,7 +107,7 @@ class SlotsCog(commands.Cog):
             await interaction.response.send_message("❌ Fehler beim Einsatz.", ephemeral=True)
             return
 
-        spinning_embed = discord.Embed(title="🌀 Slots - Die Walzen drehen sich...", description="** | | | **", color=discord.Color.gold())
+        spinning_embed = discord.Embed(title="🔀 Slots - Die Walzen drehen sich...", description="** | | | **", color=discord.Color.gold())
         await interaction.response.send_message(embed=spinning_embed)
 
         for _ in range(4):
@@ -119,11 +122,11 @@ class SlotsCog(commands.Cog):
         if multiplier > 0:
             new_balance = await economy.add_coins(user_id, winnings)
             color = discord.Color.green()
-            title = "🌀 SLOTS - GEWONNEN!"
+            title = "🔀 SLOTS - GEWONNEN!"
         else:
             new_balance = await economy.get_balance(user_id)
             color = discord.Color.red()
-            title = "🌀 SLOTS - Verloren"
+            title = "🔀 SLOTS - Verloren"
 
         final_embed = discord.Embed(title=title, color=color)
         final_embed.description = f"**{' | '.join(reels)}**"
@@ -135,11 +138,11 @@ class SlotsCog(commands.Cog):
         final_embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
         final_embed.set_footer(text=f"Gespielt von {interaction.user.display_name} • RTP ~92%")
 
-        view = SlotsView(economy, user_id, bet, currency)
+        view = SlotsView(economy, user_id, bet, currency)  # type: ignore[arg-type]
         await interaction.edit_original_response(embed=final_embed, view=view)
 
     @staticmethod
-    def _roll_slots() -> Tuple[List[str], int, str]:
+    def _roll_slots() -> tuple[list[str], int, str]:
         reels = [random.choice(SlotsCog.SLOT_SYMBOLS) for _ in range(3)]
 
         if reels[0] == reels[1] == reels[2]:
