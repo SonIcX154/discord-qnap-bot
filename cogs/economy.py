@@ -137,32 +137,12 @@ class LeaderboardView(discord.ui.View):
             child.disabled = True  # type: ignore[attr-defined]
 
 
-class CoinflipView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
-    """Interactive Coinflip with bet adjustment and replay."""
+class CoinflipView(BetAdjustableMixin, discord.ui.View):   # ReplayMixin entfernt - Replay erfolgt direkt über Kopf/Zahl
+    """Interactive Coinflip. Replay by pressing Kopf/Zahl again (bet is deducted each time)."""
 
     def __init__(self, economy_cog: "EconomyCog", interaction: discord.Interaction, bet: int, currency: str) -> None:
         BetAdjustableMixin.__init__(self, economy_cog, interaction.user.id, bet, currency)
-        ReplayMixin.__init__(self, interaction.user.id)
         discord.ui.View.__init__(self, timeout=120)
-
-    async def _do_replay(self, interaction: discord.Interaction) -> None:
-        # WICHTIG: Bei jedem Replay den Einsatz wieder abziehen
-        if not await self.economy.remove_coins(self.user_id, self.bet):
-            await interaction.response.send_message(
-                f"❌ Du hast nicht genug {self.currency} für einen neuen Versuch.", 
-                ephemeral=True
-            )
-            return
-
-        embed = discord.Embed(
-            title="🪙 Coinflip - Wähle deine Seite",
-            description=f"Du hast **{self.bet:,} {self.currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann **Kopf** oder **Zahl**:",
-            color=discord.Color.gold()
-        )
-        embed.set_footer(text="Timeout nach 2 Minuten")
-
-        new_view = CoinflipView(self.economy, interaction, self.bet, self.currency)
-        await interaction.response.edit_message(embed=embed, view=new_view)
 
     async def _resolve(self, interaction: discord.Interaction, choice: str) -> None:
         for child in self.children:
@@ -187,8 +167,9 @@ class CoinflipView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         embed.add_field(name="Deine Wahl", value=choice, inline=True)
         embed.add_field(name="Ergebnis", value=win_text, inline=True)
         embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
-        embed.set_footer(text=f"Gespielt von {interaction.user.display_name}")
+        embed.set_footer(text=f"Gespielt von {interaction.user.display_name} \n\nDrücke Kopf oder Zahl um erneut zu spielen (Einsatz wird abgezogen)")
 
+        # Neues View mit gleichen Buttons - nächster Klick zieht wieder Geld ab
         new_view = CoinflipView(self.economy, interaction, self.bet, self.currency)
         await interaction.response.edit_message(embed=embed, view=new_view)
 
@@ -197,6 +178,15 @@ class CoinflipView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Nur der Spieler darf wählen.", ephemeral=True)
             return
+
+        # Geld abziehen für diese Runde (auch beim erneuten Spielen nach Ergebnis)
+        if not await self.economy.remove_coins(self.user_id, self.bet):
+            await interaction.response.send_message(
+                f"❌ Du hast nicht genug {self.currency} mehr.", 
+                ephemeral=True
+            )
+            return
+
         await self._resolve(interaction, "Kopf")
 
     @discord.ui.button(label="🪙 Zahl", style=discord.ButtonStyle.primary, row=1)
@@ -204,6 +194,15 @@ class CoinflipView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Nur der Spieler darf wählen.", ephemeral=True)
             return
+
+        # Geld abziehen für diese Runde (auch beim erneuten Spielen nach Ergebnis)
+        if not await self.economy.remove_coins(self.user_id, self.bet):
+            await interaction.response.send_message(
+                f"❌ Du hast nicht genug {self.currency} mehr.", 
+                ephemeral=True
+            )
+            return
+
         await self._resolve(interaction, "Zahl")
 
     async def on_timeout(self) -> None:
