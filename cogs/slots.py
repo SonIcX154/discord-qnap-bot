@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import random
 import asyncio
 import discord
@@ -16,12 +18,12 @@ except ImportError:
 class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
     """Interactive Slots view with bet adjustment and replay."""
 
-    def __init__(self, economy_cog, user_id: int, bet: int, currency: str):
+    def __init__(self, economy_cog: "EconomyCog", user_id: int, bet: int, currency: str) -> None:
         BetAdjustableMixin.__init__(self, economy_cog, user_id, bet, currency)
         ReplayMixin.__init__(self, user_id)
         discord.ui.View.__init__(self, timeout=300)
 
-    async def _do_replay(self, interaction: discord.Interaction):
+    async def _do_replay(self, interaction: discord.Interaction) -> None:
         current_balance = await self.economy.get_balance(self.user_id)
         if current_balance < self.bet:
             await interaction.response.send_message(f"❌ Nicht genug {self.currency}! Du hast nur **{current_balance:,}**.", ephemeral=True)
@@ -65,7 +67,7 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         new_view = SlotsView(self.economy, self.user_id, self.bet, self.currency)
         await interaction.edit_original_response(embed=final_embed, view=new_view)
 
-    async def on_timeout(self):
+    async def on_timeout(self) -> None:
         for child in self.children:
             child.disabled = True
 
@@ -75,16 +77,16 @@ class SlotsCog(commands.Cog):
 
     SLOT_SYMBOLS: List[str] = ["🍒", "🍋", "🔔", "⭐", "7️⃣", "💎"]
 
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    async def cog_load(self):
+    async def cog_load(self) -> None:
         print("[Slots] Slots Cog loaded.")
 
     @app_commands.command(name="slots", description="Spiele Slots mit animierten Walzen + Bet Buttons")
     @app_commands.describe(bet="Einsatz (Min. 10)")
     @app_commands.checks.cooldown(1, 4.0, key=lambda interaction: interaction.user.id)
-    async def slots(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]):
+    async def slots(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]) -> None:
         economy = self.bot.get_cog("Economy")
         if not economy:
             await interaction.response.send_message("Economy system nicht verfügbar.", ephemeral=True)
@@ -166,12 +168,12 @@ class SlotsCog(commands.Cog):
         return reels, multiplier, win_text
 
     @slots.error
-    async def slots_error(self, interaction: discord.Interaction, error):
+    async def slots_error(self, interaction: discord.Interaction, error: Exception) -> None:  # type: ignore[misc]
         if isinstance(error, app_commands.CommandOnCooldown):
             await interaction.response.send_message(f"⏳ Warte **{error.retry_after:.1f}s**.", ephemeral=True)
         else:
             raise error
 
 
-async def setup(bot: commands.Bot):
+async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(SlotsCog(bot))
