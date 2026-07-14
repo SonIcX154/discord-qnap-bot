@@ -4,7 +4,7 @@ import random
 import discord
 from discord.ext import commands
 from discord import app_commands
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from cogs.economy import EconomyCog
@@ -27,11 +27,10 @@ class RouletteView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         self.interaction = interaction
 
     async def _do_replay(self, interaction: discord.Interaction) -> None:
-        # Just create a fresh RouletteView with the same bet
         new_view = RouletteView(self.economy, interaction, self.bet, self.currency)
 
         embed = discord.Embed(
-            title="🌀 Roulette - Wähle deinen Einsatz",
+            title="🔀 Roulette - Wähle deinen Einsatz",
             description=f"Du hast **{self.bet:,} {self.currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann, worauf du setzen möchtest:",
             color=discord.Color.gold()
         )
@@ -41,7 +40,7 @@ class RouletteView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
 
     async def resolve_bet(self, interaction: discord.Interaction, bet_type: str, multiplier: int, description: str) -> None:
         for child in self.children:
-            child.disabled = True
+            child.disabled = True  # type: ignore[attr-defined]
 
         number = random.randint(0, 36)
         color = "Grün" if number == 0 else ("Rot" if number % 2 == 1 else "Schwarz")
@@ -82,41 +81,40 @@ class RouletteView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
         embed.set_footer(text=f"Gespielt von {interaction.user.display_name}")
 
-        # After result, show a fresh view for replay
         new_view = RouletteView(self.economy, interaction, self.bet, self.currency)
         await interaction.response.edit_message(embed=embed, view=new_view)
 
     @discord.ui.button(label="🔴 Rot (2x)", style=discord.ButtonStyle.danger, row=1)
-    async def red_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def red_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         await self.resolve_bet(interaction, "red", 2, "Rot")
 
     @discord.ui.button(label="⚫ Schwarz (2x)", style=discord.ButtonStyle.secondary, row=1)
-    async def black_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def black_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         await self.resolve_bet(interaction, "black", 2, "Schwarz")
 
     @discord.ui.button(label="🟢 Grün/0 (36x)", style=discord.ButtonStyle.success, row=1)
-    async def green_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def green_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         await self.resolve_bet(interaction, "green", 36, "Grün (0)")
 
     @discord.ui.button(label="Gerade (2x)", style=discord.ButtonStyle.primary, row=1)
-    async def even_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def even_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         await self.resolve_bet(interaction, "even", 2, "Gerade")
 
     @discord.ui.button(label="Ungerade (2x)", style=discord.ButtonStyle.primary, row=1)
-    async def odd_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def odd_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         await self.resolve_bet(interaction, "odd", 2, "Ungerade")
 
     @discord.ui.button(label="1-18 (2x)", style=discord.ButtonStyle.secondary, row=2)
-    async def low_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def low_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         await self.resolve_bet(interaction, "low", 2, "1-18")
 
     @discord.ui.button(label="19-36 (2x)", style=discord.ButtonStyle.secondary, row=2)
-    async def high_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+    async def high_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         await self.resolve_bet(interaction, "high", 2, "19-36")
 
     async def on_timeout(self) -> None:
         for child in self.children:
-            child.disabled = True
+            child.disabled = True  # type: ignore[attr-defined]
 
 
 class RouletteCog(commands.Cog):
@@ -150,13 +148,13 @@ class RouletteCog(commands.Cog):
             return
 
         embed = discord.Embed(
-            title="🌀 Roulette - Wähle deinen Einsatz",
+            title="🔀 Roulette - Wähle deinen Einsatz",
             description=f"Du hast **{bet:,} {currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann, worauf du setzen möchtest:",
             color=discord.Color.gold()
         )
         embed.set_footer(text="Die Kugel rollt... • Timeout nach 3 Minuten")
 
-        view = RouletteView(economy, interaction, bet, currency)
+        view = RouletteView(economy, interaction, bet, currency)  # type: ignore[arg-type]
         await interaction.response.send_message(embed=embed, view=view)
 
     @roulette.error
