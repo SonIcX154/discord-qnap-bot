@@ -26,6 +26,19 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         ReplayMixin.__init__(self, user_id)
         discord.ui.View.__init__(self, timeout=300)
 
+    async def _get_updated_embed(self) -> discord.Embed:
+        """Return embed with current bet for live updates."""
+        embed = discord.Embed(
+            title="🎰 SLOTS - Drehen...",
+            color=discord.Color.gold()
+        )
+        embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
+        embed.add_field(name="Gewinn", value="...", inline=True)
+        embed.add_field(name="Dein Kontostand", value=f"**{self.bet:,}** {self.currency} (wird abgezogen)", inline=False)
+        embed.description = "** | | | **"
+        embed.set_footer(text="Passe deinen Einsatz an und drücke dann Spin")
+        return embed
+
     async def _do_replay(self, interaction: discord.Interaction) -> None:
         current_balance = await self.economy.get_balance(self.user_id)
         if current_balance < self.bet:
