@@ -136,14 +136,14 @@ class RouletteCog(commands.Cog):
             return
 
         user_id = interaction.user.id
-        currency = await economy.get_currency_name()
+        currency = await economy.get_currency_name()  # type: ignore[union-attr]
 
-        current = await economy.get_balance(user_id)
+        current = await economy.get_balance(user_id)  # type: ignore[union-attr]
         if current < bet:
             await interaction.response.send_message(f"❌ Nicht genug {currency}! Du hast **{current:,}** {currency}.", ephemeral=True)
             return
 
-        if not await economy.remove_coins(user_id, bet):
+        if not await economy.remove_coins(user_id, bet):  # type: ignore[union-attr]
             await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
             return
 
