@@ -36,15 +36,18 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
             await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
             return
 
-        # Stabileres Embed mit 3 Feldern (wie am Ende)
+        player_name = interaction.user.display_name
+
+        # Spin-Embed mit fast identischer Struktur wie Ergebnis
         spinning_embed = discord.Embed(
-            title="🎰 Slots - Die Walzen drehen sich...",
+            title="🎰 SLOTS - Drehen...",
             color=discord.Color.gold()
         )
         spinning_embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
         spinning_embed.add_field(name="Dein Kontostand", value=f"**{current_balance - self.bet:,}** {self.currency}", inline=True)
         spinning_embed.add_field(name="Gewinn", value="...", inline=True)
         spinning_embed.description = "** | | | **"
+        spinning_embed.set_footer(text=f"Gespielt von {player_name} • RTP ~92%")
 
         await interaction.response.edit_message(embed=spinning_embed, view=None)
 
@@ -61,20 +64,19 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
             new_balance = await self.economy.add_coins(self.user_id, winnings)
             color = discord.Color.green()
             title = "🎰 SLOTS - GEWONNEN!"
+            gewinn_text = f"+{winnings:,} {self.currency} ({win_text})"
         else:
             new_balance = await self.economy.get_balance(self.user_id)
             color = discord.Color.red()
             title = "🎰 SLOTS - Verloren"
+            gewinn_text = "0 {self.currency}"
 
         final_embed = discord.Embed(title=title, color=color)
         final_embed.description = f"**{' | '.join(reels)}**"
         final_embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
-        if multiplier > 0:
-            final_embed.add_field(name="Gewinn", value=f"+{winnings:,} {self.currency} ({win_text})", inline=True)
-        else:
-            final_embed.add_field(name="Ergebnis", value=win_text, inline=True)
+        final_embed.add_field(name="Gewinn", value=gewinn_text, inline=True)
         final_embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
-        final_embed.set_footer(text=f"Gespielt von {interaction.user.display_name} • RTP ~92%")
+        final_embed.set_footer(text=f"Gespielt von {player_name} • RTP ~92%")
 
         new_view = SlotsView(self.economy, self.user_id, self.bet, self.currency)
         await interaction.edit_original_response(embed=final_embed, view=new_view)
@@ -116,15 +118,18 @@ class SlotsCog(commands.Cog):
             await interaction.response.send_message("❌ Fehler beim Einsatz.", ephemeral=True)
             return
 
-        # Stabileres Spin-Embed mit 3 Feldern (wie am Ende)
+        player_name = interaction.user.display_name
+
+        # Spin-Embed mit fast identischer Struktur wie Ergebnis
         spinning_embed = discord.Embed(
-            title="🎰 Slots - Die Walzen drehen sich...",
+            title="🎰 SLOTS - Drehen...",
             color=discord.Color.gold()
         )
         spinning_embed.add_field(name="Einsatz", value=f"{bet:,} {currency}", inline=True)
         spinning_embed.add_field(name="Dein Kontostand", value=f"**{current - bet:,}** {currency}", inline=True)
         spinning_embed.add_field(name="Gewinn", value="...", inline=True)
         spinning_embed.description = "** | | | **"
+        spinning_embed.set_footer(text=f"Gespielt von {player_name} • RTP ~92%")
 
         await interaction.response.send_message(embed=spinning_embed)
 
@@ -141,20 +146,19 @@ class SlotsCog(commands.Cog):
             new_balance = await economy.add_coins(user_id, winnings)
             color = discord.Color.green()
             title = "🎰 SLOTS - GEWONNEN!"
+            gewinn_text = f"+{winnings:,} {currency} ({win_text})"
         else:
             new_balance = await economy.get_balance(user_id)
             color = discord.Color.red()
             title = "🎰 SLOTS - Verloren"
+            gewinn_text = "0 {currency}"
 
         final_embed = discord.Embed(title=title, color=color)
         final_embed.description = f"**{' | '.join(reels)}**"
         final_embed.add_field(name="Einsatz", value=f"{bet:,} {currency}", inline=True)
-        if multiplier > 0:
-            final_embed.add_field(name="Gewinn", value=f"+{winnings:,} {currency} ({win_text})", inline=True)
-        else:
-            final_embed.add_field(name="Ergebnis", value=win_text, inline=True)
+        final_embed.add_field(name="Gewinn", value=gewinn_text, inline=True)
         final_embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
-        final_embed.set_footer(text=f"Gespielt von {interaction.user.display_name} • RTP ~92%")
+        final_embed.set_footer(text=f"Gespielt von {player_name} • RTP ~92%")
 
         view = SlotsView(economy, user_id, bet, currency)  # type: ignore[arg-type]
         await interaction.edit_original_response(embed=final_embed, view=view)
