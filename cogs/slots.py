@@ -5,7 +5,7 @@ import asyncio
 import discord
 from discord.ext import commands
 from discord import app_commands
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from cogs.economy import EconomyCog
@@ -96,14 +96,14 @@ class SlotsCog(commands.Cog):
             return
 
         user_id = interaction.user.id
-        currency = await economy.get_currency_name()
+        currency = await economy.get_currency_name()  # type: ignore[union-attr]
 
-        current = await economy.get_balance(user_id)
+        current = await economy.get_balance(user_id)  # type: ignore[union-attr]
         if current < bet:
             await interaction.response.send_message(f"❌ Nicht genug {currency}! Du hast **{current:,}** {currency}.", ephemeral=True)
             return
 
-        if not await economy.remove_coins(user_id, bet):
+        if not await economy.remove_coins(user_id, bet):  # type: ignore[union-attr]
             await interaction.response.send_message("❌ Fehler beim Einsatz.", ephemeral=True)
             return
 
@@ -120,11 +120,11 @@ class SlotsCog(commands.Cog):
         winnings = int(bet * multiplier)
 
         if multiplier > 0:
-            new_balance = await economy.add_coins(user_id, winnings)
+            new_balance = await economy.add_coins(user_id, winnings)  # type: ignore[union-attr]
             color = discord.Color.green()
             title = "🔀 SLOTS - GEWONNEN!"
         else:
-            new_balance = await economy.get_balance(user_id)
+            new_balance = await economy.get_balance(user_id)  # type: ignore[union-attr]
             color = discord.Color.red()
             title = "🔀 SLOTS - Verloren"
 
