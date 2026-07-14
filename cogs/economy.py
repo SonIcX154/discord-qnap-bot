@@ -619,4 +619,4 @@ class EconomyCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(EconomyCog(bot), name="Economy")
+    await bot.add_cog(EconomyCog(bot))
