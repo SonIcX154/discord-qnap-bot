@@ -159,11 +159,9 @@ class RouletteCog(commands.Cog):
             await interaction.response.send_message(f"❌ Nicht genug {currency}! Du hast **{current:,}** {currency}.", ephemeral=True)
             return
 
-        embed = discord.Embed(
-            title=ROULETTE_EMOTE + " Roulette",
-            description=f"Du hast **{bet:,} {currency}** als Einsatz gewählt.\n\nPasse deinen Einsatz an und wähle dann, worauf du setzen möchtest:",
-            color=discord.Color.gold()
-        )
+        embed = discord.Embed(title=ROULETTE_EMOTE + " Roulette", color=discord.Color.gold())
+        embed.add_field(name="Einsatz", value=f"**{bet:,}** {currency}", inline=True)
+        embed.add_field(name="Kontostand", value=f"**{current - bet:,}** {currency}", inline=False)
         embed.set_footer(text="Glücksspiel kann süchtig machen")
 
         view = RouletteView(economy, interaction, bet, currency)  # type: ignore[arg-type]
