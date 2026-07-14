@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import time
 import random
@@ -6,7 +8,11 @@ import aiosqlite
 import discord
 from discord.ext import commands
 from discord import app_commands
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from utils.bet_mixin import BetAdjustableMixin
+    from utils.replay_mixin import ReplayMixin
 
 try:
     from utils.bet_mixin import BetAdjustableMixin
@@ -35,14 +41,14 @@ DAILY_COOLDOWN_SECONDS = 24 * 60 * 60  # 24 hours
 class LeaderboardView(discord.ui.View):
     """Interactive leaderboard with pagination and 'My Position' button."""
 
-    def __init__(self, cog: "EconomyCog", interaction: discord.Interaction, currency: str):
+    def __init__(self, cog: "EconomyCog", interaction: discord.Interaction, currency: str) -> None:
         super().__init__(timeout=180)
         self.cog = cog
         self.interaction = interaction
         self.currency = currency
-        self.current_page = 1
-        self.total_pages = 1
-        self.highlight_user_id = interaction.user.id
+        self.current_page: int = 1
+        self.total_pages: int = 1
+        self.highlight_user_id: int = interaction.user.id
 
     async def get_total_pages(self) -> int:
         total_users = await self.cog.get_total_users()
@@ -57,7 +63,7 @@ class LeaderboardView(discord.ui.View):
             color=discord.Color.gold()
         )
 
-        lines = []
+        lines: list[str] = []
         start_rank = (self.current_page - 1) * LEADERBOARD_PER_PAGE + 1
 
         for i, (user_id, balance) in enumerate(users):
@@ -98,14 +104,14 @@ class LeaderboardView(discord.ui.View):
         return embed
 
     @discord.ui.button(label="◀️ Zurück", style=discord.ButtonStyle.secondary)
-    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if self.current_page > 1:
             self.current_page -= 1
         embed = await self.update_embed()
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="▶️ Weiter", style=discord.ButtonStyle.secondary)
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         total = await self.get_total_pages()
         if self.current_page < total:
             self.current_page += 1
@@ -113,7 +119,7 @@ class LeaderboardView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="📍 Meine Position", style=discord.ButtonStyle.primary)
-    async def my_position_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def my_position_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         rank = await self.cog.get_user_rank(interaction.user.id)
         if rank is None:
             await interaction.response.send_message("Du hast noch keine Coins.", ephemeral=True)
@@ -126,7 +132,7 @@ class LeaderboardView(discord.ui.View):
         embed = await self.update_embed()
         await interaction.response.edit_message(embed=embed, view=self)
 
-    async def on_timeout(self):
+    async def on_timeout(self) -> None:
         for child in self.children:
             child.disabled = True
 
@@ -134,12 +140,12 @@ class LeaderboardView(discord.ui.View):
 class CoinflipView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
     """Interactive Coinflip with bet adjustment and replay."""
 
-    def __init__(self, economy_cog, interaction: discord.Interaction, bet: int, currency: str):
+    def __init__(self, economy_cog: "EconomyCog", interaction: discord.Interaction, bet: int, currency: str) -> None:
         BetAdjustableMixin.__init__(self, economy_cog, interaction.user.id, bet, currency)
         ReplayMixin.__init__(self, interaction.user.id)
         discord.ui.View.__init__(self, timeout=120)
 
-    async def _do_replay(self, interaction: discord.Interaction):
+    async def _do_replay(self, interaction: discord.Interaction) -> None:
         embed = discord.Embed(
             title="🪙 Coinflip - Wähle deine Seite",
             description=f"Du hast **{self.bet:,} {self.currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann **Kopf** oder **Zahl**:",
@@ -150,7 +156,7 @@ class CoinflipView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         new_view = CoinflipView(self.economy, interaction, self.bet, self.currency)
         await interaction.response.edit_message(embed=embed, view=new_view)
 
-    async def _resolve(self, interaction: discord.Interaction, choice: str):
+    async def _resolve(self, interaction: discord.Interaction, choice: str) -> None:
         for child in self.children:
             child.disabled = True
 
@@ -179,20 +185,20 @@ class CoinflipView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=new_view)
 
     @discord.ui.button(label="🪙 Kopf", style=discord.ButtonStyle.primary, row=1)
-    async def choose_kopf(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def choose_kopf(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Nur der Spieler darf wählen.", ephemeral=True)
             return
         await self._resolve(interaction, "Kopf")
 
     @discord.ui.button(label="🪙 Zahl", style=discord.ButtonStyle.primary, row=1)
-    async def choose_zahl(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def choose_zahl(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Nur der Spieler darf wählen.", ephemeral=True)
             return
         await self._resolve(interaction, "Zahl")
 
-    async def on_timeout(self):
+    async def on_timeout(self) -> None:
         for child in self.children:
             child.disabled = True
 
@@ -210,18 +216,18 @@ class EconomyCog(commands.Cog):
     - Coinflip, Slots, Roulette
     """
 
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.db_path = ECONOMY_DB_PATH
-        self._voice_task: Optional[asyncio.Task] = None
+        self._voice_task: Optional[asyncio.Task[None]] = None
 
-    async def cog_load(self):
+    async def cog_load(self) -> None:
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         await self._init_db()
         self._voice_task = asyncio.create_task(self._voice_earnings_loop())
         print(f"[Economy] Core Economy Cog loaded. DB: {self.db_path}")
 
-    async def cog_unload(self):
+    async def cog_unload(self) -> None:
         if self._voice_task and not self._voice_task.done():
             self._voice_task.cancel()
             try:
@@ -229,7 +235,7 @@ class EconomyCog(commands.Cog):
             except asyncio.CancelledError:
                 pass
 
-    async def _init_db(self):
+    async def _init_db(self) -> None:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS users (
@@ -270,7 +276,7 @@ class EconomyCog(commands.Cog):
                 row = await cursor.fetchone()
                 return row[0] if row else DEFAULT_CURRENCY
 
-    async def set_currency_name(self, name: str):
+    async def set_currency_name(self, name: str) -> None:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 INSERT INTO config (key, value) VALUES (?, ?)
@@ -332,7 +338,7 @@ class EconomyCog(commands.Cog):
                 row = await cursor.fetchone()
                 return row[0] if row and row[0] is not None else None
 
-    async def set_last_daily(self, user_id: int, timestamp: int):
+    async def set_last_daily(self, user_id: int, timestamp: int) -> None:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 INSERT INTO users (user_id, last_daily)
@@ -376,7 +382,7 @@ class EconomyCog(commands.Cog):
 
     # ==================== BACKGROUND TASKS ====================
 
-    async def _voice_earnings_loop(self):
+    async def _voice_earnings_loop(self) -> None:
         await self.bot.wait_until_ready()
         print("[Economy] Voice earnings task started (2 Coins/Min bei ≥2 aktiven Personen).")
 
@@ -402,7 +408,7 @@ class EconomyCog(commands.Cog):
             await asyncio.sleep(60)
 
     @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
+    async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or not message.guild:
             return
         await self.claim_chat_earn(message.author.id)
@@ -412,7 +418,7 @@ class EconomyCog(commands.Cog):
     @app_commands.command(name="set-currency", description="Ändere den Namen der Währung (Admin)")
     @app_commands.describe(name="Neuer Name der Währung")
     @app_commands.default_permissions(manage_guild=True)
-    async def set_currency(self, interaction: discord.Interaction, name: str):
+    async def set_currency(self, interaction: discord.Interaction, name: str) -> None:
         if len(name) > 32:
             await interaction.response.send_message("❌ Name zu lang (max 32 Zeichen).", ephemeral=True)
             return
@@ -426,7 +432,7 @@ class EconomyCog(commands.Cog):
     @app_commands.command(name="economy-give", description="Gib einem User Coins (Admin)")
     @app_commands.describe(user="User", amount="Anzahl der Coins")
     @app_commands.default_permissions(manage_guild=True)
-    async def economy_give(self, interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None]):
+    async def economy_give(self, interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None]) -> None:
         currency = await self.get_currency_name()
         old_balance = await self.get_balance(user.id)
         new_balance = await self.add_coins(user.id, amount)
@@ -440,7 +446,7 @@ class EconomyCog(commands.Cog):
     @app_commands.command(name="economy-take", description="Nimm einem User Coins weg (Admin)")
     @app_commands.describe(user="User", amount="Anzahl der Coins")
     @app_commands.default_permissions(manage_guild=True)
-    async def economy_take(self, interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None]):
+    async def economy_take(self, interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None]) -> None:
         currency = await self.get_currency_name()
         old_balance = await self.get_balance(user.id)
 
@@ -459,7 +465,7 @@ class EconomyCog(commands.Cog):
     @app_commands.command(name="economy-set", description="Setze den exakten Kontostand eines Users (Admin)")
     @app_commands.describe(user="User", amount="Neuer exakter Kontostand")
     @app_commands.default_permissions(manage_guild=True)
-    async def economy_set(self, interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 0, None]):
+    async def economy_set(self, interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 0, None]) -> None:
         currency = await self.get_currency_name()
         old_balance = await self.get_balance(user.id)
 
@@ -479,7 +485,7 @@ class EconomyCog(commands.Cog):
     @app_commands.command(name="coinflip", description="Wähle Kopf oder Zahl und gewinne den 2x Einsatz")
     @app_commands.describe(bet="Einsatz (Min. 10)")
     @app_commands.checks.cooldown(1, 3.0, key=lambda interaction: interaction.user.id)
-    async def coinflip(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]):
+    async def coinflip(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]) -> None:
         user_id = interaction.user.id
         currency = await self.get_currency_name()
 
@@ -503,7 +509,7 @@ class EconomyCog(commands.Cog):
         await interaction.response.send_message(embed=embed, view=view)
 
     @coinflip.error
-    async def coinflip_error(self, interaction: discord.Interaction, error):
+    async def coinflip_error(self, interaction: discord.Interaction, error: Exception) -> None:  # type: ignore[misc]
         if isinstance(error, app_commands.CommandOnCooldown):
             await interaction.response.send_message(f"⏳ Warte noch **{error.retry_after:.1f}s**.", ephemeral=True)
         else:
@@ -511,7 +517,7 @@ class EconomyCog(commands.Cog):
 
     @app_commands.command(name="leaderboard", description="Zeigt das interaktive Leaderboard an")
     @app_commands.checks.cooldown(1, 60.0, key=lambda interaction: interaction.user.id)
-    async def leaderboard(self, interaction: discord.Interaction):
+    async def leaderboard(self, interaction: discord.Interaction) -> None:
         currency = await self.get_currency_name()
         total_users = await self.get_total_users()
 
@@ -525,7 +531,7 @@ class EconomyCog(commands.Cog):
         await interaction.response.send_message(embed=embed, view=view)
 
     @leaderboard.error
-    async def leaderboard_error(self, interaction: discord.Interaction, error):
+    async def leaderboard_error(self, interaction: discord.Interaction, error: Exception) -> None:  # type: ignore[misc]
         if isinstance(error, app_commands.CommandOnCooldown):
             await interaction.response.send_message(f"⏳ Das Leaderboard hat einen Cooldown von 60 Sekunden. Warte bitte noch **{error.retry_after:.0f}s**.", ephemeral=True)
         else:
@@ -533,7 +539,7 @@ class EconomyCog(commands.Cog):
 
     @app_commands.command(name="balance", description="Zeigt deinen aktuellen Kontostand")
     @app_commands.describe(user="Optional: anderer User")
-    async def balance(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    async def balance(self, interaction: discord.Interaction, user: Optional[discord.Member] = None) -> None:
         target = user or interaction.user
         bal = await self.get_balance(target.id)
         currency = await self.get_currency_name()
@@ -543,7 +549,7 @@ class EconomyCog(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="daily", description="Täglicher Bonus (einmal alle 24h)")
-    async def daily(self, interaction: discord.Interaction):
+    async def daily(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=False)
 
         user_id = interaction.user.id
@@ -567,5 +573,5 @@ class EconomyCog(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=False)
 
 
-async def setup(bot: commands.Bot):
+async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(EconomyCog(bot), name="Economy")
