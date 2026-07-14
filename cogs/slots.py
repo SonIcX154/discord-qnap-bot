@@ -38,14 +38,13 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
 
         player_name = interaction.user.display_name
 
-        # Spin-Embed mit fast identischer Struktur wie Ergebnis
         spinning_embed = discord.Embed(
             title="🎰 SLOTS - Drehen...",
             color=discord.Color.gold()
         )
         spinning_embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
-        spinning_embed.add_field(name="Dein Kontostand", value=f"**{current_balance - self.bet:,}** {self.currency}", inline=True)
         spinning_embed.add_field(name="Gewinn", value="...", inline=True)
+        spinning_embed.add_field(name="Dein Kontostand", value=f"**{current_balance - self.bet:,}** {self.currency}", inline=False)
         spinning_embed.description = "** | | | **"
         spinning_embed.set_footer(text=f"Gespielt von {player_name} • RTP ~92%")
 
@@ -69,7 +68,7 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
             new_balance = await self.economy.get_balance(self.user_id)
             color = discord.Color.red()
             title = "🎰 SLOTS - Verloren"
-            gewinn_text = "0 {self.currency}"
+            gewinn_text = f"0 {self.currency}"
 
         final_embed = discord.Embed(title=title, color=color)
         final_embed.description = f"**{' | '.join(reels)}**"
@@ -120,14 +119,13 @@ class SlotsCog(commands.Cog):
 
         player_name = interaction.user.display_name
 
-        # Spin-Embed mit fast identischer Struktur wie Ergebnis
         spinning_embed = discord.Embed(
             title="🎰 SLOTS - Drehen...",
             color=discord.Color.gold()
         )
         spinning_embed.add_field(name="Einsatz", value=f"{bet:,} {currency}", inline=True)
-        spinning_embed.add_field(name="Dein Kontostand", value=f"**{current - bet:,}** {currency}", inline=True)
         spinning_embed.add_field(name="Gewinn", value="...", inline=True)
+        spinning_embed.add_field(name="Dein Kontostand", value=f"**{current - bet:,}** {currency}", inline=False)
         spinning_embed.description = "** | | | **"
         spinning_embed.set_footer(text=f"Gespielt von {player_name} • RTP ~92%")
 
@@ -151,7 +149,7 @@ class SlotsCog(commands.Cog):
             new_balance = await economy.get_balance(user_id)
             color = discord.Color.red()
             title = "🎰 SLOTS - Verloren"
-            gewinn_text = "0 {currency}"
+            gewinn_text = f"0 {currency}"
 
         final_embed = discord.Embed(title=title, color=color)
         final_embed.description = f"**{' | '.join(reels)}**"
