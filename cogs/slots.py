@@ -21,7 +21,15 @@ class SlotsView(discord.ui.View):
         if new_bet < 10:
             new_bet = 10
         self.bet = new_bet
-        await interaction.response.send_message(f"✅ Neuer Einsatz: **{self.bet:,}** {self.currency}", ephemeral=True)
+
+        balance = await self.economy.get_balance(self.user_id)
+        embed = discord.Embed(
+            title="🎰 Slots",
+            description=f"Aktueller Einsatz: **{self.bet:,} {self.currency}**\nKontostand: **{balance:,} {self.currency}**",
+            color=discord.Color.gold()
+        )
+        embed.set_footer(text="Ändere den Einsatz oder starte eine neue Runde")
+        await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="➖ 10", style=discord.ButtonStyle.secondary, row=0)
     async def decrease_10(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -43,6 +51,13 @@ class SlotsView(discord.ui.View):
             await interaction.response.send_message("Nur der Spieler darf die Buttons benutzen.", ephemeral=True)
             return
         await self._update_bet(interaction, self.bet * 2)
+
+    @discord.ui.button(label="÷2", style=discord.ButtonStyle.secondary, row=0)
+    async def halve_bet(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Nur der Spieler darf die Buttons benutzen.", ephemeral=True)
+            return
+        await self._update_bet(interaction, self.bet // 2)
 
     @discord.ui.button(label="🔄 Nochmal spielen", style=discord.ButtonStyle.success, row=1)
     async def play_again(self, interaction: discord.Interaction, button: discord.ui.Button):
