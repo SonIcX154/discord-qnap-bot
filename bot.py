@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import datetime
 import discord
@@ -13,15 +15,15 @@ intents.members = True
 
 
 class QNAPBot(commands.Bot):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__(
             command_prefix="!",
             intents=intents,
             help_command=None
         )
-        self.synced = False
+        self.synced: bool = False
 
-    async def setup_hook(self):
+    async def setup_hook(self) -> None:
         """Load all cogs automatically on startup."""
         print("Loading cogs...")
         cogs_dir = "./cogs"
@@ -38,7 +40,7 @@ class QNAPBot(commands.Bot):
             print("No cogs directory found.")
         print("Cog loading complete.")
 
-    async def on_ready(self):
+    async def on_ready(self) -> None:
         if self.user is None:
             return
 
@@ -62,7 +64,7 @@ class QNAPBot(commands.Bot):
 bot = QNAPBot()
 
 
-async def main():
+async def main() -> None:
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         print("ERROR: DISCORD_TOKEN not found in .env file!")

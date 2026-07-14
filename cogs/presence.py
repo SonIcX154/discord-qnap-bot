@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from discord.ext import commands, tasks
 from discord import Activity, ActivityType
 
@@ -5,15 +7,15 @@ from discord import Activity, ActivityType
 class PresenceCog(commands.Cog):
     """Dynamische Rich Presence mit nächstem Geburtstag + Gesamtanzahl."""
 
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.update_presence.start()
 
-    async def cog_unload(self):
+    async def cog_unload(self) -> None:
         self.update_presence.cancel()
 
     @tasks.loop(minutes=60)
-    async def update_presence(self):
+    async def update_presence(self) -> None:
         """Aktualisiert die Rich Presence alle 60 Minuten."""
         birthday_cog = self.bot.get_cog("BirthdayCog")
         if not birthday_cog or not self.bot.guilds:
@@ -30,9 +32,9 @@ class PresenceCog(commands.Cog):
             await self.bot.change_presence(activity=activity)
             return
 
-        name = info.get("name", "Jemand")
-        days = info.get("days_until", 0)
-        total = info.get("total", 0)
+        name: str = info.get("name", "Jemand")
+        days: int = info.get("days_until", 0)
+        total: int = info.get("total", 0)
 
         if days == 0:
             text = f"Heute hat {name} Geburtstag! 🎉 • {total} Geburtstage"
@@ -48,9 +50,9 @@ class PresenceCog(commands.Cog):
         await self.bot.change_presence(activity=activity)
 
     @update_presence.before_loop
-    async def before_presence_update(self):
+    async def before_presence_update(self) -> None:
         await self.bot.wait_until_ready()
 
 
-async def setup(bot: commands.Bot):
+async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(PresenceCog(bot))

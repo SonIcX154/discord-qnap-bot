@@ -1,7 +1,13 @@
+from __future__ import annotations
+
 import random
 import discord
 from discord.ext import commands
 from discord import app_commands
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from cogs.economy import EconomyCog
 
 try:
     from utils.bet_mixin import BetAdjustableMixin
@@ -14,13 +20,13 @@ except ImportError:
 class RouletteView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
     """Interactive Roulette with bet adjustment and replay."""
 
-    def __init__(self, economy_cog, interaction: discord.Interaction, bet: int, currency: str):
+    def __init__(self, economy_cog: "EconomyCog", interaction: discord.Interaction, bet: int, currency: str) -> None:
         BetAdjustableMixin.__init__(self, economy_cog, interaction.user.id, bet, currency)
         ReplayMixin.__init__(self, interaction.user.id)
         discord.ui.View.__init__(self, timeout=180)
         self.interaction = interaction
 
-    async def _do_replay(self, interaction: discord.Interaction):
+    async def _do_replay(self, interaction: discord.Interaction) -> None:
         # Just create a fresh RouletteView with the same bet
         new_view = RouletteView(self.economy, interaction, self.bet, self.currency)
 
@@ -33,7 +39,7 @@ class RouletteView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
 
         await interaction.response.edit_message(embed=embed, view=new_view)
 
-    async def resolve_bet(self, interaction: discord.Interaction, bet_type: str, multiplier: int, description: str):
+    async def resolve_bet(self, interaction: discord.Interaction, bet_type: str, multiplier: int, description: str) -> None:
         for child in self.children:
             child.disabled = True
 
@@ -81,34 +87,34 @@ class RouletteView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=new_view)
 
     @discord.ui.button(label="🔴 Rot (2x)", style=discord.ButtonStyle.danger, row=1)
-    async def red_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def red_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.resolve_bet(interaction, "red", 2, "Rot")
 
     @discord.ui.button(label="⚫ Schwarz (2x)", style=discord.ButtonStyle.secondary, row=1)
-    async def black_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def black_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.resolve_bet(interaction, "black", 2, "Schwarz")
 
     @discord.ui.button(label="🟢 Grün/0 (36x)", style=discord.ButtonStyle.success, row=1)
-    async def green_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def green_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.resolve_bet(interaction, "green", 36, "Grün (0)")
 
     @discord.ui.button(label="Gerade (2x)", style=discord.ButtonStyle.primary, row=1)
-    async def even_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def even_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.resolve_bet(interaction, "even", 2, "Gerade")
 
     @discord.ui.button(label="Ungerade (2x)", style=discord.ButtonStyle.primary, row=1)
-    async def odd_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def odd_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.resolve_bet(interaction, "odd", 2, "Ungerade")
 
     @discord.ui.button(label="1-18 (2x)", style=discord.ButtonStyle.secondary, row=2)
-    async def low_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def low_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.resolve_bet(interaction, "low", 2, "1-18")
 
     @discord.ui.button(label="19-36 (2x)", style=discord.ButtonStyle.secondary, row=2)
-    async def high_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def high_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self.resolve_bet(interaction, "high", 2, "19-36")
 
-    async def on_timeout(self):
+    async def on_timeout(self) -> None:
         for child in self.children:
             child.disabled = True
 
@@ -116,16 +122,16 @@ class RouletteView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
 class RouletteCog(commands.Cog):
     """Roulette minigame cog."""
 
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    async def cog_load(self):
+    async def cog_load(self) -> None:
         print("[Roulette] Roulette Cog loaded.")
 
     @app_commands.command(name="roulette", description="Spiele Roulette mit interaktiven Buttons + Bet Anpassung")
     @app_commands.describe(bet="Dein Einsatz (Min. 10)")
     @app_commands.checks.cooldown(1, 5.0, key=lambda interaction: interaction.user.id)
-    async def roulette(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]):
+    async def roulette(self, interaction: discord.Interaction, bet: app_commands.Range[int, 10, None]) -> None:
         economy = self.bot.get_cog("Economy")
         if not economy:
             await interaction.response.send_message("Economy system nicht verfügbar.", ephemeral=True)
@@ -154,12 +160,12 @@ class RouletteCog(commands.Cog):
         await interaction.response.send_message(embed=embed, view=view)
 
     @roulette.error
-    async def roulette_error(self, interaction: discord.Interaction, error):
+    async def roulette_error(self, interaction: discord.Interaction, error: Exception) -> None:  # type: ignore[misc]
         if isinstance(error, app_commands.CommandOnCooldown):
             await interaction.response.send_message(f"⏳ Warte noch **{error.retry_after:.1f}s** bevor du wieder roulette spielst.", ephemeral=True)
         else:
             raise error
 
 
-async def setup(bot: commands.Bot):
+async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(RouletteCog(bot))
