@@ -12,14 +12,11 @@ from typing import Optional, TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from utils.bet_mixin import BetAdjustableMixin
-    from utils.replay_mixin import ReplayMixin
 
 try:
     from utils.bet_mixin import BetAdjustableMixin
-    from utils.replay_mixin import ReplayMixin
 except ImportError:
     from ..utils.bet_mixin import BetAdjustableMixin
-    from ..utils.replay_mixin import ReplayMixin
 
 
 # ====================== CONFIG ======================
