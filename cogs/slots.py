@@ -40,7 +40,7 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
             await interaction.edit_original_response(embed=spinning_embed)
             await asyncio.sleep(0.28)
 
-        reels, multiplier, win_text = self._roll_slots()
+        reels, multiplier, win_text = SlotsCog._roll_slots()
         winnings = int(self.bet * multiplier)
 
         if multiplier > 0:
@@ -64,34 +64,6 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
 
         new_view = SlotsView(self.economy, self.user_id, self.bet, self.currency)
         await interaction.edit_original_response(embed=final_embed, view=new_view)
-
-    def _roll_slots(self) -> Tuple[List[str], int, str]:
-        reels = [random.choice(SlotsCog.SLOT_SYMBOLS) for _ in range(3)]
-
-        if reels[0] == reels[1] == reels[2]:
-            if reels[0] == "💎":
-                multiplier = 10
-                win_text = "JACKPOT! 10x 💎"
-            elif reels[0] == "7️⃣":
-                multiplier = 7
-                win_text = "7x Siebenen!"
-            elif reels[0] == "⭐":
-                multiplier = 5
-                win_text = "5x Sterne!"
-            elif reels[0] == "🔔":
-                multiplier = 4
-                win_text = "4x Glocken!"
-            else:
-                multiplier = 3
-                win_text = "3x Gleich!"
-        elif reels[0] == reels[1] or reels[1] == reels[2] or reels[0] == reels[2]:
-            multiplier = 2
-            win_text = "2x Gleich!"
-        else:
-            multiplier = 0
-            win_text = "Nichts..."
-
-        return reels, multiplier, win_text
 
     async def on_timeout(self):
         for child in self.children:
@@ -164,8 +136,9 @@ class SlotsCog(commands.Cog):
         view = SlotsView(economy, user_id, bet, currency)
         await interaction.edit_original_response(embed=final_embed, view=view)
 
-    def _roll_slots(self) -> Tuple[List[str], int, str]:
-        reels = [random.choice(self.SLOT_SYMBOLS) for _ in range(3)]
+    @staticmethod
+    def _roll_slots() -> Tuple[List[str], int, str]:
+        reels = [random.choice(SlotsCog.SLOT_SYMBOLS) for _ in range(3)]
 
         if reels[0] == reels[1] == reels[2]:
             if reels[0] == "💎":

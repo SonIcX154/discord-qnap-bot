@@ -3,6 +3,7 @@ import os
 import datetime
 import random
 import asyncio
+import re
 from datetime import date
 import discord
 from discord.ext import commands, tasks
@@ -129,7 +130,6 @@ class BirthdayCog(commands.Cog):
         }
         for name, num in german_months.items():
             if name in s_lower:
-                import re
                 match = re.search(r"(\d{1,2})", s)
                 if match:
                     day = int(match.group(1))

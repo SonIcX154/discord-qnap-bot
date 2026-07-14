@@ -6,7 +6,7 @@ import aiosqlite
 import discord
 from discord.ext import commands
 from discord import app_commands
-from typing import Optional, List, Tuple
+from typing import Optional
 
 try:
     from utils.bet_mixin import BetAdjustableMixin
@@ -76,7 +76,7 @@ class LeaderboardView(discord.ui.View):
                     name = f"User {user_id}"
 
             if user_id == self.highlight_user_id:
-                prefix = "➤ **"
+                prefix = "➔ **"
                 suffix = "** ⬅️"
             else:
                 prefix = ""
@@ -494,7 +494,7 @@ class EconomyCog(commands.Cog):
 
         embed = discord.Embed(
             title="🪙 Coinflip - Wähle deine Seite",
-            description=f"Du hast **{bet:,} {currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann **Kopf** oder **Zahl**:",
+            description=f"Du hast **{bet:,} {self.currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann **Kopf** oder **Zahl**:",
             color=discord.Color.gold()
         )
         embed.set_footer(text="Timeout nach 2 Minuten")
