@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import os
 import random
 import discord
 from discord.ext import commands
@@ -11,34 +11,50 @@ if TYPE_CHECKING:
 
 try:
     from utils.bet_mixin import BetAdjustableMixin
-    from utils.replay_mixin import ReplayMixin
 except ImportError:
     from ..utils.bet_mixin import BetAdjustableMixin
-    from ..utils.replay_mixin import ReplayMixin
 
 
-class RouletteView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
-    """Interactive Roulette with bet adjustment and replay."""
+ROULETTE_EMOTE = str(os.getenv("ROULETTE_EMOTE", "🎰"))
+
+class RouletteView(BetAdjustableMixin, discord.ui.View):
+    """Interactive Roulette with bet adjustment."""
 
     def __init__(self, economy_cog: "EconomyCog", interaction: discord.Interaction, bet: int, currency: str) -> None:
         BetAdjustableMixin.__init__(self, economy_cog, interaction.user.id, bet, currency)
-        ReplayMixin.__init__(self, interaction.user.id)
         discord.ui.View.__init__(self, timeout=180)
         self.interaction = interaction
 
-    async def _do_replay(self, interaction: discord.Interaction) -> None:
-        new_view = RouletteView(self.economy, interaction, self.bet, self.currency)
-
+    async def _get_updated_embed(self) -> discord.Embed:
+        """Live update embed when adjusting bet - stable layout."""
+        current_balance = await self.economy.get_balance(self.user_id)
+        
         embed = discord.Embed(
-            title="🔀 Roulette - Wähle deinen Einsatz",
-            description=f"Du hast **{self.bet:,} {self.currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann, worauf du setzen möchtest:",
+            title=ROULETTE_EMOTE + " Roulette",
             color=discord.Color.gold()
         )
-        embed.set_footer(text="Die Kugel rollt... • Timeout nach 3 Minuten")
-
-        await interaction.response.edit_message(embed=embed, view=new_view)
+        embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
+        embed.add_field(
+            name="Kontostand", 
+            value=f"**{current_balance:,}** {self.currency}", 
+            inline=False
+        )
+        embed.set_footer(text="Glücksspiel kann süchtig machen")
+        return embed
 
     async def resolve_bet(self, interaction: discord.Interaction, bet_type: str, multiplier: int, description: str) -> None:
+        current_balance = await self.economy.get_balance(self.user_id)
+        if current_balance < self.bet:
+            await interaction.response.send_message(
+                f"❌ Nicht genug {self.currency}! Du hast nur **{current_balance:,}**.",
+                ephemeral=True
+            )
+            return
+
+        if not await self.economy.remove_coins(self.user_id, self.bet):
+            await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
+            return
+
         for child in self.children:
             child.disabled = True  # type: ignore[attr-defined]
 
@@ -67,18 +83,18 @@ class RouletteView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
             win_amount = int(self.bet * multiplier)
             new_balance = await self.economy.add_coins(self.user_id, win_amount)
             color_embed = discord.Color.green()
-            title = "🎉 Gewonnen!"
+            title = ROULETTE_EMOTE + " Roulette - 🎉 Gewonnen!"
         else:
             new_balance = await self.economy.get_balance(self.user_id)
             color_embed = discord.Color.red()
-            title = "😢 Verloren"
+            title = ROULETTE_EMOTE + " Roulette - 😢 Verloren"
 
         embed = discord.Embed(title=title, color=color_embed)
         embed.description = f"**Die Kugel ist auf {number} ({color}) gelandet!**"
-        embed.add_field(name="Dein Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
+        embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
         if won:
             embed.add_field(name="Gewinn", value=f"+{win_amount:,} {self.currency} ({description})", inline=True)
-        embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
+        embed.add_field(name="Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
         embed.set_footer(text=f"Gespielt von {interaction.user.display_name}")
 
         new_view = RouletteView(self.economy, interaction, self.bet, self.currency)
@@ -96,11 +112,11 @@ class RouletteView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
     async def green_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         await self.resolve_bet(interaction, "green", 36, "Grün (0)")
 
-    @discord.ui.button(label="Gerade (2x)", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Gerade (2x)", style=discord.ButtonStyle.primary, row=2)
     async def even_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         await self.resolve_bet(interaction, "even", 2, "Gerade")
 
-    @discord.ui.button(label="Ungerade (2x)", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Ungerade (2x)", style=discord.ButtonStyle.primary, row=2)
     async def odd_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         await self.resolve_bet(interaction, "odd", 2, "Ungerade")
 
@@ -143,16 +159,12 @@ class RouletteCog(commands.Cog):
             await interaction.response.send_message(f"❌ Nicht genug {currency}! Du hast **{current:,}** {currency}.", ephemeral=True)
             return
 
-        if not await economy.remove_coins(user_id, bet):  # type: ignore[union-attr]
-            await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
-            return
-
         embed = discord.Embed(
-            title="🔀 Roulette - Wähle deinen Einsatz",
-            description=f"Du hast **{bet:,} {currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann, worauf du setzen möchtest:",
+            title=ROULETTE_EMOTE + " Roulette",
+            description=f"Du hast **{bet:,} {currency}** als Einsatz gewählt.\n\nPasse deinen Einsatz an und wähle dann, worauf du setzen möchtest:",
             color=discord.Color.gold()
         )
-        embed.set_footer(text="Die Kugel rollt... • Timeout nach 3 Minuten")
+        embed.set_footer(text="Glücksspiel kann süchtig machen")
 
         view = RouletteView(economy, interaction, bet, currency)  # type: ignore[arg-type]
         await interaction.response.send_message(embed=embed, view=view)

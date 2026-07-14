@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import asyncio
 import discord
+import traceback
 from discord.ext import commands
 from discord import app_commands
 from typing import TYPE_CHECKING
@@ -17,7 +18,6 @@ except ImportError:
     from ..utils.bet_mixin import BetAdjustableMixin
     from ..utils.replay_mixin import ReplayMixin
 
-
 class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
     """Interactive Slots view with bet adjustment and replay."""
 
@@ -25,6 +25,9 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         BetAdjustableMixin.__init__(self, economy_cog, user_id, bet, currency)
         ReplayMixin.__init__(self, user_id)
         discord.ui.View.__init__(self, timeout=300)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item) -> None: 
+        traceback.print_exception(type(error), error, error.__traceback__)
 
     async def _get_updated_embed(self) -> discord.Embed:
         """Live update embed when adjusting bet - stable layout."""
@@ -92,7 +95,7 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         final_embed.description = f"**{' | '.join(reels)}**"
         final_embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
         final_embed.add_field(name="Gewinn", value=gewinn_text, inline=True)
-        final_embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
+        final_embed.add_field(name="Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
         final_embed.set_footer(text=f"Gespielt von {player_name} • RTP ~92%")
 
         new_view = SlotsView(self.economy, self.user_id, self.bet, self.currency)
@@ -124,14 +127,14 @@ class SlotsCog(commands.Cog):
             return
 
         user_id = interaction.user.id
-        currency = await economy.get_currency_name()
+        currency = await economy.get_currency_name() # type: ignore[union-attr]
 
-        current = await economy.get_balance(user_id)
+        current = await economy.get_balance(user_id) # type: ignore[union-attr]
         if current < bet:
             await interaction.response.send_message(f"❌ Nicht genug {currency}! Du hast **{current:,}** {currency}.", ephemeral=True)
             return
 
-        if not await economy.remove_coins(user_id, bet):
+        if not await economy.remove_coins(user_id, bet): # type: ignore[union-attr]
             await interaction.response.send_message("❌ Fehler beim Einsatz.", ephemeral=True)
             return
 
@@ -143,9 +146,9 @@ class SlotsCog(commands.Cog):
         )
         spinning_embed.add_field(name="Einsatz", value=f"{bet:,} {currency}", inline=True)
         spinning_embed.add_field(name="Gewinn", value="...", inline=True)
-        spinning_embed.add_field(name="Dein Kontostand", value=f"**{current - bet:,}** {currency}", inline=False)
+        spinning_embed.add_field(name="Kontostand", value=f"**{current - bet:,}** {currency}", inline=False)
         spinning_embed.description = "** | | | **"
-        spinning_embed.set_footer(text=f"Gespielt von {player_name} • RTP ~92%")
+        spinning_embed.set_footer(text=f"Glücksspiel kann süchtig machen • RTP ~92%")
 
         await interaction.response.send_message(embed=spinning_embed)
 
@@ -159,21 +162,28 @@ class SlotsCog(commands.Cog):
         winnings = int(bet * multiplier)
 
         if multiplier > 0:
-            new_balance = await economy.add_coins(user_id, winnings)
+            new_balance = await economy.add_coins(user_id, winnings) # type: ignore[union-attr]
             color = discord.Color.green()
             title = "🎰 SLOTS - GEWONNEN!"
             gewinn_text = f"+{winnings:,} {currency} ({win_text})"
+
+        elif multiplier == 10:
+            new_balance = await economy.get_balance(user_id) # type: ignore[union-attr]
+            color = discord.Color.blue()
+            title = "🎰 SLOTS - 🎉JACKPOT!🎉"
+            gewinn_text = f"+{winnings:,} {currency} ({win_text})"
+
         else:
-            new_balance = await economy.get_balance(user_id)
+            new_balance = await economy.get_balance(user_id) # type: ignore[union-attr]
             color = discord.Color.red()
             title = "🎰 SLOTS - Verloren"
             gewinn_text = f"0 {currency}"
 
         final_embed = discord.Embed(title=title, color=color)
         final_embed.description = f"**{' | '.join(reels)}**"
-        final_embed.add_field(name="Einsatz", value=f"{self.bet:,} {currency}", inline=True)
+        final_embed.add_field(name="Einsatz", value=f"{bet:,} {currency}", inline=True)
         final_embed.add_field(name="Gewinn", value=gewinn_text, inline=True)
-        final_embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
+        final_embed.add_field(name="Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
         final_embed.set_footer(text=f"Gespielt von {player_name} • RTP ~92%")
 
         view = SlotsView(economy, user_id, bet, currency)  # type: ignore[arg-type]

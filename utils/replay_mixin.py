@@ -14,7 +14,7 @@ class ReplayMixin:
     def _can_replay(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user_id
 
-    @discord.ui.button(label="🔄 Nochmal spielen", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="🔄 Nochmal spielen", style=discord.ButtonStyle.primary, row=1)
     async def play_again(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not self._can_replay(interaction):
             await interaction.response.send_message(

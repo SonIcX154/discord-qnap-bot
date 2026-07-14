@@ -97,7 +97,6 @@ class LeaderboardView(discord.ui.View):
             lines.append(f"{medal} {prefix}{name}{suffix} — {balance:,} {self.currency}")
 
         embed.description = "\n".join(lines) if lines else "Keine Daten vorhanden."
-        embed.set_footer(text="Global pro Bot-Instanz • Klicke auf 'Meine Position'")
         return embed
 
     @discord.ui.button(label="◀️ Zurück", style=discord.ButtonStyle.secondary)
@@ -145,6 +144,18 @@ class CoinflipView(BetAdjustableMixin, discord.ui.View):
         BetAdjustableMixin.__init__(self, economy_cog, interaction.user.id, bet, currency)
         discord.ui.View.__init__(self, timeout=120)
 
+    async def _get_updated_embed(self) -> discord.Embed:
+        """Live update embed when adjusting bet - stable layout."""
+        current_balance = await self.economy.get_balance(self.user_id)
+
+        embed = discord.Embed(
+            title="🪙 COINFLIP",
+            color=discord.Color.gold()
+        )
+        embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
+        embed.add_field(name="Kontostand", value=f"**{current_balance:,}** {self.currency}", inline=False)
+        return embed
+
     async def _resolve(self, interaction: discord.Interaction, choice: str) -> None:
         for child in self.children:
             child.disabled = True  # type: ignore[attr-defined]
@@ -153,24 +164,21 @@ class CoinflipView(BetAdjustableMixin, discord.ui.View):
         won = (choice == result)
 
         if won:
-            # Wir haben den Einsatz bereits beim Button-Klick abgezogen.
-            # Bei Gewinn bekommen wir 2x den Einsatz zurück (Einsatz + Gewinn).
             new_balance = await self.economy.add_coins(self.user_id, self.bet * 2)
             color = discord.Color.green()
-            title = "🪙 Coinflip - Gewonnen!"
-            win_text = f"+{self.bet:,} {self.currency} (Gewinn)"
+            title = f"🪙 COINFLIP - {result}"
+            win_text = f"+{self.bet:,} {self.currency}"
         else:
             new_balance = await self.economy.get_balance(self.user_id)
             color = discord.Color.red()
-            title = "🪙 Coinflip - Verloren"
+            title = f"🪙 COINFLIP - {result}"
             win_text = f"-{self.bet:,} {self.currency}"
 
         embed = discord.Embed(title=title, color=color)
-        embed.description = f"Die Münze ist auf **{result}** gelandet."
-        embed.add_field(name="Deine Wahl", value=choice, inline=True)
-        embed.add_field(name="Ergebnis", value=win_text, inline=True)
-        embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
-        embed.set_footer(text=f"Gespielt von {interaction.user.display_name} \n\nDrücke Kopf oder Zahl um erneut zu spielen (Einsatz wird abgezogen)")
+        embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
+        embed.add_field(name="Gewinn", value=f"{win_text}", inline=True)
+        embed.add_field(name="Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
+        embed.set_footer(text=f"Gespielt von {interaction.user.display_name}")
 
         new_view = CoinflipView(self.economy, interaction, self.bet, self.currency)
         await interaction.response.edit_message(embed=embed, view=new_view)
@@ -183,7 +191,7 @@ class CoinflipView(BetAdjustableMixin, discord.ui.View):
 
         if not await self.economy.remove_coins(self.user_id, self.bet):
             await interaction.response.send_message(
-                f"❌ Du hast nicht genug {self.currency} mehr.", 
+                f"❌ Du hast nicht mehr genug {self.currency}.", 
                 ephemeral=True
             )
             return
@@ -209,6 +217,42 @@ class CoinflipView(BetAdjustableMixin, discord.ui.View):
         for child in self.children:
             child.disabled = True  # type: ignore[attr-defined]
 
+"""
+#TODO: Implement BegView with a 'gönnen' button that allows other users to give coins to the beggar. The button should be disabled for the user who initiated the beg command and should have a cooldown of 10 minutes per user. The amount given should be random between 5 and 15 coins.
+class BegView(discord.ui.View):
+    #View for the /beg command with a 'Nochmal betteln' button.
+
+    def __init__(self, user_id: int) -> None:
+        super().__init__(timeout=60)
+        self.user_id = user_id
+
+    @discord.ui.button(label="💰 Gönnen", style=discord.ButtonStyle.success)
+    async def donate(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.user.id == self.user_id:
+            await interaction.response.send_message(
+                "Du kannst dir nicht selber spenden.",
+                ephemeral=True
+            )
+            return
+
+        if not await self.can_claim_beg(interaction.user.id):
+            await interaction.response.send_message(
+                "❌ Du kannst nur alle 10 Minuten betteln.",
+                ephemeral=True
+            )
+            return
+
+        amount = random.randint(5, 15)
+        await self.add_coins(interaction.user.id, amount)
+        await self.set_last_beg(interaction.user.id, int(time.time()))
+
+        embed = discord.Embed(
+            title="💰 Betteln erfolgreich",
+            description=f"Du hast **{amount}** Coins bekommen!",
+            color=discord.Color.green()
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+"""
 
 class EconomyCog(commands.Cog):
     """Core Economy system.
@@ -481,7 +525,7 @@ class EconomyCog(commands.Cog):
         old_balance = await self.get_balance(user.id)
         new_balance = await self.add_coins(user.id, amount)
 
-        embed = discord.Embed(title="✅ Coins gegeben", color=discord.Color.green())
+        embed = discord.Embed(title=f"✅ {amount:,} {currency} gegeben", color=discord.Color.green())
         embed.add_field(name="User", value=user.mention, inline=True)
         embed.add_field(name="Betrag", value=f"+{amount:,} {currency}", inline=True)
         embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency} (vorher: {old_balance:,})", inline=False)
@@ -500,10 +544,10 @@ class EconomyCog(commands.Cog):
             return
 
         new_balance = await self.get_balance(user.id)
-        embed = discord.Embed(title="✅ Coins abgezogen", color=discord.Color.orange())
+        embed = discord.Embed(title=f"✅ {amount:,} {currency} abgezogen", color=discord.Color.orange())
         embed.add_field(name="User", value=user.mention, inline=True)
         embed.add_field(name="Betrag", value=f"-{amount:,} {currency}", inline=True)
-        embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency} (vorher: {old_balance:,})", inline=False)
+        embed.add_field(name="neuer Kontostand", value=f"**{new_balance:,}** {currency} (vorher: {old_balance:,})", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="economy-set", description="Setze den exakten Kontostand eines Users (Admin)")
@@ -522,8 +566,8 @@ class EconomyCog(commands.Cog):
 
         embed = discord.Embed(title="✅ Kontostand gesetzt", color=discord.Color.blue())
         embed.add_field(name="User", value=user.mention, inline=True)
-        embed.add_field(name="Alter Stand", value=f"{old_balance:,} {currency}", inline=True)
-        embed.add_field(name="Neuer Stand", value=f"**{amount:,}** {currency}", inline=False)
+        embed.add_field(name="Vorher:", value=f"{old_balance:,} {currency}", inline=True)
+        embed.add_field(name="Jetzt:", value=f"**{amount:,}** {currency}", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="coinflip", description="Wähle Kopf oder Zahl und gewinne den 2x Einsatz")
@@ -542,12 +586,10 @@ class EconomyCog(commands.Cog):
             await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
             return
 
-        embed = discord.Embed(
-            title="🪙 Coinflip - Wähle deine Seite",
-            description=f"Du hast **{bet:,} {currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann **Kopf** oder **Zahl**:",
-            color=discord.Color.gold()
-        )
-        embed.set_footer(text="Timeout nach 2 Minuten")
+        embed = discord.Embed(title="🪙 Coinflip - Wähle deine Seite", color=discord.Color.gold())
+        embed.add_field(name="Einsatz", value=f"**{bet:,}** {currency}", inline=True)
+        embed.add_field(name="Kontostand", value=f"**{current_balance - bet:,}** {currency}", inline=False)
+        embed.set_footer(text="Glücksspiel kann süchtig machen")
 
         view = CoinflipView(self, interaction, bet, currency)
         await interaction.response.send_message(embed=embed, view=view)
@@ -589,7 +631,7 @@ class EconomyCog(commands.Cog):
         currency = await self.get_currency_name()
 
         embed = discord.Embed(title=f"💰 {target.display_name}'s {currency}", description=f"**{bal:,}** {currency}", color=discord.Color.gold())
-        embed.set_footer(text="/daily • /coinflip • /leaderboard")
+        embed.set_footer(text="/daily • /coinflip • /leaderboard • /give")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="daily", description="Täglicher Bonus (einmal alle 24h)")
@@ -612,10 +654,51 @@ class EconomyCog(commands.Cog):
 
         embed = discord.Embed(title="🎁 Täglicher Bonus", color=discord.Color.green())
         embed.description = f"**{interaction.user.mention}** hat **{amount} {currency}** erhalten!"
-        embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
+        embed.add_field(name="Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
         embed.set_footer(text="Bis morgen! 💰")
         await interaction.followup.send(embed=embed, ephemeral=False)
 
+    @app_commands.command(name="give", description="Gib einem User Währung")
+    @app_commands.describe(user="Der User, dem du Währung gibst", amount="Die Menge an Währung")
+    async def give(self, interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, None]) -> None:
+        if user == interaction.user:
+            await interaction.response.send_message(f"❌ Du kannst dir nicht selbst {await self.get_currency_name()} geben.", ephemeral=True)
+            return
+
+        if not await self.remove_coins(interaction.user.id, amount):
+            await interaction.response.send_message(f"❌ Nicht genug {await self.get_currency_name()}!", ephemeral=True)
+            return
+
+        await self.add_coins(user.id, amount)
+        new_balance = await self.get_balance(user.id)
+
+        embed = discord.Embed(title=f"✅ {amount:,} {await self.get_currency_name()} gegeben", color=discord.Color.green())
+        embed.description = f"**{interaction.user.mention}** hat **{user.mention}** **{amount:,}** {await self.get_currency_name()} gegeben."
+        embed.add_field(name=f"**{user.display_name}** hat jetzt **{new_balance:,}** {await self.get_currency_name()}", value="", inline=False)
+        embed.add_field(name=f"**{interaction.user.display_name}** hat jetzt **{await self.get_balance(interaction.user.id):,}** {await self.get_currency_name()}", value="", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=False)
+
+"""
+    @app_commands.command(name="beg", description=f"Bitte um eine kleine Spende (kann nur alle 10 Minuten gemacht werden)")
+    @app_commands.describe(amount=f"Größe der Spende (optional, Standard: 10)")
+    @app_commands.checks.cooldown(1, 600.0, key=lambda interaction: interaction.user.id)
+    async def beg(self, interaction: discord.Interaction, amount: Optional[app_commands.Range[int, 1, None]] = None) -> None:
+        amount = amount or 10
+        user_id = interaction.user.id
+        currency = await self.get_currency_name()
+
+        if not await self.remove_coins(user_id, amount):
+            await interaction.response.send_message(f"❌ Nicht genug {currency}!", ephemeral=True)
+            return
+
+        await self.add_coins(user_id, amount)
+        new_balance = await self.get_balance(user_id)
+
+        embed = discord.Embed(title=f"🙏 Gebettelt und {amount:,} {currency} erhalten", color=discord.Color.green())
+        embed.description = f"**{interaction.user.mention}** hat **{amount:,}** {currency} gebettelt."
+        embed.add_field(name="Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=False)
+"""
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(EconomyCog(bot))
