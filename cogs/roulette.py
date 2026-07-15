@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import random
+import asyncio
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -16,6 +17,13 @@ except ImportError:
 
 
 ROULETTE_EMOTE = str(os.getenv("ROULETTE_EMOTE", "🎰"))
+
+# Standard Roulette-Rad-Reihenfolge (realistisch)
+ROULETTE_WHEEL = [
+    0, 32, 15, 19, 4, 21, 2, 25, 17, 34, 6, 27, 13, 36, 11, 30, 8, 23,
+    10, 5, 24, 16, 33, 1, 20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3, 26
+]
+
 
 class RouletteView(BetAdjustableMixin, discord.ui.View):
     """Interactive Roulette with bet adjustment."""
@@ -36,11 +44,61 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
         embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
         embed.add_field(
             name="Kontostand", 
-            value=f"**{current_balance:,}** {self.currency}", 
+            value=f"**{current_balance:,}** {self.currency}",
             inline=False
         )
         embed.set_footer(text="Glücksspiel kann süchtig machen")
         return embed
+
+    async def _spin_animation(self, interaction: discord.Interaction, winning_number: int) -> None:
+        """Realistische Roulette-Animation die auf der korrekten Zahl landet."""
+        # Finde den Index der Gewinnzahl im Rad
+        try:
+            win_index = ROULETTE_WHEEL.index(winning_number)
+        except ValueError:
+            win_index = 0
+
+        color = "Grün" if winning_number == 0 else ("Rot" if winning_number % 2 == 1 else "Schwarz")
+
+        # Animation: 12 Frames, Ball bewegt sich und landet auf der Gewinnzahl
+        for step in range(12):
+            # Verschiebe das "Fenster" des Rades
+            offset = (step * 3) % len(ROULETTE_WHEEL)
+            window = []
+            for i in range(9):
+                idx = (win_index - 4 + offset + i) % len(ROULETTE_WHEEL)
+                num = ROULETTE_WHEEL[idx]
+                if num == winning_number and step >= 9:  # Letzte Frames: Gewinnzahl hervorheben
+                    window.append(f"**{num}**")
+                else:
+                    window.append(str(num))
+
+            # Ball-Position (bewegt sich von links nach rechts und bleibt am Ende)
+            ball_pos = min(step, 8)
+            display = window.copy()
+            if step < 9:
+                display[ball_pos] = "🔴"  # roter Ball
+            else:
+                display[4] = "🔴"  # Ball landet in der Mitte
+
+            wheel_str = "   ".join(display)
+
+            embed = discord.Embed(
+                title=f"{ROULETTE_EMOTE} Roulette - Die Kugel rollt...",
+                description=f"`{wheel_str}`",
+                color=discord.Color.gold()
+            )
+            embed.set_footer(text="Die Kugel sucht ihre Zahl...")
+
+            if step == 0:
+                await interaction.response.edit_message(embed=embed, view=None)
+            else:
+                await interaction.edit_original_response(embed=embed)
+
+            await asyncio.sleep(0.18 if step < 6 else 0.35)  # Langsamer werden
+
+        # Kurze Pause auf der finalen Zahl
+        await asyncio.sleep(0.6)
 
     async def resolve_bet(self, interaction: discord.Interaction, bet_type: str, multiplier: int, description: str) -> None:
         current_balance = await self.economy.get_balance(self.user_id)
@@ -58,7 +116,12 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
         for child in self.children:
             child.disabled = True  # type: ignore[attr-defined]
 
+        # Gewinnzahl bestimmen
         number = random.randint(0, 36)
+
+        # Animation abspielen (landet garantiert auf der richtigen Zahl)
+        await self._spin_animation(interaction, number)
+
         color = "Grün" if number == 0 else ("Rot" if number % 2 == 1 else "Schwarz")
 
         won = False
@@ -98,7 +161,7 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
         embed.set_footer(text=f"Gespielt von {interaction.user.display_name}")
 
         new_view = RouletteView(self.economy, interaction, self.bet, self.currency)
-        await interaction.response.edit_message(embed=embed, view=new_view)
+        await interaction.edit_original_response(embed=embed, view=new_view)
 
     @discord.ui.button(label="🔴 Rot (2x)", style=discord.ButtonStyle.danger, row=1)
     async def red_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
