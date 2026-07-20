@@ -34,7 +34,7 @@ class VoiceStayer(commands.Cog):
         self.voice_channel_id = int(os.getenv("VOICE_CHANNEL_ID", "0"))
         self._voice_task: Optional[asyncio.Task[None]] = None
         self._running = True
-        self.enabled = True   # Can be toggled with /voice-stayer
+        self.enabled = False   # Can be toggled with /voice-stayer
 
     async def cog_load(self) -> None:
         """Start the background task when the cog is loaded."""

@@ -25,6 +25,13 @@ ROULETTE_WHEEL = [
 ]
 
 
+def _color_square(number: int) -> str:
+    """Gibt das Farb-Emoji passend zur intern verwendeten Rot/Schwarz/Grün-Logik zurück."""
+    if number == 0:
+        return "🟩"
+    return "🟥" if number % 2 == 1 else "⬛"
+
+
 class RouletteView(BetAdjustableMixin, discord.ui.View):
     """Interactive Roulette with bet adjustment."""
 
@@ -42,6 +49,7 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
             color=discord.Color.gold()
         )
         embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
+        embed.add_field(name="Gewinn", value="...", inline=True)
         embed.add_field(
             name="Kontostand", 
             value=f"**{current_balance:,}** {self.currency}",
@@ -50,44 +58,61 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
         embed.set_footer(text="Glücksspiel kann süchtig machen")
         return embed
 
-    async def _spin_animation(self, interaction: discord.Interaction, winning_number: int) -> None:
-        """Realistische Roulette-Animation die auf der korrekten Zahl landet."""
-        # Finde den Index der Gewinnzahl im Rad
+    async def _spin_animation(self, interaction: discord.Interaction, winning_number: int, balance_after: int) -> None:
+        """Roulette-Animation: Die Kugel bleibt mittig und wackelt nur leicht hin und her,
+        während das Rad darunter "durchläuft". Landet garantiert im letzten Frame auf der Gewinnzahl."""
+        wheel_len = len(ROULETTE_WHEEL)
         try:
             win_index = ROULETTE_WHEEL.index(winning_number)
         except ValueError:
             win_index = 0
 
-        color = "Grün" if winning_number == 0 else ("Rot" if winning_number % 2 == 1 else "Schwarz")
+        WINDOW = 9
+        CENTER = WINDOW // 2  # 4
+        FRAMES = 14
 
-        # Animation: 12 Frames, Ball bewegt sich und landet auf der Gewinnzahl
-        for step in range(12):
-            # Verschiebe das "Fenster" des Rades
-            offset = (step * 3) % len(ROULETTE_WHEEL)
-            window = []
-            for i in range(9):
-                idx = (win_index - 4 + offset + i) % len(ROULETTE_WHEEL)
-                num = ROULETTE_WHEEL[idx]
-                if num == winning_number and step >= 9:  # Letzte Frames: Gewinnzahl hervorheben
-                    window.append(f"**{num}**")
+        total_spin = 30
+        ease_power = 1.3  # kleiner = langsamerer Start, 2.0 = alter (schneller) Start, 1.0 = konstante Geschwindigkeit (keine Verlangsamung mehr)
+        offsets = []
+        for i in range(FRAMES):
+            t = i / (FRAMES - 1)
+            eased = total_spin * (1 - t) ** ease_power
+            offsets.append(round(eased))
+        offsets[-1] = 0  # letzter Frame: exakt ausgerichtet
+
+        # Kugel-Wackeln: minimale Bewegung um die Mitte, in den letzten Frames stabilisiert sie sich.
+        jitter_pattern = [0, 1, 0, -1, 0, -1, 0, 1, 0, -1, 0, 1, 0, 0][:FRAMES]
+        jitter_pattern[-1] = 0
+        jitter_pattern[-2] = 0
+
+        for step in range(FRAMES):
+            offset = offsets[step]
+            window_numbers = [
+                ROULETTE_WHEEL[(win_index - CENTER + offset + i) % wheel_len]
+                for i in range(WINDOW)
+            ]
+
+            ball_index = max(0, min(WINDOW - 1, CENTER + jitter_pattern[step]))
+            is_final_frame = step == FRAMES - 1
+
+            cells = []
+            for i, num in enumerate(window_numbers):
+                square = _color_square(num)
+                if i == ball_index:
+                    cells.append(f"🔴**{num}**{square}" if is_final_frame else f"🔴{num}{square}")
                 else:
-                    window.append(str(num))
+                    cells.append(f"{num}{square}")
 
-            # Ball-Position (bewegt sich von links nach rechts und bleibt am Ende)
-            ball_pos = min(step, 8)
-            display = window.copy()
-            if step < 9:
-                display[ball_pos] = "🔴"  # roter Ball
-            else:
-                display[4] = "🔴"  # Ball landet in der Mitte
-
-            wheel_str = "   ".join(display)
+            wheel_str = " | ".join(cells)
 
             embed = discord.Embed(
                 title=f"{ROULETTE_EMOTE} Roulette - Die Kugel rollt...",
-                description=f"`{wheel_str}`",
+                description=wheel_str,
                 color=discord.Color.gold()
             )
+            embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
+            embed.add_field(name="Gewinn", value="...", inline=True)
+            embed.add_field(name="Kontostand", value=f"**{balance_after:,}** {self.currency}", inline=False)
             embed.set_footer(text="Die Kugel sucht ihre Zahl...")
 
             if step == 0:
@@ -95,7 +120,7 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
             else:
                 await interaction.edit_original_response(embed=embed)
 
-            await asyncio.sleep(0.18 if step < 6 else 0.35)  # Langsamer werden
+            await asyncio.sleep(0.16 if step < FRAMES - 4 else 0.32)  # Langsamer werden
 
         # Kurze Pause auf der finalen Zahl
         await asyncio.sleep(0.6)
@@ -118,9 +143,10 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
 
         # Gewinnzahl bestimmen
         number = random.randint(0, 36)
+        balance_after_deduction = current_balance - self.bet
 
         # Animation abspielen (landet garantiert auf der richtigen Zahl)
-        await self._spin_animation(interaction, number)
+        await self._spin_animation(interaction, number, balance_after_deduction)
 
         color = "Grün" if number == 0 else ("Rot" if number % 2 == 1 else "Schwarz")
 
@@ -147,16 +173,18 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
             new_balance = await self.economy.add_coins(self.user_id, win_amount)
             color_embed = discord.Color.green()
             title = ROULETTE_EMOTE + " Roulette - 🎉 Gewonnen!"
+            gewinn_text = f"+{win_amount:,} {self.currency} ({description})"
         else:
             new_balance = await self.economy.get_balance(self.user_id)
             color_embed = discord.Color.red()
             title = ROULETTE_EMOTE + " Roulette - 😢 Verloren"
+            gewinn_text = f"0 {self.currency}"
 
+        square = _color_square(number)
         embed = discord.Embed(title=title, color=color_embed)
-        embed.description = f"**Die Kugel ist auf {number} ({color}) gelandet!**"
+        embed.description = f"**Die Kugel ist auf {number} {square} gelandet!**"
         embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
-        if won:
-            embed.add_field(name="Gewinn", value=f"+{win_amount:,} {self.currency} ({description})", inline=True)
+        embed.add_field(name="Gewinn", value=gewinn_text, inline=True)
         embed.add_field(name="Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
         embed.set_footer(text=f"Gespielt von {interaction.user.display_name}")
 
@@ -224,7 +252,8 @@ class RouletteCog(commands.Cog):
 
         embed = discord.Embed(title=ROULETTE_EMOTE + " Roulette", color=discord.Color.gold())
         embed.add_field(name="Einsatz", value=f"**{bet:,}** {currency}", inline=True)
-        embed.add_field(name="Kontostand", value=f"**{current - bet:,}** {currency}", inline=False)
+        embed.add_field(name="Gewinn", value="...", inline=True)
+        embed.add_field(name="Kontostand", value=f"**{current:,}** {currency}", inline=False)
         embed.set_footer(text="Glücksspiel kann süchtig machen")
 
         view = RouletteView(economy, interaction, bet, currency)  # type: ignore[arg-type]

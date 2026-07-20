@@ -238,7 +238,7 @@ class CoinflipView(BetAdjustableMixin, discord.ui.View):
 
     async def _get_updated_embed(self) -> discord.Embed:
         current_balance = await self.economy.get_balance(self.user_id)
-        embed = discord.Embed(title="🪙 COINFLIP", color=discord.Color.gold())
+        embed = discord.Embed(title="🪙 Coinflip", color=discord.Color.gold())
         embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
         embed.add_field(name="Kontostand", value=f"**{current_balance:,}** {self.currency}", inline=False)
         return embed
@@ -253,17 +253,16 @@ class CoinflipView(BetAdjustableMixin, discord.ui.View):
         if won:
             new_balance = await self.economy.add_coins(self.user_id, self.bet * 2)
             color = discord.Color.green()
-            title = "🪙 COINFLIP - Gewonnen!"
+            title = "🪙 Coinflip - Gewonnen!"
         else:
             new_balance = await self.economy.get_balance(self.user_id)
             color = discord.Color.red()
-            title = "🪙 COINFLIP - Verloren"
+            title = f"🪙 Coinflip - Verloren"
 
         embed = discord.Embed(title=title, color=color)
         embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
-        embed.add_field(name="Ergebnis", value=f"{result}", inline=True)
         embed.add_field(name="Kontostand", value=f"**{new_balance:,}** {self.currency}", inline=False)
-        embed.set_footer(text=f"Gespielt von {interaction.user.display_name}")
+        embed.set_footer(text=f"Ergebnis: {result}")
 
         new_view = CoinflipView(self.economy, interaction, self.bet, self.currency)
         await interaction.response.edit_message(embed=embed, view=new_view)
@@ -681,7 +680,6 @@ class EconomyCog(commands.Cog):
             color=discord.Color.gold()
         )
         embed.add_field(name="Kontostand", value=f"**{current_balance:,}** {currency}", inline=False)
-        embed.set_footer(text="Timeout nach 2 Minuten")
 
         view = CoinflipView(self, interaction, bet, currency)
         await interaction.response.send_message(embed=embed, view=view)
