@@ -24,12 +24,15 @@ ROULETTE_WHEEL = [
     10, 5, 24, 16, 33, 1, 20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3, 26
 ]
 
+# Offizielle Rot/Schwarz-Zuordnung (nicht nach Parität, sondern nach echter Casino-Norm)
+RED_NUMBERS = frozenset({1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36})
+
 
 def _color_square(number: int) -> str:
-    """Gibt das Farb-Emoji passend zur intern verwendeten Rot/Schwarz/Grün-Logik zurück."""
+    """Gibt das Farb-Emoji passend zur offiziellen Rot/Schwarz-Zuordnung zurück."""
     if number == 0:
         return "🟩"
-    return "🟥" if number % 2 == 1 else "⬛"
+    return "🟥" if number in RED_NUMBERS else "⬛"
 
 
 class RouletteView(BetAdjustableMixin, discord.ui.View):
@@ -58,7 +61,7 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
         embed.set_footer(text="Glücksspiel kann süchtig machen")
         return embed
 
-    async def _spin_animation(self, interaction: discord.Interaction, winning_number: int, balance_after: int) -> None:
+    async def _spin_animation(self, interaction: discord.Interaction, winning_number: int, balance_after: int, description: str) -> None:
         """Roulette-Animation: Die Kugel bleibt mittig und wackelt nur leicht hin und her,
         während das Rad darunter "durchläuft". Landet garantiert im letzten Frame auf der Gewinnzahl."""
         wheel_len = len(ROULETTE_WHEEL)
@@ -67,21 +70,22 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
         except ValueError:
             win_index = 0
 
-        WINDOW = 9
+        WINDOW = 7
         CENTER = WINDOW // 2  # 4
-        FRAMES = 14
+        FRAMES = 16
 
         total_spin = 30
-        ease_power = 1.3  # kleiner = langsamerer Start, 2.0 = alter (schneller) Start, 1.0 = konstante Geschwindigkeit (keine Verlangsamung mehr)
+        ease_power = 1.1  # kleiner = langsamerer Start, 2.0 = alter (schneller) Start, 1.0 = konstante Geschwindigkeit (keine Verlangsamung mehr)
         offsets = []
         for i in range(FRAMES):
             t = i / (FRAMES - 1)
             eased = total_spin * (1 - t) ** ease_power
             offsets.append(round(eased))
         offsets[-1] = 0  # letzter Frame: exakt ausgerichtet
+        offsets[-2] = 0  # vorletzter Frame: exakt ausgerichtet, um die Kugel stabil zu halten
 
         # Kugel-Wackeln: minimale Bewegung um die Mitte, in den letzten Frames stabilisiert sie sich.
-        jitter_pattern = [0, 1, 0, -1, 0, -1, 0, 1, 0, -1, 0, 1, 0, 0][:FRAMES]
+        jitter_pattern = [0, 1, 0, -1, 0, -1, 0, 1, 0, -1, 0, -1, 0, 0, 0, 0][:FRAMES]
         jitter_pattern[-1] = 0
         jitter_pattern[-2] = 0
 
@@ -99,7 +103,7 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
             for i, num in enumerate(window_numbers):
                 square = _color_square(num)
                 if i == ball_index:
-                    cells.append(f"🔴**{num}**{square}" if is_final_frame else f"🔴{num}{square}")
+                    cells.append(f"⚪**{num}**{square}" if is_final_frame else f"⚪{num}{square}")
                 else:
                     cells.append(f"{num}{square}")
 
@@ -111,16 +115,23 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
                 color=discord.Color.gold()
             )
             embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
-            embed.add_field(name="Gewinn", value="...", inline=True)
+            embed.add_field(name="Gewinn", value=f"bei {description}", inline=True)
             embed.add_field(name="Kontostand", value=f"**{balance_after:,}** {self.currency}", inline=False)
-            embed.set_footer(text="Die Kugel sucht ihre Zahl...")
+            embed.set_footer(text="Glücksspiel kann süchtig machen")
 
             if step == 0:
                 await interaction.response.edit_message(embed=embed, view=None)
             else:
                 await interaction.edit_original_response(embed=embed)
 
-            await asyncio.sleep(0.16 if step < FRAMES - 4 else 0.32)  # Langsamer werden
+            base_delay = 0.16
+            if step >= FRAMES - 4:
+                delay = base_delay * 3
+            elif step >= FRAMES // 2:
+                delay = base_delay * 2
+            else:
+                delay = base_delay
+            await asyncio.sleep(delay) # Langsamer werden
 
         # Kurze Pause auf der finalen Zahl
         await asyncio.sleep(0.6)
@@ -146,9 +157,9 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
         balance_after_deduction = current_balance - self.bet
 
         # Animation abspielen (landet garantiert auf der richtigen Zahl)
-        await self._spin_animation(interaction, number, balance_after_deduction)
+        await self._spin_animation(interaction, number, balance_after_deduction, description)
 
-        color = "Grün" if number == 0 else ("Rot" if number % 2 == 1 else "Schwarz")
+        color = "Grün" if number == 0 else ("Rot" if number in RED_NUMBERS else "Schwarz")
 
         won = False
         win_amount = 0
@@ -191,15 +202,15 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
         new_view = RouletteView(self.economy, interaction, self.bet, self.currency)
         await interaction.edit_original_response(embed=embed, view=new_view)
 
-    @discord.ui.button(label="🔴 Rot (2x)", style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(label="🟥 Rot (2x)", style=discord.ButtonStyle.danger, row=1)
     async def red_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         await self.resolve_bet(interaction, "red", 2, "Rot")
 
-    @discord.ui.button(label="⚫ Schwarz (2x)", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="⬛ Schwarz (2x)", style=discord.ButtonStyle.secondary, row=1)
     async def black_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         await self.resolve_bet(interaction, "black", 2, "Schwarz")
 
-    @discord.ui.button(label="🟢 Grün/0 (36x)", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="🟩 Grün/0 (36x)", style=discord.ButtonStyle.success, row=1)
     async def green_button(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
         await self.resolve_bet(interaction, "green", 36, "Grün (0)")
 
