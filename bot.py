@@ -12,6 +12,7 @@ intents = discord.Intents.default()
 intents.voice_states = True
 intents.guilds = True
 intents.members = True
+intents.message_content = True  # Needed for BackupCog (reading message content)
 
 
 class QNAPBot(commands.Bot):
