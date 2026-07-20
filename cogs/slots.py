@@ -80,7 +80,13 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         reels, multiplier, win_text = SlotsCog.roll_slots()
         winnings = int(self.bet * multiplier)
 
-        if multiplier > 0:
+        if multiplier == 10:
+            # Jackpot first so the special title is used
+            new_balance = await self.economy.add_coins(self.user_id, winnings)
+            color = discord.Color.blue()
+            title = "🎰 SLOTS - 🎉JACKPOT!🎉"
+            gewinn_text = f"+{winnings:,} {self.currency} ({win_text})"
+        elif multiplier > 0:
             new_balance = await self.economy.add_coins(self.user_id, winnings)
             color = discord.Color.green()
             title = "🎰 SLOTS - GEWONNEN!"
@@ -161,18 +167,17 @@ class SlotsCog(commands.Cog):
         reels, multiplier, win_text = self.roll_slots()
         winnings = int(bet * multiplier)
 
-        if multiplier > 0:
+        if multiplier == 10:
+            # Jackpot first so the special title is used
+            new_balance = await economy.add_coins(user_id, winnings) # type: ignore[union-attr]
+            color = discord.Color.blue()
+            title = "🎰 SLOTS - 🎉JACKPOT!🎉"
+            gewinn_text = f"+{winnings:,} {currency} ({win_text})"
+        elif multiplier > 0:
             new_balance = await economy.add_coins(user_id, winnings) # type: ignore[union-attr]
             color = discord.Color.green()
             title = "🎰 SLOTS - GEWONNEN!"
             gewinn_text = f"+{winnings:,} {currency} ({win_text})"
-
-        elif multiplier == 10:
-            new_balance = await economy.get_balance(user_id) # type: ignore[union-attr]
-            color = discord.Color.blue()
-            title = "🎰 SLOTS - 🎉JACKPOT!🎉"
-            gewinn_text = f"+{winnings:,} {currency} ({win_text})"
-
         else:
             new_balance = await economy.get_balance(user_id) # type: ignore[union-attr]
             color = discord.Color.red()
