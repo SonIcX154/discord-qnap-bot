@@ -582,8 +582,7 @@ class EconomyCog(commands.Cog):
 
         embed = discord.Embed(
             title="🥺 Betteln",
-            description=f"**{interaction.user.mention}** bettelt um {currency}!
-\nKlicke auf **Spenden**, damit andere Spieler dir etwas geben können.",
+            description=f"**{interaction.user.mention}** bettelt um {currency}!\n\nKlicke auf **Spenden**, damit andere Spieler dir etwas geben können.",
             color=discord.Color.gold()
         )
         embed.set_footer(text="Jeder kann spenden (auch mehrmals)")
@@ -674,15 +673,15 @@ class EconomyCog(commands.Cog):
             await interaction.response.send_message(f"❌ Nicht genug {currency}! Dein Kontostand: **{current_balance:,}** {currency}.", ephemeral=True)
             return
 
-        if not await self.remove_coins(user_id, bet):
-            await interaction.response.send_message("❌ Fehler beim Abziehen des Einsatzes.", ephemeral=True)
-            return
+        # Coins werden erst abgezogen, wenn der Spieler Kopf oder Zahl wählt (in den Buttons der View).
+        # Dadurch wird der Double-Deduct-Bug beim ersten Ausführen vermieden.
 
         embed = discord.Embed(
             title="🪙 Coinflip - Wähle deine Seite",
-            description=f"Du hast **{bet:,} {currency}** gesetzt.\n\nPasse deinen Einsatz an und wähle dann **Kopf** oder **Zahl**:",
+            description=f"Einsatz: **{bet:,} {currency}**\n\nPasse deinen Einsatz an und wähle dann **Kopf** oder **Zahl**:",
             color=discord.Color.gold()
         )
+        embed.add_field(name="Kontostand", value=f"**{current_balance:,}** {currency}", inline=False)
         embed.set_footer(text="Timeout nach 2 Minuten")
 
         view = CoinflipView(self, interaction, bet, currency)
