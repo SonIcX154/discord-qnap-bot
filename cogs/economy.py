@@ -724,6 +724,8 @@ class EconomyCog(commands.Cog):
         embed.set_footer(text="/daily • /coinflip • /leaderboard • /give • /beg")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    #TODO: make daily reset at midnight instead of 24h cooldown
+
     @app_commands.command(name="daily", description="Täglicher Bonus (einmal alle 24h)")
     async def daily(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=False)
