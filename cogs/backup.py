@@ -10,6 +10,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from typing import Optional, Any
+from datetime import datetime, timezone
 
 BACKUP_DB_PATH = os.getenv("BACKUP_DATA_PATH", "data/backup.db")
 ATTACHMENTS_DIR = os.getenv("BACKUP_ATTACHMENTS_PATH", "data/backups/attachments")
@@ -28,7 +29,7 @@ def _safe_filename(name: str) -> str:
 
 
 class BackupCog(commands.Cog):
-    """Server Backup System – kontinuierliches Message-Logging + historischer Backfill."""
+    """Server Backup System – Message-Logging, Backfill, Attachments + Struktur-Snapshots."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -426,12 +427,167 @@ class BackupCog(commands.Cog):
             self._backfill_status["current_channel"] = None
             self._backfill_task = None
 
+    # ==================== STRUKTUR-SNAPSHOT ====================
+
+    def _serialize_overwrite(self, ow: discord.PermissionOverwrite, target_id: int, target_type: str) -> dict[str, Any]:
+        allow, deny = ow.pair()
+        return {
+            "id": target_id,
+            "type": target_type,  # "role" | "member"
+            "allow": allow.value,
+            "deny": deny.value,
+        }
+
+    def _serialize_channel(self, channel: discord.abc.GuildChannel) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "id": channel.id,
+            "name": channel.name,
+            "type": channel.type.value if hasattr(channel.type, "value") else int(channel.type),
+            "position": channel.position,
+            "category_id": channel.category_id,
+            "overwrites": [],
+        }
+
+        for target, overwrite in channel.overwrites.items():
+            if isinstance(target, discord.Role):
+                data["overwrites"].append(
+                    self._serialize_overwrite(overwrite, target.id, "role")
+                )
+            elif isinstance(target, discord.Member):
+                data["overwrites"].append(
+                    self._serialize_overwrite(overwrite, target.id, "member")
+                )
+
+        if isinstance(channel, discord.TextChannel):
+            data.update({
+                "topic": channel.topic,
+                "nsfw": channel.nsfw,
+                "rate_limit_per_user": channel.slowmode_delay,
+                "default_auto_archive_duration": getattr(channel, "default_auto_archive_duration", None),
+            })
+        elif isinstance(channel, discord.VoiceChannel):
+            data.update({
+                "bitrate": channel.bitrate,
+                "user_limit": channel.user_limit,
+                "rtc_region": str(channel.rtc_region) if channel.rtc_region else None,
+            })
+        elif isinstance(channel, discord.StageChannel):
+            data.update({
+                "bitrate": channel.bitrate,
+                "user_limit": channel.user_limit,
+                "rtc_region": str(channel.rtc_region) if channel.rtc_region else None,
+                "topic": channel.topic,
+            })
+        elif isinstance(channel, discord.ForumChannel):
+            data.update({
+                "topic": channel.topic,
+                "nsfw": channel.nsfw,
+                "rate_limit_per_user": channel.slowmode_delay,
+                "default_auto_archive_duration": getattr(channel, "default_auto_archive_duration", None),
+            })
+        elif isinstance(channel, discord.CategoryChannel):
+            # Kategorien haben nur die Basis-Felder
+            pass
+
+        return data
+
+    def _serialize_role(self, role: discord.Role) -> dict[str, Any]:
+        return {
+            "id": role.id,
+            "name": role.name,
+            "color": role.color.value,
+            "permissions": role.permissions.value,
+            "position": role.position,
+            "hoist": role.hoist,
+            "mentionable": role.mentionable,
+            "managed": role.managed,
+            "display_icon": str(role.display_icon) if role.display_icon else None,
+        }
+
+    def _build_structure_snapshot(self, guild: discord.Guild) -> dict[str, Any]:
+        """Baut ein vollständiges Struktur-Snapshot-Dict für den Server."""
+        roles = [
+            self._serialize_role(role)
+            for role in sorted(guild.roles, key=lambda r: r.position)
+            if role != guild.default_role  # @everyone separat behandeln
+        ]
+
+        # @everyone separat speichern (Permissions können abweichen)
+        everyone = self._serialize_role(guild.default_role)
+
+        categories = [
+            self._serialize_channel(cat)
+            for cat in sorted(guild.categories, key=lambda c: c.position)
+        ]
+
+        channels = [
+            self._serialize_channel(ch)
+            for ch in sorted(guild.channels, key=lambda c: c.position)
+            if not isinstance(ch, discord.CategoryChannel)
+        ]
+
+        guild_settings = {
+            "id": guild.id,
+            "name": guild.name,
+            "description": guild.description,
+            "icon_url": str(guild.icon.url) if guild.icon else None,
+            "banner_url": str(guild.banner.url) if guild.banner else None,
+            "afk_channel_id": guild.afk_channel.id if guild.afk_channel else None,
+            "afk_timeout": guild.afk_timeout,
+            "verification_level": guild.verification_level.value,
+            "explicit_content_filter": guild.explicit_content_filter.value,
+            "default_notifications": guild.default_notifications.value,
+            "system_channel_id": guild.system_channel.id if guild.system_channel else None,
+            "rules_channel_id": guild.rules_channel.id if guild.rules_channel else None,
+            "public_updates_channel_id": (
+                guild.public_updates_channel.id if guild.public_updates_channel else None
+            ),
+            "preferred_locale": str(guild.preferred_locale) if guild.preferred_locale else None,
+        }
+
+        return {
+            "version": 1,
+            "created_at": int(time.time()),
+            "guild": guild_settings,
+            "everyone_role": everyone,
+            "roles": roles,
+            "categories": categories,
+            "channels": channels,
+        }
+
+    async def _save_snapshot(
+        self,
+        guild: discord.Guild,
+        name: Optional[str],
+        created_by: int,
+    ) -> int:
+        """Erstellt und speichert einen Struktur-Snapshot. Gibt die Snapshot-ID zurück."""
+        data = self._build_structure_snapshot(guild)
+        data_json = json.dumps(data, ensure_ascii=False)
+
+        if not name:
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            name = f"Snapshot {ts}"
+
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO snapshots (guild_id, name, created_at, created_by, data)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (guild.id, name, int(time.time()), created_by, data_json),
+            )
+            await db.commit()
+            return cursor.lastrowid  # type: ignore[return-value]
+
     # ==================== COMMANDS ====================
 
     @app_commands.command(name="backup-status", description="Zeigt den aktuellen Backup-Status an")
     @app_commands.default_permissions(administrator=True)
     async def backup_status(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
+
+        guild_id = interaction.guild_id
 
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute("SELECT COUNT(*) FROM messages WHERE is_deleted = 0") as cur:
@@ -444,6 +600,15 @@ class BackupCog(commands.Cog):
                 "SELECT COUNT(*) FROM channel_progress WHERE fully_backfilled = 1"
             ) as cur:
                 fully_done = (await cur.fetchone())[0]
+
+            if guild_id:
+                async with db.execute(
+                    "SELECT COUNT(*) FROM snapshots WHERE guild_id = ?",
+                    (guild_id,),
+                ) as cur:
+                    snapshot_count = (await cur.fetchone())[0]
+            else:
+                snapshot_count = 0
 
         # Grobe Schätzung der Attachment-Anzahl über Dateisystem
         attachment_count = 0
@@ -466,7 +631,12 @@ class BackupCog(commands.Cog):
         embed.add_field(
             name="Attachments",
             value=f"**{attachment_count:,}** Dateien ({size_mb:.1f} MB)",
-            inline=False
+            inline=True,
+        )
+        embed.add_field(
+            name="Struktur-Snapshots",
+            value=f"**{snapshot_count}**", 
+            inline=True,
         )
 
         if self._backfill_status["running"]:
@@ -477,11 +647,11 @@ class BackupCog(commands.Cog):
                     f"Fortschritt: {self._backfill_status['channels_done']} / {self._backfill_status['channels_total']}\n"
                     f"Nachrichten diese Runde: {self._backfill_status['messages_this_run']:,}"
                 ),
-                inline=False
+                inline=False,
             )
             embed.color = discord.Color.orange()
         else:
-            embed.set_footer(text="Kontinuierliches Logging + Attachment-Download aktiv")
+            embed.set_footer(text="Logging · Attachments · Snapshots aktiv")
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -491,7 +661,7 @@ class BackupCog(commands.Cog):
         if self._backfill_task and not self._backfill_task.done():
             await interaction.response.send_message(
                 "⚠️ Ein Backfill läuft bereits. Schau mit `/backup-status` nach dem Fortschritt.",
-                ephemeral=True
+                ephemeral=True,
             )
             return
 
@@ -508,13 +678,112 @@ class BackupCog(commands.Cog):
                 "Attachments werden dabei ebenfalls heruntergeladen.\n"
                 "Das kann je nach Server-Größe eine Weile dauern."
             ),
-            color=discord.Color.orange()
+            color=discord.Color.orange(),
         )
         progress_msg = await interaction.followup.send(embed=embed)
 
         self._backfill_task = asyncio.create_task(
             self._run_backfill(interaction.guild, progress_msg)
         )
+
+    @app_commands.command(
+        name="backup-snapshot",
+        description="Erstellt einen Struktur-Snapshot (Rollen, Channels, Permissions)",
+    )
+    @app_commands.describe(name="Optionaler Name für den Snapshot")
+    @app_commands.default_permissions(administrator=True)
+    async def backup_snapshot(
+        self,
+        interaction: discord.Interaction,
+        name: Optional[str] = None,
+    ) -> None:
+        if not interaction.guild:
+            await interaction.response.send_message("Nur auf einem Server nutzbar.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            snapshot_id = await self._save_snapshot(
+                interaction.guild,
+                name=name,
+                created_by=interaction.user.id,
+            )
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ Snapshot fehlgeschlagen: `{e}`",
+                ephemeral=True,
+            )
+            return
+
+        # Kurze Zusammenfassung aus dem gerade gebauten Snapshot
+        data = self._build_structure_snapshot(interaction.guild)
+        role_count = len(data["roles"]) + 1  # + @everyone
+        cat_count = len(data["categories"])
+        ch_count = len(data["channels"])
+
+        display_name = name or f"Snapshot #{snapshot_id}"
+
+        embed = discord.Embed(
+            title="✅ Struktur-Snapshot erstellt",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="ID", value=f"**#{snapshot_id}**", inline=True)
+        embed.add_field(name="Name", value=display_name, inline=True)
+        embed.add_field(name="Rollen", value=f"**{role_count}**", inline=True)
+        embed.add_field(name="Kategorien", value=f"**{cat_count}**", inline=True)
+        embed.add_field(name="Channels", value=f"**{ch_count}**", inline=True)
+        embed.set_footer(text="Mit /backup-snapshots kannst du alle Snapshots sehen")
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        print(f"[Backup] Snapshot #{snapshot_id} für {interaction.guild.name} erstellt")
+
+    @app_commands.command(
+        name="backup-snapshots",
+        description="Listet alle Struktur-Snapshots dieses Servers",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def backup_snapshots(self, interaction: discord.Interaction) -> None:
+        if not interaction.guild:
+            await interaction.response.send_message("Nur auf einem Server nutzbar.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT id, name, created_at, created_by
+                FROM snapshots
+                WHERE guild_id = ?
+                ORDER BY created_at DESC
+                LIMIT 25
+                """,
+                (interaction.guild.id,),
+            ) as cur:
+                rows = await cur.fetchall()
+
+        if not rows:
+            await interaction.followup.send(
+                "Noch keine Snapshots vorhanden. Erstelle einen mit `/backup-snapshot`.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title=f"📦 Struktur-Snapshots – {interaction.guild.name}",
+            color=discord.Color.blurple(),
+        )
+
+        lines: list[str] = []
+        for snap_id, snap_name, created_at, created_by in rows:
+            ts = datetime.fromtimestamp(created_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            lines.append(f"**#{snap_id}** · {snap_name or 'Unbenannt'} · `{ts}`")
+
+        embed.description = "\n".join(lines)
+        embed.set_footer(text="Max. 25 neueste Snapshots")
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:
