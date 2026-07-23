@@ -12,12 +12,17 @@ from discord import app_commands
 from typing import Optional, Any
 from datetime import datetime, timezone
 
+try:
+    from utils.message_restore import run_message_restore
+except ImportError:
+    from ..utils.message_restore import run_message_restore
+
 BACKUP_DB_PATH = os.getenv("BACKUP_DATA_PATH", "data/backup.db")
 ATTACHMENTS_DIR = os.getenv("BACKUP_ATTACHMENTS_PATH", "data/backups/attachments")
 
 BACKFILL_BATCH_SIZE = 100
 BACKFILL_DELAY = 1.1
-RESTORE_DELAY = 0.4  # Pause zwischen Create-Calls (Rate-Limits)
+RESTORE_DELAY = 0.4
 
 
 def _safe_filename(name: str) -> str:
@@ -57,6 +62,34 @@ class RestoreConfirmView(discord.ui.View):
         self.stop()
 
 
+class MessageRestoreConfirmView(discord.ui.View):
+    """Bestätigung vor dem Nachrichten-Restore."""
+
+    def __init__(self) -> None:
+        super().__init__(timeout=60)
+        self.confirmed = False
+
+    @discord.ui.button(label="✅ Nachrichten wiederherstellen", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.confirmed = True
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+        await interaction.response.edit_message(view=self)
+        self.stop()
+
+    @discord.ui.button(label="❌ Abbrechen", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.confirmed = False
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+        await interaction.response.edit_message(
+            content="Nachrichten-Restore abgebrochen.",
+            embed=None,
+            view=None,
+        )
+        self.stop()
+
+
 class BackupCog(commands.Cog):
     """Server Backup System – Logging, Backfill, Attachments, Snapshots + Restore."""
 
@@ -66,6 +99,7 @@ class BackupCog(commands.Cog):
         self._catchup_lock = asyncio.Lock()
         self._backfill_task: Optional[asyncio.Task] = None
         self._restore_task: Optional[asyncio.Task] = None
+        self._msg_restore_task: Optional[asyncio.Task] = None
         self._backfill_status: dict[str, Any] = {
             "running": False,
             "current_channel": None,
@@ -82,10 +116,9 @@ class BackupCog(commands.Cog):
         self.bot.loop.create_task(self._wait_and_catchup())
 
     async def cog_unload(self) -> None:
-        if self._backfill_task and not self._backfill_task.done():
-            self._backfill_task.cancel()
-        if self._restore_task and not self._restore_task.done():
-            self._restore_task.cancel()
+        for task in (self._backfill_task, self._restore_task, self._msg_restore_task):
+            if task and not task.done():
+                task.cancel()
 
     async def _init_db(self) -> None:
         async with aiosqlite.connect(self.db_path) as db:
@@ -587,7 +620,23 @@ class BackupCog(commands.Cog):
             return None
         return {"name": row[0], "data": json.loads(row[1])}
 
-    # ==================== RESTORE ====================
+    async def _load_latest_snapshot_data(self, guild_id: int) -> Optional[dict[str, Any]]:
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """
+                SELECT data FROM snapshots
+                WHERE guild_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (guild_id,),
+            ) as cur:
+                row = await cur.fetchone()
+        if not row:
+            return None
+        return json.loads(row[0])
+
+    # ==================== STRUCTURE RESTORE ====================
 
     def _build_overwrites(
         self,
@@ -601,19 +650,12 @@ class BackupCog(commands.Cog):
             target: Optional[discord.abc.Snowflake] = None
             if ow["type"] == "role":
                 old_id = ow["id"]
-                # @everyone hat im Snapshot die guild-id als role id
-                if old_id == guild.id or old_id not in role_map:
-                    # Prüfen ob es @everyone war (id == alte guild id)
-                    # Beim Restore: everyone = guild.default_role, gemappt über guild.id
-                    if old_id == guild.id or role_map.get(old_id) == guild.default_role.id:
-                        target = guild.default_role
-                    else:
-                        new_role_id = role_map.get(old_id)
-                        if new_role_id:
-                            target = guild.get_role(new_role_id)
+                if old_id == guild.id or role_map.get(old_id) == guild.default_role.id:
+                    target = guild.default_role
                 else:
-                    new_role_id = role_map[old_id]
-                    target = guild.get_role(new_role_id)
+                    new_role_id = role_map.get(old_id)
+                    if new_role_id:
+                        target = guild.get_role(new_role_id)
             elif ow["type"] == "member":
                 member = guild.get_member(ow["id"])
                 if member:
@@ -630,11 +672,9 @@ class BackupCog(commands.Cog):
         return result
 
     async def _clear_guild_structure(self, guild: discord.Guild) -> tuple[int, int]:
-        """Löscht alle löschbaren Channels und Rollen. Gibt (channels, roles) zurück."""
         deleted_channels = 0
         deleted_roles = 0
 
-        # Channels zuerst (inkl. Kategorien)
         for channel in list(guild.channels):
             try:
                 await channel.delete(reason="Backup Restore: clear_first")
@@ -643,7 +683,6 @@ class BackupCog(commands.Cog):
             except Exception as e:
                 print(f"[Backup] Channel-Löschen fehlgeschlagen ({channel.name}): {e}")
 
-        # Rollen (nicht managed, nicht @everyone, nicht höher als Bot)
         me = guild.me
         bot_top = me.top_role.position if me else 0
 
@@ -669,17 +708,14 @@ class BackupCog(commands.Cog):
         clear_first: bool,
     ) -> None:
         role_map: dict[int, int] = {}
-        # @everyone: alte guild-id aus Snapshot → default_role
         old_guild_id = data.get("guild", {}).get("id")
         if old_guild_id:
             role_map[old_guild_id] = guild.default_role.id
-        # Auch everyone_role.id mappen falls vorhanden
         everyone_data = data.get("everyone_role") or {}
         if everyone_data.get("id"):
             role_map[everyone_data["id"]] = guild.default_role.id
 
         channel_map: dict[int, int] = {}
-
         stats = {"roles": 0, "categories": 0, "channels": 0, "errors": 0}
 
         async def update_progress(step: str) -> None:
@@ -704,7 +740,6 @@ class BackupCog(commands.Cog):
                 dc, dr = await self._clear_guild_structure(guild)
                 print(f"[Backup] Clear: {dc} Channels, {dr} Rollen gelöscht")
 
-            # --- @everyone Permissions ---
             await update_progress("Aktualisiere @everyone...")
             if everyone_data.get("permissions") is not None:
                 try:
@@ -716,7 +751,6 @@ class BackupCog(commands.Cog):
                     print(f"[Backup] @everyone edit fehlgeschlagen: {e}")
                     stats["errors"] += 1
 
-            # --- Rollen (von niedrig nach hoch) ---
             await update_progress("Erstelle Rollen...")
             roles_sorted = sorted(
                 [r for r in data.get("roles", []) if not r.get("managed")],
@@ -740,7 +774,6 @@ class BackupCog(commands.Cog):
                     print(f"[Backup] Rolle '{role_data.get('name')}' fehlgeschlagen: {e}")
                     stats["errors"] += 1
 
-            # Positionen nachträglich setzen (von hoch nach niedrig oft stabiler)
             for role_data in sorted(roles_sorted, key=lambda r: r.get("position", 0), reverse=True):
                 new_id = role_map.get(role_data["id"])
                 if not new_id:
@@ -757,7 +790,6 @@ class BackupCog(commands.Cog):
                 except Exception:
                     pass
 
-            # --- Kategorien ---
             await update_progress("Erstelle Kategorien...")
             for cat_data in sorted(data.get("categories", []), key=lambda c: c.get("position", 0)):
                 try:
@@ -774,7 +806,6 @@ class BackupCog(commands.Cog):
                     print(f"[Backup] Kategorie '{cat_data.get('name')}' fehlgeschlagen: {e}")
                     stats["errors"] += 1
 
-            # --- Channels ---
             await update_progress("Erstelle Channels...")
             for ch_data in sorted(data.get("channels", []), key=lambda c: c.get("position", 0)):
                 try:
@@ -786,7 +817,7 @@ class BackupCog(commands.Cog):
                     ch_type = ch_data.get("type", 0)
                     name = ch_data["name"]
 
-                    if ch_type in (0, 5):  # Text / Announcement
+                    if ch_type in (0, 5):
                         new_ch = await guild.create_text_channel(
                             name=name,
                             topic=ch_data.get("topic"),
@@ -796,7 +827,7 @@ class BackupCog(commands.Cog):
                             overwrites=overwrites or None,
                             reason="Backup Restore",
                         )
-                    elif ch_type == 2:  # Voice
+                    elif ch_type == 2:
                         new_ch = await guild.create_voice_channel(
                             name=name,
                             bitrate=min(ch_data.get("bitrate") or 64000, guild.bitrate_limit),
@@ -805,7 +836,7 @@ class BackupCog(commands.Cog):
                             overwrites=overwrites or None,
                             reason="Backup Restore",
                         )
-                    elif ch_type == 13:  # Stage
+                    elif ch_type == 13:
                         new_ch = await guild.create_stage_channel(
                             name=name,
                             topic=ch_data.get("topic"),
@@ -813,7 +844,7 @@ class BackupCog(commands.Cog):
                             overwrites=overwrites or None,
                             reason="Backup Restore",
                         )
-                    elif ch_type == 15:  # Forum
+                    elif ch_type == 15:
                         new_ch = await guild.create_forum(
                             name=name,
                             topic=ch_data.get("topic"),
@@ -824,7 +855,6 @@ class BackupCog(commands.Cog):
                             reason="Backup Restore",
                         )
                     else:
-                        # Fallback: Text
                         new_ch = await guild.create_text_channel(
                             name=name,
                             category=parent,  # type: ignore[arg-type]
@@ -839,7 +869,6 @@ class BackupCog(commands.Cog):
                     print(f"[Backup] Channel '{ch_data.get('name')}' fehlgeschlagen: {e}")
                     stats["errors"] += 1
 
-            # --- Guild Settings (sicher, ohne Icon-Download) ---
             await update_progress("Aktualisiere Server-Settings...")
             g = data.get("guild") or {}
             try:
@@ -853,7 +882,6 @@ class BackupCog(commands.Cog):
                 if g.get("default_notifications") is not None:
                     kwargs["default_notifications"] = discord.NotificationLevel(g["default_notifications"])
 
-                # AFK / System Channels über Mapping
                 if g.get("afk_channel_id") and g["afk_channel_id"] in channel_map:
                     kwargs["afk_channel"] = guild.get_channel(channel_map[g["afk_channel_id"]])
                 if g.get("system_channel_id") and g["system_channel_id"] in channel_map:
@@ -883,12 +911,6 @@ class BackupCog(commands.Cog):
             except Exception:
                 pass
 
-            print(
-                f"[Backup] Restore fertig: {stats['roles']} Rollen, "
-                f"{stats['categories']} Kategorien, {stats['channels']} Channels, "
-                f"{stats['errors']} Fehler"
-            )
-
         except Exception as e:
             print(f"[Backup] Restore abgebrochen: {e}")
             try:
@@ -904,6 +926,12 @@ class BackupCog(commands.Cog):
                 pass
         finally:
             self._restore_task = None
+
+    async def _run_message_restore_task(self, **kwargs: Any) -> None:
+        try:
+            await run_message_restore(**kwargs)
+        finally:
+            self._msg_restore_task = None
 
     # ==================== COMMANDS ====================
 
@@ -971,10 +999,13 @@ class BackupCog(commands.Cog):
             )
             embed.color = discord.Color.orange()
         elif self._restore_task and not self._restore_task.done():
-            embed.add_field(name="🔄 Restore läuft", value="Struktur wird wiederhergestellt...", inline=False)
+            embed.add_field(name="🔄 Struktur-Restore", value="läuft…", inline=False)
+            embed.color = discord.Color.orange()
+        elif self._msg_restore_task and not self._msg_restore_task.done():
+            embed.add_field(name="🔄 Nachrichten-Restore", value="läuft…", inline=False)
             embed.color = discord.Color.orange()
         else:
-            embed.set_footer(text="Logging · Attachments · Snapshots · Restore")
+            embed.set_footer(text="Logging · Attachments · Snapshots · Structure/Message Restore")
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -983,7 +1014,7 @@ class BackupCog(commands.Cog):
     async def backup_backfill(self, interaction: discord.Interaction) -> None:
         if self._backfill_task and not self._backfill_task.done():
             await interaction.response.send_message(
-                "⚠️ Ein Backfill läuft bereits. Schau mit `/backup-status` nach dem Fortschritt.",
+                "⚠️ Ein Backfill läuft bereits.",
                 ephemeral=True,
             )
             return
@@ -998,8 +1029,7 @@ class BackupCog(commands.Cog):
             title="📦 Historischer Backfill wird gestartet...",
             description=(
                 "Der Bot holt jetzt die gesamte Nachrichten-History aller Text-Channels.\n"
-                "Attachments werden dabei ebenfalls heruntergeladen.\n"
-                "Das kann je nach Server-Größe eine Weile dauern."
+                "Attachments werden dabei ebenfalls heruntergeladen."
             ),
             color=discord.Color.orange(),
         )
@@ -1037,21 +1067,16 @@ class BackupCog(commands.Cog):
             return
 
         data = self._build_structure_snapshot(interaction.guild)
-        role_count = len(data["roles"]) + 1
-        cat_count = len(data["categories"])
-        ch_count = len(data["channels"])
         display_name = name or f"Snapshot #{snapshot_id}"
 
         embed = discord.Embed(title="✅ Struktur-Snapshot erstellt", color=discord.Color.green())
         embed.add_field(name="ID", value=f"**#{snapshot_id}**", inline=True)
         embed.add_field(name="Name", value=display_name, inline=True)
-        embed.add_field(name="Rollen", value=f"**{role_count}**", inline=True)
-        embed.add_field(name="Kategorien", value=f"**{cat_count}**", inline=True)
-        embed.add_field(name="Channels", value=f"**{ch_count}**", inline=True)
-        embed.set_footer(text="Restore mit /backup-restore")
+        embed.add_field(name="Rollen", value=f"**{len(data['roles']) + 1}**", inline=True)
+        embed.add_field(name="Kategorien", value=f"**{len(data['categories'])}**", inline=True)
+        embed.add_field(name="Channels", value=f"**{len(data['channels'])}**", inline=True)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
-        print(f"[Backup] Snapshot #{snapshot_id} für {interaction.guild.name} erstellt")
 
     @app_commands.command(
         name="backup-snapshots",
@@ -1068,7 +1093,7 @@ class BackupCog(commands.Cog):
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 """
-                SELECT id, name, created_at, created_by
+                SELECT id, name, created_at
                 FROM snapshots
                 WHERE guild_id = ?
                 ORDER BY created_at DESC
@@ -1080,7 +1105,7 @@ class BackupCog(commands.Cog):
 
         if not rows:
             await interaction.followup.send(
-                "Noch keine Snapshots vorhanden. Erstelle einen mit `/backup-snapshot`.",
+                "Noch keine Snapshots. Nutze `/backup-snapshot`.",
                 ephemeral=True,
             )
             return
@@ -1089,14 +1114,11 @@ class BackupCog(commands.Cog):
             title=f"📦 Struktur-Snapshots – {interaction.guild.name}",
             color=discord.Color.blurple(),
         )
-
-        lines: list[str] = []
-        for snap_id, snap_name, created_at, created_by in rows:
+        lines = []
+        for snap_id, snap_name, created_at in rows:
             ts = datetime.fromtimestamp(created_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             lines.append(f"**#{snap_id}** · {snap_name or 'Unbenannt'} · `{ts}`")
-
         embed.description = "\n".join(lines)
-        embed.set_footer(text="Restore: /backup-restore snapshot_id:<id>")
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -1105,8 +1127,8 @@ class BackupCog(commands.Cog):
         description="Stellt die Server-Struktur aus einem Snapshot wieder her",
     )
     @app_commands.describe(
-        snapshot_id="ID des Snapshots (siehe /backup-snapshots)",
-        clear_first="Vorher alle Channels und (nicht-managed) Rollen löschen",
+        snapshot_id="ID des Snapshots",
+        clear_first="Vorher Channels und (nicht-managed) Rollen löschen",
     )
     @app_commands.default_permissions(administrator=True)
     async def backup_restore(
@@ -1120,16 +1142,13 @@ class BackupCog(commands.Cog):
             return
 
         if self._restore_task and not self._restore_task.done():
-            await interaction.response.send_message(
-                "⚠️ Ein Restore läuft bereits.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message("⚠️ Ein Restore läuft bereits.", ephemeral=True)
             return
 
         snap = await self._load_snapshot(snapshot_id, interaction.guild.id)
         if not snap:
             await interaction.response.send_message(
-                f"❌ Snapshot **#{snapshot_id}** nicht gefunden (oder anderer Server).",
+                f"❌ Snapshot **#{snapshot_id}** nicht gefunden.",
                 ephemeral=True,
             )
             return
@@ -1141,44 +1160,127 @@ class BackupCog(commands.Cog):
 
         warning = ""
         if clear_first:
-            warning = (
-                "\n\n⚠️ **clear_first=True**: Alle Channels und nicht-managed Rollen "
-                "werden **gelöscht**, bevor der Snapshot geladen wird."
-            )
+            warning = "\n\n⚠️ **clear_first**: Bestehende Channels/Rollen werden gelöscht."
 
         embed = discord.Embed(
             title="⚠️ Struktur-Restore bestätigen",
             description=(
                 f"Snapshot **#{snapshot_id}** – {snap['name'] or 'Unbenannt'}\n\n"
                 f"Rollen: **{role_count}** · Kategorien: **{cat_count}** · Channels: **{ch_count}**"
-                f"{warning}\n\n"
-                "Managed Rollen (Bots) werden nicht neu erstellt.\n"
-                "Nachrichten-Restore kommt später separat."
+                f"{warning}"
             ),
             color=discord.Color.orange(),
         )
 
         view = RestoreConfirmView(self, snapshot_id, clear_first)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
         await view.wait()
 
         if not view.confirmed:
             return
 
-        # Progress-Nachricht (öffentlich im Channel, damit man den Fortschritt sieht)
-        progress_embed = discord.Embed(
-            title="🔄 Struktur-Restore startet...",
-            color=discord.Color.orange(),
+        progress_msg = await interaction.followup.send(
+            embed=discord.Embed(title="🔄 Struktur-Restore startet...", color=discord.Color.orange()),
+            ephemeral=False,
         )
-        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=False)
 
         self._restore_task = asyncio.create_task(
-            self._restore_structure(
-                interaction.guild,
-                data,
-                progress_msg,
-                clear_first,
+            self._restore_structure(interaction.guild, data, progress_msg, clear_first)
+        )
+
+    @app_commands.command(
+        name="backup-restore-messages",
+        description="Stellt gespeicherte Nachrichten per Webhook wieder her",
+    )
+    @app_commands.describe(
+        channel="Nur diesen Channel restoren (sonst alle)",
+        limit="Max. Nachrichten pro Channel (leer = alle)",
+        match_by_name="Channel per Name matchen, falls ID fehlt (nach Struktur-Restore)",
+        snapshot_id="Optional: Snapshot für Namens-Mapping (sonst neuester)",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def backup_restore_messages(
+        self,
+        interaction: discord.Interaction,
+        channel: Optional[discord.TextChannel] = None,
+        limit: Optional[app_commands.Range[int, 1, 10000]] = None,
+        match_by_name: bool = True,
+        snapshot_id: Optional[int] = None,
+    ) -> None:
+        if not interaction.guild:
+            await interaction.response.send_message("Nur auf einem Server nutzbar.", ephemeral=True)
+            return
+
+        if self._msg_restore_task and not self._msg_restore_task.done():
+            await interaction.response.send_message(
+                "⚠️ Ein Nachrichten-Restore läuft bereits.",
+                ephemeral=True,
+            )
+            return
+
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM messages WHERE guild_id = ? AND is_deleted = 0",
+                (interaction.guild.id,),
+            ) as cur:
+                total = (await cur.fetchone())[0]
+
+        if total == 0:
+            await interaction.response.send_message(
+                "Keine gespeicherten Nachrichten für diesen Server.",
+                ephemeral=True,
+            )
+            return
+
+        snapshot_data: Optional[dict[str, Any]] = None
+        if snapshot_id is not None:
+            snap = await self._load_snapshot(snapshot_id, interaction.guild.id)
+            if snap:
+                snapshot_data = snap["data"]
+        else:
+            snapshot_data = await self._load_latest_snapshot_data(interaction.guild.id)
+
+        scope = f"nur **#{channel.name}**" if channel else "**alle Channels**"
+        limit_txt = f"max. **{limit}**/Channel" if limit else "**alle** Nachrichten"
+
+        embed = discord.Embed(
+            title="⚠️ Nachrichten-Restore bestätigen",
+            description=(
+                f"Gespeicherte Nachrichten: **{total:,}**\n"
+                f"Ziel: {scope}\n"
+                f"Limit: {limit_txt}\n"
+                f"Name-Match: **{'an' if match_by_name else 'aus'}**\n\n"
+                "Nachrichten werden per **Webhook** eingefügt "
+                "(Original-Name + Avatar, lokale Attachments).\n"
+                "Timestamps sind neu · Mentions sind deaktiviert."
+            ),
+            color=discord.Color.orange(),
+        )
+
+        view = MessageRestoreConfirmView()
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await view.wait()
+
+        if not view.confirmed:
+            return
+
+        progress_msg = await interaction.followup.send(
+            embed=discord.Embed(
+                title="🔄 Nachrichten-Restore startet...",
+                color=discord.Color.orange(),
+            ),
+            ephemeral=False,
+        )
+
+        self._msg_restore_task = asyncio.create_task(
+            self._run_message_restore_task(
+                guild=interaction.guild,
+                db_path=self.db_path,
+                progress_msg=progress_msg,
+                channel_filter=channel,
+                limit_per_channel=int(limit) if limit else None,
+                match_by_name=match_by_name,
+                snapshot_data=snapshot_data,
             )
         )
 
