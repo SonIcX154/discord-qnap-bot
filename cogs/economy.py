@@ -6,6 +6,7 @@ import random
 import asyncio
 import aiosqlite
 import discord
+from datetime import datetime, timedelta
 from discord.ext import commands
 from discord import app_commands
 from typing import Optional, TYPE_CHECKING, Any
@@ -33,7 +34,6 @@ VOICE_COINS_PER_MINUTE = 2        # Reduziert auf 2 (nur bei ≥2 aktiven Person
 
 DAILY_COINS_MIN = 80
 DAILY_COINS_MAX = 150
-DAILY_COOLDOWN_SECONDS = 24 * 60 * 60  # 24 hours
 
 
 class LeaderboardView(discord.ui.View):
@@ -490,7 +490,10 @@ class EconomyCog(commands.Cog):
         last = await self.get_last_daily(user_id)
         if last is None:
             return True
-        return (int(time.time()) - last) >= DAILY_COOLDOWN_SECONDS
+
+        now = datetime.now().astimezone()
+        today_start = int(datetime.combine(now.date(), datetime.min.time(), tzinfo=now.tzinfo).timestamp())
+        return last < today_start
 
     async def claim_daily(self, user_id: int) -> int:
         amount = random.randint(DAILY_COINS_MIN, DAILY_COINS_MAX)
@@ -724,9 +727,7 @@ class EconomyCog(commands.Cog):
         embed.set_footer(text="/daily • /coinflip • /leaderboard • /give • /beg")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    #TODO: make daily reset at midnight instead of 24h cooldown
-
-    @app_commands.command(name="daily", description="Täglicher Bonus (einmal alle 24h)")
+    @app_commands.command(name="daily", description="Täglicher Bonus (einmal pro Tag)")
     async def daily(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=False)
 
@@ -734,11 +735,15 @@ class EconomyCog(commands.Cog):
         currency = await self.get_currency_name()
 
         if not await self.can_claim_daily(user_id):
-            last = await self.get_last_daily(user_id)
-            remaining = DAILY_COOLDOWN_SECONDS - (int(time.time()) - last) if last else 0
-            hours = remaining // 3600
-            minutes = (remaining % 3600) // 60
-            await interaction.followup.send(f"⏳ Daily schon geholt. Nächster in **{hours}h {minutes}m**.", ephemeral=True)
+            now = datetime.now().astimezone()
+            next_reset = datetime.combine(now.date() + timedelta(days=1), datetime.min.time(), tzinfo=now.tzinfo)
+            remaining_seconds = max(int((next_reset - now).total_seconds()), 0)
+            hours = remaining_seconds // 3600
+            minutes = (remaining_seconds % 3600) // 60
+            await interaction.followup.send(
+                f"⏳ Daily schon geholt. Der nächste Reset ist in **{hours}h {minutes}m**.",
+                ephemeral=True
+            )
             return
 
         amount = await self.claim_daily(user_id)
@@ -747,7 +752,7 @@ class EconomyCog(commands.Cog):
         embed = discord.Embed(title="🎁 Täglicher Bonus", color=discord.Color.green())
         embed.description = f"**{interaction.user.mention}** hat **{amount} {currency}** erhalten!"
         embed.add_field(name="Neuer Kontostand", value=f"**{new_balance:,}** {currency}", inline=False)
-        embed.set_footer(text="Bis morgen! 💰")
+        embed.set_footer(text="Reset um Mitternacht! 💰")
         await interaction.followup.send(embed=embed, ephemeral=False)
 
 
