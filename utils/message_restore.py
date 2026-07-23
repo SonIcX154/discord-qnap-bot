@@ -2,12 +2,55 @@ from __future__ import annotations
 
 import os
 import json
+import time
 import asyncio
 import aiosqlite
 import discord
-from typing import Any, Optional
+from typing import Any, Optional, Callable, Awaitable
 
-MESSAGE_RESTORE_DELAY = 0.75  # Pause zwischen Webhook-Sends (Rate-Limits)
+MESSAGE_RESTORE_DELAY = 0.75
+MAX_RETRIES = 5
+
+
+async def with_retry(coro_factory: Callable[[], Awaitable[Any]], *,
+                     label: str = "api") -> Any:
+    """Führt eine Coroutine aus und wiederholt bei HTTP 429."""
+    last_exc: Optional[Exception] = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            return await coro_factory()
+        except discord.HTTPException as e:
+            last_exc = e
+            if e.status == 429:
+                retry_after = getattr(e, "retry_after", None)
+                if retry_after is None:
+                    try:
+                        retry_after = float(e.response.headers.get("Retry-After", 2))  # type: ignore[union-attr]
+                    except Exception:
+                        retry_after = 2.0 * (attempt + 1)
+                wait = max(float(retry_after), 0.5)
+                print(f"[Backup] 429 bei {label} – warte {wait:.1f}s (Versuch {attempt + 1}/{MAX_RETRIES})")
+                await asyncio.sleep(wait)
+                continue
+            raise
+        except Exception:
+            raise
+    assert last_exc is not None
+    raise last_exc
+
+
+async def load_channel_id_map(db_path: str, guild_id: int) -> dict[int, int]:
+    """old_channel_id -> new_channel_id aus der DB."""
+    async with aiosqlite.connect(db_path) as db:
+        try:
+            async with db.execute(
+                "SELECT old_channel_id, new_channel_id FROM channel_id_map WHERE guild_id = ?",
+                (guild_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        except aiosqlite.OperationalError:
+            return {}
+    return {int(r[0]): int(r[1]) for r in rows}
 
 
 async def resolve_target_channel(
@@ -16,12 +59,20 @@ async def resolve_target_channel(
     *,
     match_by_name: bool,
     name_lookup: dict[int, str],
+    id_map: dict[int, int],
 ) -> Optional[discord.TextChannel]:
-    """Findet den Ziel-Channel: zuerst per ID, optional per Name."""
+    # 1) Explizites Mapping aus Struktur-Restore
+    if old_channel_id in id_map:
+        ch = guild.get_channel(id_map[old_channel_id])
+        if isinstance(ch, discord.TextChannel):
+            return ch
+
+    # 2) Gleiche ID (Channel nie neu angelegt)
     ch = guild.get_channel(old_channel_id)
     if isinstance(ch, discord.TextChannel):
         return ch
 
+    # 3) Name-Match
     if not match_by_name:
         return None
 
@@ -36,7 +87,6 @@ async def resolve_target_channel(
 
 
 def build_name_lookup_from_snapshot(snapshot_data: Optional[dict[str, Any]]) -> dict[int, str]:
-    """old_channel_id -> name aus einem Struktur-Snapshot."""
     if not snapshot_data:
         return {}
     lookup: dict[int, str] = {}
@@ -60,11 +110,48 @@ async def load_channel_ids_with_messages(db_path: str, guild_id: int) -> list[in
     return [int(r[0]) for r in rows]
 
 
+async def load_already_restored(db_path: str, message_ids: list[int]) -> set[int]:
+    if not message_ids:
+        return set()
+    restored: set[int] = set()
+    async with aiosqlite.connect(db_path) as db:
+        try:
+            # chunked IN query
+            for i in range(0, len(message_ids), 500):
+                chunk = message_ids[i:i + 500]
+                placeholders = ",".join("?" * len(chunk))
+                async with db.execute(
+                    f"SELECT message_id FROM restored_messages WHERE message_id IN ({placeholders})",
+                    chunk,
+                ) as cur:
+                    rows = await cur.fetchall()
+                    restored.update(int(r[0]) for r in rows)
+        except aiosqlite.OperationalError:
+            return set()
+    return restored
+
+
+async def mark_restored(db_path: str, message_id: int, target_channel_id: int) -> None:
+    async with aiosqlite.connect(db_path) as db:
+        try:
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO restored_messages (message_id, restored_at, target_channel_id)
+                VALUES (?, ?, ?)
+                """,
+                (message_id, int(time.time()), target_channel_id),
+            )
+            await db.commit()
+        except aiosqlite.OperationalError:
+            pass
+
+
 async def load_messages_for_channel(
     db_path: str,
     channel_id: int,
     *,
     limit: Optional[int],
+    skip_restored: bool = True,
 ) -> list[dict[str, Any]]:
     query = """
         SELECT message_id, author_name, author_avatar, content, embeds, attachments, created_at
@@ -92,6 +179,11 @@ async def load_messages_for_channel(
             "attachments": row[5],
             "created_at": row[6],
         })
+
+    if skip_restored and result:
+        already = await load_already_restored(db_path, [m["message_id"] for m in result])
+        result = [m for m in result if m["message_id"] not in already]
+
     return result
 
 
@@ -134,24 +226,27 @@ def _build_files(attachments_json: Optional[str]) -> list[discord.File]:
 async def restore_messages_to_channel(
     channel: discord.TextChannel,
     messages: list[dict[str, Any]],
-) -> tuple[int, int]:
-    """
-    Spielt Nachrichten per Webhook in den Channel ein.
-    Returns (sent_count, error_count).
-    """
+    *,
+    db_path: str,
+) -> tuple[int, int, int]:
+    """Returns (sent, skipped_empty, errors)."""
     if not messages:
-        return 0, 0
+        return 0, 0, 0
 
     try:
-        webhook = await channel.create_webhook(
-            name="Backup Restore",
-            reason="Nachrichten-Restore aus Backup",
+        webhook = await with_retry(
+            lambda: channel.create_webhook(
+                name="Backup Restore",
+                reason="Nachrichten-Restore aus Backup",
+            ),
+            label=f"create_webhook #{channel.name}",
         )
     except Exception as e:
         print(f"[Backup] Webhook erstellen fehlgeschlagen in #{channel.name}: {e}")
-        return 0, 1
+        return 0, 0, 1
 
     sent = 0
+    skipped = 0
     errors = 0
 
     try:
@@ -160,24 +255,28 @@ async def restore_messages_to_channel(
             embeds = _parse_embeds(msg.get("embeds"))
             files = _build_files(msg.get("attachments"))
 
-            # Leere Nachricht ohne Inhalt/Embeds/Files überspringen
             if not content and not embeds and not files:
+                skipped += 1
                 continue
 
             username = (msg.get("author_name") or "Unknown")[:80]
             avatar_url = msg.get("author_avatar") or None
 
             try:
-                await webhook.send(
-                    content=content or None,
-                    username=username,
-                    avatar_url=avatar_url,
-                    embeds=embeds or discord.utils.MISSING,
-                    files=files or discord.utils.MISSING,
-                    wait=False,
-                    allowed_mentions=discord.AllowedMentions.none(),
+                await with_retry(
+                    lambda c=content, u=username, a=avatar_url, e=embeds, f=files: webhook.send(
+                        content=c or None,
+                        username=u,
+                        avatar_url=a,
+                        embeds=e or discord.utils.MISSING,
+                        files=f or discord.utils.MISSING,
+                        wait=False,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    ),
+                    label=f"webhook.send #{channel.name}",
                 )
                 sent += 1
+                await mark_restored(db_path, int(msg["message_id"]), channel.id)
             except Exception as e:
                 errors += 1
                 print(f"[Backup] Webhook-Send fehlgeschlagen (msg {msg.get('message_id')}): {e}")
@@ -185,11 +284,14 @@ async def restore_messages_to_channel(
             await asyncio.sleep(MESSAGE_RESTORE_DELAY)
     finally:
         try:
-            await webhook.delete(reason="Backup Restore fertig")
+            await with_retry(
+                lambda: webhook.delete(reason="Backup Restore fertig"),
+                label="webhook.delete",
+            )
         except Exception:
             pass
 
-    return sent, errors
+    return sent, skipped, errors
 
 
 async def run_message_restore(
@@ -202,36 +304,33 @@ async def run_message_restore(
     match_by_name: bool = True,
     snapshot_data: Optional[dict[str, Any]] = None,
 ) -> None:
-    """Hauptablauf: Nachrichten für den gesamten Server oder einen Channel restoren."""
     name_lookup = build_name_lookup_from_snapshot(snapshot_data)
+    id_map = await load_channel_id_map(db_path, guild.id)
 
     if channel_filter is not None:
-        # Nur dieser Channel – old id = current id (gleiche ID)
-        old_ids = [channel_filter.id]
-        # Wenn match_by_name und wir Nachrichten unter anderer ID haben:
-        # zusätzlich alle DB-Channels prüfen die denselben Namen haben
         async with aiosqlite.connect(db_path) as db:
             async with db.execute(
                 "SELECT DISTINCT channel_id FROM messages WHERE guild_id = ? AND is_deleted = 0",
                 (guild.id,),
             ) as cur:
                 all_ids = [int(r[0]) for r in await cur.fetchall()]
-        # Finde DB-Channel-IDs die auf channel_filter mappen
         mapped: list[int] = []
         for oid in all_ids:
             target = await resolve_target_channel(
-                guild, oid, match_by_name=match_by_name, name_lookup=name_lookup
+                guild, oid,
+                match_by_name=match_by_name,
+                name_lookup=name_lookup,
+                id_map=id_map,
             )
             if target and target.id == channel_filter.id:
                 mapped.append(oid)
-        if not mapped:
-            mapped = [channel_filter.id]
-        old_ids = mapped
+        old_ids = mapped or [channel_filter.id]
     else:
         old_ids = await load_channel_ids_with_messages(db_path, guild.id)
 
     total_sent = 0
     total_errors = 0
+    total_skipped = 0
     channels_done = 0
     channels_skipped = 0
 
@@ -244,8 +343,12 @@ async def run_message_restore(
         embed.add_field(name="Gesendet", value=f"**{total_sent:,}**", inline=True)
         embed.add_field(name="Channels", value=f"**{channels_done}** / {len(old_ids)}", inline=True)
         embed.add_field(name="Fehler", value=f"**{total_errors}**", inline=True)
-        if channels_skipped:
-            embed.add_field(name="Übersprungen", value=str(channels_skipped), inline=True)
+        if channels_skipped or total_skipped:
+            embed.add_field(
+                name="Übersprungen",
+                value=f"Channels: {channels_skipped} · leer/bereits: {total_skipped}",
+                inline=False,
+            )
         try:
             await progress_msg.edit(embed=embed, view=None)
         except Exception:
@@ -254,7 +357,10 @@ async def run_message_restore(
     try:
         for oid in old_ids:
             target = await resolve_target_channel(
-                guild, oid, match_by_name=match_by_name, name_lookup=name_lookup
+                guild, oid,
+                match_by_name=match_by_name,
+                name_lookup=name_lookup,
+                id_map=id_map,
             )
             if target is None:
                 channels_skipped += 1
@@ -269,13 +375,16 @@ async def run_message_restore(
             await update(f"Channel **#{target.name}** …")
 
             messages = await load_messages_for_channel(
-                db_path, oid, limit=limit_per_channel
+                db_path, oid, limit=limit_per_channel, skip_restored=True
             )
-            sent, errors = await restore_messages_to_channel(target, messages)
+            sent, skipped, errors = await restore_messages_to_channel(
+                target, messages, db_path=db_path
+            )
             total_sent += sent
+            total_skipped += skipped
             total_errors += errors
             channels_done += 1
-            print(f"[Backup] #{target.name}: {sent} Nachrichten restored, {errors} Fehler")
+            print(f"[Backup] #{target.name}: {sent} sent, {skipped} skip, {errors} err")
 
         embed = discord.Embed(
             title="✅ Nachrichten-Restore abgeschlossen",
@@ -284,10 +393,8 @@ async def run_message_restore(
         embed.add_field(name="Gesendet", value=f"**{total_sent:,}**", inline=True)
         embed.add_field(name="Channels", value=f"**{channels_done}**", inline=True)
         embed.add_field(name="Fehler", value=f"**{total_errors}**", inline=True)
-        if channels_skipped:
-            embed.add_field(name="Übersprungen", value=str(channels_skipped), inline=True)
         embed.set_footer(
-            text="Via Webhook · Name/Avatar original · Timestamps sind neu · Mentions deaktiviert"
+            text="Webhook · Avatar/Name aus Backup · bereits restored werden übersprungen"
         )
         try:
             await progress_msg.edit(embed=embed, view=None)
