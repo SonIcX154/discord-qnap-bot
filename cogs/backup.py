@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import json
 import time
 import asyncio
@@ -17,6 +18,13 @@ ATTACHMENTS_DIR = os.getenv("BACKUP_ATTACHMENTS_PATH", "data/backups/attachments
 BACKFILL_BATCH_SIZE = 100
 # Kurze Pause zwischen Batches (Rate-Limit freundlich)
 BACKFILL_DELAY = 1.1
+
+
+def _safe_filename(name: str) -> str:
+    """Entfernt problematische Zeichen aus Dateinamen."""
+    name = re.sub(r'[<>:"/\\|?*]', "_", name)
+    name = name.strip(" .")
+    return name[:200] if name else "file"
 
 
 class BackupCog(commands.Cog):
@@ -91,10 +99,54 @@ class BackupCog(commands.Cog):
             """)
             await db.commit()
 
+    # ==================== ATTACHMENTS ====================
+
+    async def _download_attachments(self, message: discord.Message) -> list[dict[str, Any]]:
+        """
+        Lädt alle Attachments einer Nachricht herunter.
+        Speichert unter: data/backups/attachments/{message_id}/{filename}
+        Gibt eine Liste von Dicts zurück (inkl. local_path bei Erfolg).
+        """
+        if not message.attachments:
+            return []
+
+        result: list[dict[str, Any]] = []
+        msg_dir = os.path.join(ATTACHMENTS_DIR, str(message.id))
+        os.makedirs(msg_dir, exist_ok=True)
+
+        for att in message.attachments:
+            entry: dict[str, Any] = {
+                "filename": att.filename,
+                "url": att.url,
+                "size": att.size,
+                "content_type": att.content_type,
+                "local_path": None,
+            }
+
+            safe_name = _safe_filename(att.filename)
+            local_path = os.path.join(msg_dir, safe_name)
+
+            # Schon vorhanden? → überspringen
+            if os.path.isfile(local_path) and os.path.getsize(local_path) > 0:
+                entry["local_path"] = local_path
+                result.append(entry)
+                continue
+
+            try:
+                await att.save(local_path)
+                entry["local_path"] = local_path
+            except Exception as e:
+                print(f"[Backup] Attachment-Download fehlgeschlagen ({message.id}/{att.filename}): {e}")
+                # local_path bleibt None, URL ist trotzdem gespeichert
+
+            result.append(entry)
+
+        return result
+
     # ==================== MESSAGE LOGGING ====================
 
     async def _store_message(self, message: discord.Message, *, is_edit: bool = False) -> None:
-        """Speichert oder aktualisiert eine Nachricht."""
+        """Speichert oder aktualisiert eine Nachricht (inkl. Attachment-Download)."""
         if not message.guild:
             return
 
@@ -107,16 +159,11 @@ class BackupCog(commands.Cog):
             if message.embeds else None
         )
 
-        attachments_data = []
-        for att in message.attachments:
-            attachments_data.append({
-                "filename": att.filename,
-                "url": att.url,
-                "size": att.size,
-                "content_type": att.content_type,
-                "local_path": None
-            })
-        attachments_json = json.dumps(attachments_data, ensure_ascii=False) if attachments_data else None
+        # Attachments herunterladen
+        attachments_data = await self._download_attachments(message)
+        attachments_json = (
+            json.dumps(attachments_data, ensure_ascii=False) if attachments_data else None
+        )
 
         created_at = int(message.created_at.timestamp())
         edited_at = int(message.edited_at.timestamp()) if message.edited_at else None
@@ -259,7 +306,7 @@ class BackupCog(commands.Cog):
         total_saved = 0
 
         while True:
-            kwargs = {
+            kwargs: dict[str, Any] = {
                 "limit": BACKFILL_BATCH_SIZE,
                 "oldest_first": False,  # neueste zuerst
             }
@@ -337,7 +384,11 @@ class BackupCog(commands.Cog):
                 )
                 embed.add_field(name="Aktueller Channel", value=f"#{channel.name}", inline=False)
                 embed.add_field(name="Fortschritt", value=f"{i-1} / {len(channels)} Channels", inline=True)
-                embed.add_field(name="Nachrichten diese Runde", value=f"{self._backfill_status['messages_this_run']:,}", inline=True)
+                embed.add_field(
+                    name="Nachrichten diese Runde",
+                    value=f"{self._backfill_status['messages_this_run']:,}",
+                    inline=True
+                )
                 embed.set_footer(text="Du kannst den Bot weiter benutzen – der Backfill läuft im Hintergrund")
 
                 try:
@@ -359,7 +410,11 @@ class BackupCog(commands.Cog):
                 color=discord.Color.green()
             )
             embed.add_field(name="Channels", value=f"{len(channels)}", inline=True)
-            embed.add_field(name="Neue Nachrichten", value=f"{self._backfill_status['messages_this_run']:,}", inline=True)
+            embed.add_field(
+                name="Neue Nachrichten",
+                value=f"{self._backfill_status['messages_this_run']:,}",
+                inline=True
+            )
             embed.set_footer(text="Alle Channels sind jetzt als fully_backfilled markiert")
             try:
                 await progress_msg.edit(embed=embed)
@@ -390,10 +445,29 @@ class BackupCog(commands.Cog):
             ) as cur:
                 fully_done = (await cur.fetchone())[0]
 
+        # Grobe Schätzung der Attachment-Anzahl über Dateisystem
+        attachment_count = 0
+        attachment_size = 0
+        if os.path.isdir(ATTACHMENTS_DIR):
+            for root, _, files in os.walk(ATTACHMENTS_DIR):
+                for f in files:
+                    attachment_count += 1
+                    try:
+                        attachment_size += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+
+        size_mb = attachment_size / (1024 * 1024)
+
         embed = discord.Embed(title="📦 Backup Status", color=discord.Color.blurple())
         embed.add_field(name="Gespeicherte Nachrichten", value=f"**{total_msgs:,}**", inline=True)
         embed.add_field(name="Überwachte Channels", value=f"**{tracked_channels}**", inline=True)
         embed.add_field(name="Vollständig backfilled", value=f"**{fully_done}**", inline=True)
+        embed.add_field(
+            name="Attachments",
+            value=f"**{attachment_count:,}** Dateien ({size_mb:.1f} MB)",
+            inline=False
+        )
 
         if self._backfill_status["running"]:
             embed.add_field(
@@ -407,7 +481,7 @@ class BackupCog(commands.Cog):
             )
             embed.color = discord.Color.orange()
         else:
-            embed.set_footer(text="Kontinuierliches Logging ist aktiv")
+            embed.set_footer(text="Kontinuierliches Logging + Attachment-Download aktiv")
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -429,7 +503,11 @@ class BackupCog(commands.Cog):
 
         embed = discord.Embed(
             title="📦 Historischer Backfill wird gestartet...",
-            description="Der Bot holt jetzt die gesamte Nachrichten-History aller Text-Channels.\nDas kann je nach Server-Größe eine Weile dauern.",
+            description=(
+                "Der Bot holt jetzt die gesamte Nachrichten-History aller Text-Channels.\n"
+                "Attachments werden dabei ebenfalls heruntergeladen.\n"
+                "Das kann je nach Server-Größe eine Weile dauern."
+            ),
             color=discord.Color.orange()
         )
         progress_msg = await interaction.followup.send(embed=embed)
