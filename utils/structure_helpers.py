@@ -40,23 +40,63 @@ def build_overwrites(
     return result
 
 
+async def _with_timeout(coro, seconds: float, label: str):
+    try:
+        return await asyncio.wait_for(coro, timeout=seconds)
+    except asyncio.TimeoutError:
+        print(f"[Backup] TIMEOUT ({seconds}s) bei: {label}")
+        raise
+
+
 async def clear_manageable_roles(guild: discord.Guild) -> int:
     if not guild.me:
+        print("[Backup] clear roles: guild.me fehlt")
         return 0
     bot_top = guild.me.top_role.position
     deleted = 0
-    for role in sorted(list(guild.roles), key=lambda r: r.position, reverse=True):
+    roles = sorted(list(guild.roles), key=lambda r: r.position, reverse=True)
+    print(f"[Backup] clear roles: {len(roles)} Rollen, bot_top={bot_top}")
+    for role in roles:
         if role.is_default() or role.managed:
             continue
         if role.position >= bot_top:
-            print(f"[Backup] Rolle '{role.name}' zu hoch für Bot – übersprungen")
+            print(f"[Backup] Rolle '{role.name}' zu hoch – skip")
             continue
         try:
-            await role.delete(reason="Backup Restore: clear roles")
+            await _with_timeout(
+                role.delete(reason="Backup Restore: clear roles"),
+                15.0,
+                f"role.delete {role.name}",
+            )
             deleted += 1
-            await asyncio.sleep(0.4)
+            print(f"[Backup] Rolle gelöscht: {role.name}")
+            await asyncio.sleep(0.35)
         except Exception as e:
             print(f"[Backup] Rolle löschen '{role.name}': {e}")
+    print(f"[Backup] clear roles fertig: {deleted} gelöscht")
+    return deleted
+
+
+async def clear_channels(guild: discord.Guild, keep_channel_id: Optional[int] = None) -> int:
+    deleted = 0
+    channels = list(guild.channels)
+    print(f"[Backup] clear channels: {len(channels)} (keep={keep_channel_id})")
+    for channel in channels:
+        if keep_channel_id and channel.id == keep_channel_id:
+            print(f"[Backup] Channel behalten: #{getattr(channel, 'name', channel.id)}")
+            continue
+        try:
+            await _with_timeout(
+                channel.delete(reason="Backup Restore: clear_first"),
+                15.0,
+                f"channel.delete {getattr(channel, 'name', channel.id)}",
+            )
+            deleted += 1
+            print(f"[Backup] Channel gelöscht: {getattr(channel, 'name', channel.id)}")
+            await asyncio.sleep(0.35)
+        except Exception as e:
+            print(f"[Backup] Channel-Löschen fehlgeschlagen ({getattr(channel, 'name', channel.id)}): {e}")
+    print(f"[Backup] clear channels fertig: {deleted} gelöscht")
     return deleted
 
 
@@ -79,9 +119,13 @@ async def dedupe_roles_by_name(guild: discord.Guild) -> int:
             if role.position >= bot_top:
                 continue
             try:
-                await role.delete(reason="Backup Restore: dedupe")
+                await _with_timeout(
+                    role.delete(reason="Backup Restore: dedupe"),
+                    15.0,
+                    f"dedupe {name}",
+                )
                 removed += 1
-                await asyncio.sleep(0.35)
+                await asyncio.sleep(0.3)
             except Exception as e:
                 print(f"[Backup] Dedupe '{name}': {e}")
     if removed:
@@ -93,12 +137,6 @@ async def apply_role_hierarchy(
     guild: discord.Guild,
     roles_data: list[dict[str, Any]],
 ) -> None:
-    """
-    Discord: höhere position = höher in der Hierarchie (Owner/Admin oben).
-
-    Snapshot-position ebenfalls: höher = mächtiger.
-    Mapping: höchste Snapshot-Pos → höchste erlaubte Pos (bot_top - 1).
-    """
     if not guild.me:
         return
 
@@ -107,7 +145,6 @@ async def apply_role_hierarchy(
     bot_top = guild.me.top_role.position
     max_usable = max(1, bot_top - 1)
 
-    # Höchste Snapshot-Position zuerst (Owner/Admin zuerst)
     wanted = sorted(
         [r for r in roles_data if not r.get("managed") and r.get("name")],
         key=lambda r: r.get("position", 0),
@@ -122,7 +159,6 @@ async def apply_role_hierarchy(
             continue
         if role.position >= bot_top:
             continue
-        # eine pro Name
         if role.name not in by_name:
             by_name[role.name] = role
 
@@ -136,37 +172,37 @@ async def apply_role_hierarchy(
         print("[Backup] Hierarchie: keine matchenden Rollen")
         return
 
-    n = len(ordered)
     positions: dict[discord.Role, int] = {}
-
-    # ordered[0] = höchste Rolle → max_usable
-    # ordered[-1] = niedrigste Rolle → 1 (oder max_usable-n+1)
     for i, role in enumerate(ordered):
         pos = max_usable - i
         if pos < 1:
             pos = 1
         positions[role] = pos
 
-    # Debug
-    preview = ", ".join(
-        f"{r.name}→{positions[r]}" for r in ordered[:5]
-    )
-    print(f"[Backup] Hierarchie Mapping (Top→…). Bot@{bot_top}: {preview}")
+    preview = ", ".join(f"{r.name}→{positions[r]}" for r in ordered[:5])
+    print(f"[Backup] Hierarchie Mapping (Top→…): Bot@{bot_top}: {preview}")
 
     try:
-        await guild.edit_role_positions(
-            positions=positions, reason="Backup Restore hierarchy"
+        await _with_timeout(
+            guild.edit_role_positions(
+                positions=positions, reason="Backup Restore hierarchy"
+            ),
+            30.0,
+            "edit_role_positions",
         )
-        print(f"[Backup] Hierarchie OK: {n} Rollen unter Bot-Pos {bot_top}")
+        print(f"[Backup] Hierarchie OK: {len(ordered)} Rollen")
         return
     except Exception as e:
         print(f"[Backup] edit_role_positions batch: {e}")
 
-    # Fallback: von oben nach unten setzen
     for role, pos in sorted(positions.items(), key=lambda x: x[1], reverse=True):
         try:
-            await role.edit(position=pos, reason="Backup Restore hierarchy")
-            await asyncio.sleep(0.4)
+            await _with_timeout(
+                role.edit(position=pos, reason="Backup Restore hierarchy"),
+                15.0,
+                f"role.edit pos {role.name}",
+            )
+            await asyncio.sleep(0.35)
         except Exception as e:
             print(f"[Backup] Position '{role.name}' -> {pos}: {e}")
 
@@ -200,7 +236,7 @@ async def apply_guild_branding(guild: discord.Guild, g: dict[str, Any]) -> list[
         try:
             import aiohttp
 
-            timeout = aiohttp.ClientTimeout(total=30)
+            timeout = aiohttp.ClientTimeout(total=20)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(g["icon_url"]) as resp:
                     if resp.status == 200:
@@ -215,11 +251,15 @@ async def apply_guild_branding(guild: discord.Guild, g: dict[str, Any]) -> list[
         return applied
 
     try:
-        await guild.edit(**kwargs, reason="Backup Restore branding")
+        await _with_timeout(
+            guild.edit(**kwargs, reason="Backup Restore branding"),
+            30.0,
+            "guild.edit branding",
+        )
         applied.extend(kwargs.keys())
         print(f"[Backup] Guild branding: {applied}")
     except Exception as e:
-        print(f"[Backup] Guild branding batch: {e}")
+        print(f"[Backup] Guild branding: {e}")
         if "name" in kwargs:
             try:
                 await guild.edit(name=kwargs["name"], reason="Backup Restore name")
