@@ -55,6 +55,7 @@ except ImportError:
 
 BACKUP_DB_PATH = os.getenv("BACKUP_DATA_PATH", "data/backup.db")
 ATTACHMENTS_DIR = os.getenv("BACKUP_ATTACHMENTS_PATH", "data/backups/attachments")
+PROGRESS_CHANNEL_NAME = "backup-restore-progress"
 
 
 class MessageRestoreConfirmView(discord.ui.View):
@@ -163,43 +164,108 @@ class BackupAdminCog(commands.Cog):
         ) -> None:
             print(f"[Backup] restore_with_extras START clear_first={clear_first} guild={guild.id}")
 
-            async def bump(text: str) -> None:
+            progress_channel: Optional[discord.TextChannel] = None
+            # lokale Referenz – kann auf Temp-Channel umgebogen werden
+            current_progress = progress_msg
+
+            async def bump(text: str, *, done: bool = False, error: bool = False) -> None:
                 print(f"[Backup] progress: {text}")
+                color = discord.Color.green() if done else (
+                    discord.Color.red() if error else discord.Color.orange()
+                )
+                title = (
+                    "✅ Struktur-Restore abgeschlossen" if done
+                    else ("❌ Restore fehlgeschlagen" if error else "🔄 Struktur-Restore läuft...")
+                )
                 try:
-                    await progress_msg.edit(
-                        embed=discord.Embed(
-                            title="🔄 Struktur-Restore läuft...",
-                            description=text,
-                            color=discord.Color.orange(),
-                        ),
+                    await current_progress.edit(
+                        embed=discord.Embed(title=title, description=text, color=color),
                         view=None,
                     )
                 except Exception as e:
-                    print(f"[Backup] progress edit fail (ok wenn Channel weg): {e}")
+                    print(f"[Backup] progress edit fail: {e}")
+
+            async def cleanup_progress_channel() -> None:
+                if progress_channel is None:
+                    return
+                try:
+                    await bump(
+                        "Fertig. Dieser Channel wird in **10 Sekunden** gelöscht…",
+                        done=True,
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(10)
+                try:
+                    await progress_channel.delete(reason="Backup Restore progress cleanup")
+                    print("[Backup] Progress-Channel gelöscht")
+                except Exception as e:
+                    print(f"[Backup] Progress-Channel löschen: {e}")
 
             try:
+                # Bei clear_first: eigenen Progress-Channel anlegen
+                if clear_first:
+                    try:
+                        # alte progress-channels aufräumen
+                        for ch in list(guild.text_channels):
+                            if ch.name == PROGRESS_CHANNEL_NAME:
+                                try:
+                                    await ch.delete(reason="Backup Restore: alter Progress-Channel")
+                                except Exception:
+                                    pass
+
+                        progress_channel = await guild.create_text_channel(
+                            PROGRESS_CHANNEL_NAME,
+                            reason="Backup Restore progress",
+                            topic="Temporärer Fortschritts-Channel – wird nach dem Restore gelöscht",
+                        )
+                        print(f"[Backup] Progress-Channel erstellt: #{progress_channel.name}")
+
+                        current_progress = await progress_channel.send(
+                            embed=discord.Embed(
+                                title="🔄 Struktur-Restore läuft...",
+                                description="Progress-Channel bereit. Starte Clear…",
+                                color=discord.Color.orange(),
+                            )
+                        )
+
+                        # Original-Followup kurz hinweisen
+                        try:
+                            await progress_msg.edit(
+                                embed=discord.Embed(
+                                    title="🔄 Struktur-Restore",
+                                    description=(
+                                        f"Fortschritt läuft in **#{progress_channel.name}**\n"
+                                        "(wird nach dem Restore automatisch gelöscht)"
+                                    ),
+                                    color=discord.Color.orange(),
+                                ),
+                                view=None,
+                            )
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        print(f"[Backup] Progress-Channel anlegen fehlgeschlagen: {e}")
+                        progress_channel = None
+                        current_progress = progress_msg
+
                 await bump("Starte…")
 
-                # Clear genau einmal hier – original bekommt clear_first=False
                 if clear_first:
-                    keep_id = None
-                    try:
-                        keep_id = progress_msg.channel.id  # type: ignore[union-attr]
-                    except Exception:
-                        keep_id = None
+                    keep_id = progress_channel.id if progress_channel else None
                     await bump("Lösche Channels…")
                     dc = await clear_channels(guild, keep_channel_id=keep_id)
-                    await bump(f"Channels gelöscht ({dc}). Lösche Rollen…")
+                    await bump(f"Channels gelöscht (**{dc}**). Lösche Rollen…")
                     dr = await clear_manageable_roles(guild)
-                    await bump(f"Rollen gelöscht ({dr}). Erstelle Struktur…")
+                    await bump(f"Rollen gelöscht (**{dr}**). Erstelle Struktur…")
                 else:
                     await bump("Erstelle Struktur (ohne Clear)…")
 
                 print("[Backup] rufe original_restore (clear_first=False)…")
-                await original_restore(guild, data, progress_msg, False)
+                await original_restore(guild, data, current_progress, False)
                 print("[Backup] original_restore fertig")
 
-                await bump("Hierarchie…")
+                await bump("Setze Rollen-Hierarchie…")
                 try:
                     await dedupe_roles_by_name(guild)
                     await apply_role_hierarchy(guild, data.get("roles") or [])
@@ -232,24 +298,24 @@ class BackupAdminCog(commands.Cog):
                 except Exception as e:
                     print(f"[Backup] channel_id_map: {e}")
 
+                await bump("Alles erledigt.", done=True)
                 print("[Backup] restore_with_extras DONE")
 
             except Exception as e:
                 print(f"[Backup] restore_with_extras CRASH: {e}")
                 traceback.print_exc()
                 try:
-                    await progress_msg.edit(
-                        embed=discord.Embed(
-                            title="❌ Restore fehlgeschlagen",
-                            description=f"`{e}`",
-                            color=discord.Color.red(),
-                        ),
-                        view=None,
-                    )
+                    await bump(f"`{e}`", error=True)
                 except Exception:
                     pass
             finally:
                 cog._restore_task = None
+                # Progress-Channel 10s später löschen (auch bei Fehler)
+                if progress_channel is not None:
+                    try:
+                        await cleanup_progress_channel()
+                    except Exception as e:
+                        print(f"[Backup] cleanup progress: {e}")
 
         async def fixed_snapshots(
             _cog: Any, interaction: discord.Interaction
