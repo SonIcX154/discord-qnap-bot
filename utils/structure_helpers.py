@@ -41,12 +41,10 @@ def build_overwrites(
 
 
 async def clear_manageable_roles(guild: discord.Guild) -> int:
-    """Löscht alle Rollen, die der Bot löschen kann (unter seiner Top-Rolle)."""
     if not guild.me:
         return 0
     bot_top = guild.me.top_role.position
     deleted = 0
-    # von oben nach unten
     for role in sorted(list(guild.roles), key=lambda r: r.position, reverse=True):
         if role.is_default() or role.managed:
             continue
@@ -63,7 +61,6 @@ async def clear_manageable_roles(guild: discord.Guild) -> int:
 
 
 async def dedupe_roles_by_name(guild: discord.Guild) -> int:
-    """Bei doppelten Namen: eine behalten, Rest löschen (wenn möglich)."""
     if not guild.me:
         return 0
     bot_top = guild.me.top_role.position
@@ -77,9 +74,7 @@ async def dedupe_roles_by_name(guild: discord.Guild) -> int:
     for name, roles in by_name.items():
         if len(roles) < 2:
             continue
-        # behalte die mit höchster Position
         roles_sorted = sorted(roles, key=lambda r: r.position, reverse=True)
-        keep = roles_sorted[0]
         for role in roles_sorted[1:]:
             if role.position >= bot_top:
                 continue
@@ -89,7 +84,6 @@ async def dedupe_roles_by_name(guild: discord.Guild) -> int:
                 await asyncio.sleep(0.35)
             except Exception as e:
                 print(f"[Backup] Dedupe '{name}': {e}")
-        _ = keep
     if removed:
         print(f"[Backup] {removed} doppelte Rollen entfernt")
     return removed
@@ -100,8 +94,10 @@ async def apply_role_hierarchy(
     roles_data: list[dict[str, Any]],
 ) -> None:
     """
-    Relative Reihenfolge wie im Snapshot, alle unter Bot-Top-Rolle.
-    Vorher Dedupe nach Name.
+    Discord: höhere position = höher in der Hierarchie (Owner/Admin oben).
+
+    Snapshot-position ebenfalls: höher = mächtiger.
+    Mapping: höchste Snapshot-Pos → höchste erlaubte Pos (bot_top - 1).
     """
     if not guild.me:
         return
@@ -111,58 +107,63 @@ async def apply_role_hierarchy(
     bot_top = guild.me.top_role.position
     max_usable = max(1, bot_top - 1)
 
+    # Höchste Snapshot-Position zuerst (Owner/Admin zuerst)
     wanted = sorted(
-        [r for r in roles_data if not r.get("managed")],
+        [r for r in roles_data if not r.get("managed") and r.get("name")],
         key=lambda r: r.get("position", 0),
+        reverse=True,
     )
     if not wanted:
         return
 
-    # frische Role-Liste
     by_name: dict[str, discord.Role] = {}
     for role in guild.roles:
         if role.is_default() or role.managed:
             continue
         if role.position >= bot_top:
             continue
-        # bei Rest-Duplikaten: niedrigste Position bevorzugen (neu erstellt)
-        if role.name not in by_name or role.position < by_name[role.name].position:
+        # eine pro Name
+        if role.name not in by_name:
             by_name[role.name] = role
 
     ordered: list[discord.Role] = []
     for rd in wanted:
-        role = by_name.get(rd.get("name", ""))
+        role = by_name.get(rd["name"])
         if role and role not in ordered:
             ordered.append(role)
 
     if not ordered:
-        print("[Backup] Hierarchie: keine matchenden Rollen gefunden")
+        print("[Backup] Hierarchie: keine matchenden Rollen")
         return
 
     n = len(ordered)
-    # Positionen 1..n (oder gequetscht unter bot_top)
     positions: dict[discord.Role, int] = {}
+
+    # ordered[0] = höchste Rolle → max_usable
+    # ordered[-1] = niedrigste Rolle → 1 (oder max_usable-n+1)
     for i, role in enumerate(ordered):
-        if n <= max_usable:
-            pos = i + 1
-        else:
-            pos = max(1, max_usable - (n - 1 - i))
+        pos = max_usable - i
+        if pos < 1:
+            pos = 1
         positions[role] = pos
+
+    # Debug
+    preview = ", ".join(
+        f"{r.name}→{positions[r]}" for r in ordered[:5]
+    )
+    print(f"[Backup] Hierarchie Mapping (Top→…). Bot@{bot_top}: {preview}")
 
     try:
         await guild.edit_role_positions(
             positions=positions, reason="Backup Restore hierarchy"
         )
-        print(
-            f"[Backup] Hierarchie OK: {n} Rollen, Reihenfolge wie Snapshot "
-            f"(max pos {max_usable}, Bot bei {bot_top})"
-        )
+        print(f"[Backup] Hierarchie OK: {n} Rollen unter Bot-Pos {bot_top}")
         return
     except Exception as e:
         print(f"[Backup] edit_role_positions batch: {e}")
 
-    # Fallback: von unten nach oben einzeln
-    for role, pos in sorted(positions.items(), key=lambda x: x[1]):
+    # Fallback: von oben nach unten setzen
+    for role, pos in sorted(positions.items(), key=lambda x: x[1], reverse=True):
         try:
             await role.edit(position=pos, reason="Backup Restore hierarchy")
             await asyncio.sleep(0.4)
