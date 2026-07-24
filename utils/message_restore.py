@@ -14,7 +14,6 @@ MAX_RETRIES = 5
 
 async def with_retry(coro_factory: Callable[[], Awaitable[Any]], *,
                      label: str = "api") -> Any:
-    """Führt eine Coroutine aus und wiederholt bei HTTP 429."""
     last_exc: Optional[Exception] = None
     for attempt in range(MAX_RETRIES):
         try:
@@ -40,7 +39,6 @@ async def with_retry(coro_factory: Callable[[], Awaitable[Any]], *,
 
 
 async def load_channel_id_map(db_path: str, guild_id: int) -> dict[int, int]:
-    """old_channel_id -> new_channel_id aus der DB."""
     async with aiosqlite.connect(db_path) as db:
         try:
             async with db.execute(
@@ -61,18 +59,15 @@ async def resolve_target_channel(
     name_lookup: dict[int, str],
     id_map: dict[int, int],
 ) -> Optional[discord.TextChannel]:
-    # 1) Explizites Mapping aus Struktur-Restore
     if old_channel_id in id_map:
         ch = guild.get_channel(id_map[old_channel_id])
         if isinstance(ch, discord.TextChannel):
             return ch
 
-    # 2) Gleiche ID (Channel nie neu angelegt)
     ch = guild.get_channel(old_channel_id)
     if isinstance(ch, discord.TextChannel):
         return ch
 
-    # 3) Name-Match
     if not match_by_name:
         return None
 
@@ -96,17 +91,51 @@ def build_name_lookup_from_snapshot(snapshot_data: Optional[dict[str, Any]]) -> 
     return lookup
 
 
-async def load_channel_ids_with_messages(db_path: str, guild_id: int) -> list[int]:
+async def count_messages(
+    db_path: str,
+    source_guild_id: Optional[int] = None,
+) -> int:
+    """Anzahl gespeicherter Nachrichten. source_guild_id=None → ganze Instanz."""
     async with aiosqlite.connect(db_path) as db:
-        async with db.execute(
-            """
-            SELECT DISTINCT channel_id FROM messages
-            WHERE guild_id = ? AND is_deleted = 0
-            ORDER BY channel_id
-            """,
-            (guild_id,),
-        ) as cur:
-            rows = await cur.fetchall()
+        if source_guild_id is None:
+            async with db.execute(
+                "SELECT COUNT(*) FROM messages WHERE is_deleted = 0"
+            ) as cur:
+                row = await cur.fetchone()
+        else:
+            async with db.execute(
+                "SELECT COUNT(*) FROM messages WHERE guild_id = ? AND is_deleted = 0",
+                (source_guild_id,),
+            ) as cur:
+                row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+async def load_channel_ids_with_messages(
+    db_path: str,
+    source_guild_id: Optional[int] = None,
+) -> list[int]:
+    """Channel-IDs mit Nachrichten. None = instanz-weit (Disaster Recovery)."""
+    async with aiosqlite.connect(db_path) as db:
+        if source_guild_id is None:
+            async with db.execute(
+                """
+                SELECT DISTINCT channel_id FROM messages
+                WHERE is_deleted = 0
+                ORDER BY channel_id
+                """
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with db.execute(
+                """
+                SELECT DISTINCT channel_id FROM messages
+                WHERE guild_id = ? AND is_deleted = 0
+                ORDER BY channel_id
+                """,
+                (source_guild_id,),
+            ) as cur:
+                rows = await cur.fetchall()
     return [int(r[0]) for r in rows]
 
 
@@ -116,7 +145,6 @@ async def load_already_restored(db_path: str, message_ids: list[int]) -> set[int
     restored: set[int] = set()
     async with aiosqlite.connect(db_path) as db:
         try:
-            # chunked IN query
             for i in range(0, len(message_ids), 500):
                 chunk = message_ids[i:i + 500]
                 placeholders = ",".join("?" * len(chunk))
@@ -229,7 +257,6 @@ async def restore_messages_to_channel(
     *,
     db_path: str,
 ) -> tuple[int, int, int]:
-    """Returns (sent, skipped_empty, errors)."""
     if not messages:
         return 0, 0, 0
 
@@ -303,17 +330,22 @@ async def run_message_restore(
     limit_per_channel: Optional[int] = None,
     match_by_name: bool = True,
     snapshot_data: Optional[dict[str, Any]] = None,
+    source_guild_id: Optional[int] = None,
 ) -> None:
+    """
+    source_guild_id: Alte Guild-ID aus dem Snapshot.
+    None = alle Nachrichten der Instanz (eine Instanz = ein logischer Server).
+    """
+    if source_guild_id is None and snapshot_data:
+        source_guild_id = (snapshot_data.get("guild") or {}).get("id")
+        if source_guild_id is not None:
+            source_guild_id = int(source_guild_id)
+
     name_lookup = build_name_lookup_from_snapshot(snapshot_data)
     id_map = await load_channel_id_map(db_path, guild.id)
 
     if channel_filter is not None:
-        async with aiosqlite.connect(db_path) as db:
-            async with db.execute(
-                "SELECT DISTINCT channel_id FROM messages WHERE guild_id = ? AND is_deleted = 0",
-                (guild.id,),
-            ) as cur:
-                all_ids = [int(r[0]) for r in await cur.fetchall()]
+        all_ids = await load_channel_ids_with_messages(db_path, source_guild_id)
         mapped: list[int] = []
         for oid in all_ids:
             target = await resolve_target_channel(
@@ -326,7 +358,7 @@ async def run_message_restore(
                 mapped.append(oid)
         old_ids = mapped or [channel_filter.id]
     else:
-        old_ids = await load_channel_ids_with_messages(db_path, guild.id)
+        old_ids = await load_channel_ids_with_messages(db_path, source_guild_id)
 
     total_sent = 0
     total_errors = 0
