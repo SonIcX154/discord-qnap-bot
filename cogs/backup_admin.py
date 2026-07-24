@@ -33,6 +33,13 @@ BACKUP_DB_PATH = os.getenv("BACKUP_DATA_PATH", "data/backup.db")
 ATTACHMENTS_DIR = os.getenv("BACKUP_ATTACHMENTS_PATH", "data/backups/attachments")
 
 
+class _AlwaysTruthyDict(dict):
+    """Leeres Dict bleibt truthy, damit `overwrites or None` nicht None wird."""
+
+    def __bool__(self) -> bool:
+        return True
+
+
 class CrossRestoreConfirmView(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=60)
@@ -73,12 +80,11 @@ class BackupAdminCog(commands.Cog):
 
     async def cog_load(self) -> None:
         await ensure_extra_tables(self.db_path)
-        # BackupCog lädt alphabetisch vor uns → hier patchen
         self.bot.loop.create_task(self._patch_backup_cog())
 
     async def _patch_backup_cog(self) -> None:
-        """Macht /backup-restore und Snapshots guild-unabhängig (Disaster Recovery)."""
-        await asyncio.sleep(1)  # kurz warten bis alle Cogs da sind
+        """Disaster-Recovery + Overwrites-Fix."""
+        await asyncio.sleep(1)
         cog = self.bot.get_cog("BackupCog")
         if cog is None:
             print("[BackupAdmin] BackupCog nicht gefunden – Patch übersprungen")
@@ -89,7 +95,6 @@ class BackupAdminCog(commands.Cog):
         async def load_snapshot_by_id(
             snapshot_id: int, guild_id: Optional[int] = None
         ) -> Optional[dict[str, Any]]:
-            # guild_id wird absichtlich ignoriert – Snapshot-ID ist global pro Instanz
             async with aiosqlite.connect(db_path) as db:
                 async with db.execute(
                     "SELECT name, data, guild_id FROM snapshots WHERE id = ?",
@@ -114,9 +119,45 @@ class BackupAdminCog(commands.Cog):
                 return None
             return json.loads(row[0])
 
+        def fixed_build_overwrites(
+            guild: discord.Guild,
+            overwrites_data: list[dict[str, Any]],
+            role_map: dict[int, int],
+        ) -> dict:
+            """Immer ein echtes dict zurückgeben (auch leer) – nie None."""
+            result: _AlwaysTruthyDict = _AlwaysTruthyDict()
+
+            for ow in overwrites_data:
+                target: Optional[discord.abc.Snowflake] = None
+                if ow.get("type") == "role":
+                    old_id = ow["id"]
+                    mapped = role_map.get(old_id)
+                    # @everyone: alte guild_id oder default_role Mapping
+                    if old_id == guild.id or mapped == guild.default_role.id:
+                        target = guild.default_role
+                    elif mapped:
+                        target = guild.get_role(mapped)
+                elif ow.get("type") == "member":
+                    member = guild.get_member(ow["id"])
+                    if member:
+                        target = member
+
+                if target is None:
+                    continue
+
+                result[target] = discord.PermissionOverwrite.from_pair(
+                    discord.Permissions(ow.get("allow", 0)),
+                    discord.Permissions(ow.get("deny", 0)),
+                )
+
+            return result
+
         cog._load_snapshot = load_snapshot_by_id  # type: ignore[method-assign]
         cog._load_latest_snapshot_data = load_latest_any  # type: ignore[method-assign]
-        print("[BackupAdmin] Disaster-Recovery Patch aktiv: Snapshots per ID (ohne guild_id-Filter)")
+        cog._build_overwrites = fixed_build_overwrites  # type: ignore[method-assign]
+        print(
+            "[BackupAdmin] Patches aktiv: Snapshots per ID · overwrites immer dict"
+        )
 
     async def _load_snapshot_any(self, snapshot_id: int) -> Optional[dict[str, Any]]:
         async with aiosqlite.connect(self.db_path) as db:
@@ -200,7 +241,7 @@ class BackupAdminCog(commands.Cog):
             ephemeral=True,
         )
 
-    # ---------- Snapshots (alle, da eine Instanz = ein logischer Server) ----------
+    # ---------- Snapshots ----------
 
     @app_commands.command(
         name="backup-snapshots-all",
@@ -237,7 +278,7 @@ class BackupAdminCog(commands.Cog):
             color=discord.Color.blurple(),
         )
         embed.set_footer(
-            text="Nach Server-Löschung: /backup-restore oder /backup-restore-cross mit der ID"
+            text="Nach Server-Löschung: /backup-restore oder /backup-restore-cross"
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -319,7 +360,6 @@ class BackupAdminCog(commands.Cog):
 
         async def wrapped(guild, data, progress_msg, clear_first):
             await backup_cog._restore_structure(guild, data, progress_msg, clear_first)
-            # channel_id_map per Name speichern (neue IDs nach Rebuild)
             mapping: dict[int, int] = {}
             for ch_data in list(data.get("channels", [])) + list(data.get("categories", [])):
                 old_id = ch_data.get("id")
