@@ -5,3 +5,4 @@ docker-compose.yml
 data/economy.db
 cogs/__pycache__/economy.cpython-313.pyc
 data/backup.db
+data/backups
