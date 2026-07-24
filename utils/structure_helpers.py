@@ -8,8 +8,6 @@ import discord
 
 
 class AlwaysTruthyDict(dict):
-    """Leeres dict bleibt truthy – verhindert `overwrites or None` -> None."""
-
     def __bool__(self) -> bool:
         return True
 
@@ -42,22 +40,77 @@ def build_overwrites(
     return result
 
 
+async def clear_manageable_roles(guild: discord.Guild) -> int:
+    """Löscht alle Rollen, die der Bot löschen kann (unter seiner Top-Rolle)."""
+    if not guild.me:
+        return 0
+    bot_top = guild.me.top_role.position
+    deleted = 0
+    # von oben nach unten
+    for role in sorted(list(guild.roles), key=lambda r: r.position, reverse=True):
+        if role.is_default() or role.managed:
+            continue
+        if role.position >= bot_top:
+            print(f"[Backup] Rolle '{role.name}' zu hoch für Bot – übersprungen")
+            continue
+        try:
+            await role.delete(reason="Backup Restore: clear roles")
+            deleted += 1
+            await asyncio.sleep(0.4)
+        except Exception as e:
+            print(f"[Backup] Rolle löschen '{role.name}': {e}")
+    return deleted
+
+
+async def dedupe_roles_by_name(guild: discord.Guild) -> int:
+    """Bei doppelten Namen: eine behalten, Rest löschen (wenn möglich)."""
+    if not guild.me:
+        return 0
+    bot_top = guild.me.top_role.position
+    by_name: dict[str, list[discord.Role]] = {}
+    for role in guild.roles:
+        if role.is_default() or role.managed:
+            continue
+        by_name.setdefault(role.name, []).append(role)
+
+    removed = 0
+    for name, roles in by_name.items():
+        if len(roles) < 2:
+            continue
+        # behalte die mit höchster Position
+        roles_sorted = sorted(roles, key=lambda r: r.position, reverse=True)
+        keep = roles_sorted[0]
+        for role in roles_sorted[1:]:
+            if role.position >= bot_top:
+                continue
+            try:
+                await role.delete(reason="Backup Restore: dedupe")
+                removed += 1
+                await asyncio.sleep(0.35)
+            except Exception as e:
+                print(f"[Backup] Dedupe '{name}': {e}")
+        _ = keep
+    if removed:
+        print(f"[Backup] {removed} doppelte Rollen entfernt")
+    return removed
+
+
 async def apply_role_hierarchy(
     guild: discord.Guild,
     roles_data: list[dict[str, Any]],
 ) -> None:
     """
-    Setzt Rollen-Reihenfolge wie im Snapshot (relativ),
-    alle strikt unter der höchsten Bot-Rolle.
-    Matching über Rollen-Namen.
+    Relative Reihenfolge wie im Snapshot, alle unter Bot-Top-Rolle.
+    Vorher Dedupe nach Name.
     """
     if not guild.me:
         return
 
+    await dedupe_roles_by_name(guild)
+
     bot_top = guild.me.top_role.position
     max_usable = max(1, bot_top - 1)
 
-    # Snapshot-Rollen (nicht managed) nach Original-Position
     wanted = sorted(
         [r for r in roles_data if not r.get("managed")],
         key=lambda r: r.get("position", 0),
@@ -65,14 +118,15 @@ async def apply_role_hierarchy(
     if not wanted:
         return
 
-    # Name -> Role (erste nicht-managed mit dem Namen)
+    # frische Role-Liste
     by_name: dict[str, discord.Role] = {}
     for role in guild.roles:
         if role.is_default() or role.managed:
             continue
         if role.position >= bot_top:
             continue
-        if role.name not in by_name:
+        # bei Rest-Duplikaten: niedrigste Position bevorzugen (neu erstellt)
+        if role.name not in by_name or role.position < by_name[role.name].position:
             by_name[role.name] = role
 
     ordered: list[discord.Role] = []
@@ -82,9 +136,11 @@ async def apply_role_hierarchy(
             ordered.append(role)
 
     if not ordered:
+        print("[Backup] Hierarchie: keine matchenden Rollen gefunden")
         return
 
     n = len(ordered)
+    # Positionen 1..n (oder gequetscht unter bot_top)
     positions: dict[discord.Role, int] = {}
     for i, role in enumerate(ordered):
         if n <= max_usable:
@@ -97,15 +153,19 @@ async def apply_role_hierarchy(
         await guild.edit_role_positions(
             positions=positions, reason="Backup Restore hierarchy"
         )
-        print(f"[Backup] Rollen-Hierarchie gesetzt: {n} Rollen unter Position {bot_top}")
+        print(
+            f"[Backup] Hierarchie OK: {n} Rollen, Reihenfolge wie Snapshot "
+            f"(max pos {max_usable}, Bot bei {bot_top})"
+        )
         return
     except Exception as e:
-        print(f"[Backup] edit_role_positions batch fehlgeschlagen: {e}")
+        print(f"[Backup] edit_role_positions batch: {e}")
 
-    for role, pos in sorted(positions.items(), key=lambda x: x[1], reverse=True):
+    # Fallback: von unten nach oben einzeln
+    for role, pos in sorted(positions.items(), key=lambda x: x[1]):
         try:
             await role.edit(position=pos, reason="Backup Restore hierarchy")
-            await asyncio.sleep(0.35)
+            await asyncio.sleep(0.4)
         except Exception as e:
             print(f"[Backup] Position '{role.name}' -> {pos}: {e}")
 
@@ -122,7 +182,6 @@ async def fetch_icon_b64(guild: discord.Guild) -> Optional[str]:
 
 
 async def apply_guild_branding(guild: discord.Guild, g: dict[str, Any]) -> list[str]:
-    """Stellt Server-Name und Icon wieder her."""
     applied: list[str] = []
     kwargs: dict[str, Any] = {}
 
@@ -159,17 +218,17 @@ async def apply_guild_branding(guild: discord.Guild, g: dict[str, Any]) -> list[
         applied.extend(kwargs.keys())
         print(f"[Backup] Guild branding: {applied}")
     except Exception as e:
-        print(f"[Backup] Guild branding (batch) fehlgeschlagen: {e}")
+        print(f"[Backup] Guild branding batch: {e}")
         if "name" in kwargs:
             try:
                 await guild.edit(name=kwargs["name"], reason="Backup Restore name")
                 applied.append("name")
             except Exception as e2:
-                print(f"[Backup] Guild name fehlgeschlagen: {e2}")
+                print(f"[Backup] Guild name: {e2}")
         if "icon" in kwargs:
             try:
                 await guild.edit(icon=kwargs["icon"], reason="Backup Restore icon")
                 applied.append("icon")
             except Exception as e2:
-                print(f"[Backup] Guild icon fehlgeschlagen: {e2}")
+                print(f"[Backup] Guild icon: {e2}")
     return applied
