@@ -154,6 +154,18 @@ class BackupAdminCog(commands.Cog):
                 await db.commit()
                 return cursor.lastrowid  # type: ignore[return-value]
 
+        # Webhook-Nachrichten (Message-Restore) nicht erneut loggen → kein Double-Count
+        original_store = cog._store_message
+
+        async def store_skip_webhooks(
+            message: discord.Message, *, is_edit: bool = False
+        ) -> None:
+            if getattr(message, "webhook_id", None):
+                return
+            await original_store(message, is_edit=is_edit)
+
+        cog._store_message = store_skip_webhooks  # type: ignore[method-assign]
+
         original_restore = cog._restore_structure
 
         async def restore_with_extras(
@@ -165,7 +177,6 @@ class BackupAdminCog(commands.Cog):
             print(f"[Backup] restore_with_extras START clear_first={clear_first} guild={guild.id}")
 
             progress_channel: Optional[discord.TextChannel] = None
-            # lokale Referenz – kann auf Temp-Channel umgebogen werden
             current_progress = progress_msg
 
             async def bump(text: str, *, done: bool = False, error: bool = False) -> None:
@@ -203,10 +214,8 @@ class BackupAdminCog(commands.Cog):
                     print(f"[Backup] Progress-Channel löschen: {e}")
 
             try:
-                # Bei clear_first: eigenen Progress-Channel anlegen
                 if clear_first:
                     try:
-                        # alte progress-channels aufräumen
                         for ch in list(guild.text_channels):
                             if ch.name == PROGRESS_CHANNEL_NAME:
                                 try:
@@ -229,7 +238,6 @@ class BackupAdminCog(commands.Cog):
                             )
                         )
 
-                        # Original-Followup kurz hinweisen
                         try:
                             await progress_msg.edit(
                                 embed=discord.Embed(
@@ -310,7 +318,6 @@ class BackupAdminCog(commands.Cog):
                     pass
             finally:
                 cog._restore_task = None
-                # Progress-Channel 10s später löschen (auch bei Fehler)
                 if progress_channel is not None:
                     try:
                         await cleanup_progress_channel()
@@ -456,7 +463,7 @@ class BackupAdminCog(commands.Cog):
         cog._save_snapshot = save_snapshot_with_icon  # type: ignore[method-assign]
         cog._restore_structure = restore_with_extras  # type: ignore[method-assign]
 
-        patched = []
+        patched = ["skip-webhooks"]
         for cmd in getattr(cog, "__cog_app_commands__", []):
             if cmd.name == "backup-snapshots":
                 cmd._callback = fixed_snapshots  # type: ignore[attr-defined]
