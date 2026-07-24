@@ -2,5 +2,4 @@
 data/
 docker-compose.yml
 .vscode/settings.json
-data/economy.db
 cogs/__pycache__/economy.cpython-313.pyc
