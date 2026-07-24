@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import time
 import asyncio
 import aiosqlite
 import discord
@@ -20,6 +21,12 @@ try:
         save_channel_id_map,
     )
     from utils.message_restore import count_messages
+    from utils.structure_helpers import (
+        build_overwrites,
+        apply_role_hierarchy,
+        apply_guild_branding,
+        fetch_icon_b64,
+    )
 except ImportError:
     from ..utils.backup_ops import (
         add_excluded_channel,
@@ -30,38 +37,15 @@ except ImportError:
         save_channel_id_map,
     )
     from ..utils.message_restore import count_messages
+    from ..utils.structure_helpers import (
+        build_overwrites,
+        apply_role_hierarchy,
+        apply_guild_branding,
+        fetch_icon_b64,
+    )
 
 BACKUP_DB_PATH = os.getenv("BACKUP_DATA_PATH", "data/backup.db")
 ATTACHMENTS_DIR = os.getenv("BACKUP_ATTACHMENTS_PATH", "data/backups/attachments")
-
-
-class _AlwaysTruthyDict(dict):
-    def __bool__(self) -> bool:
-        return True
-
-
-class CrossRestoreConfirmView(discord.ui.View):
-    def __init__(self) -> None:
-        super().__init__(timeout=60)
-        self.confirmed = False
-
-    @discord.ui.button(label="✅ Wiederherstellen", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        self.confirmed = True
-        for child in self.children:
-            child.disabled = True  # type: ignore[attr-defined]
-        await interaction.response.edit_message(view=self)
-        self.stop()
-
-    @discord.ui.button(label="❌ Abbrechen", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        self.confirmed = False
-        for child in self.children:
-            child.disabled = True  # type: ignore[attr-defined]
-        await interaction.response.edit_message(
-            content="Restore abgebrochen.", embed=None, view=None
-        )
-        self.stop()
 
 
 class MessageRestoreConfirmView(discord.ui.View):
@@ -89,7 +73,7 @@ class MessageRestoreConfirmView(discord.ui.View):
 
 
 class BackupAdminCog(commands.Cog):
-    """Admin + Single-Guild Disaster-Recovery (eine Instanz = eine Guild)."""
+    """Admin-Hilfen + Patches für Single-Guild Disaster-Recovery."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -136,34 +120,74 @@ class BackupAdminCog(commands.Cog):
                 return None
             return json.loads(row[0])
 
-        def fixed_build_overwrites(
-            guild: discord.Guild,
-            overwrites_data: list[dict[str, Any]],
-            role_map: dict[int, int],
-        ) -> dict:
-            result: _AlwaysTruthyDict = _AlwaysTruthyDict()
-            for ow in overwrites_data:
-                target: Optional[discord.abc.Snowflake] = None
-                if ow.get("type") == "role":
-                    old_id = ow["id"]
-                    mapped = role_map.get(old_id)
-                    if old_id == guild.id or mapped == guild.default_role.id:
-                        target = guild.default_role
-                    elif mapped:
-                        target = guild.get_role(mapped)
-                elif ow.get("type") == "member":
-                    member = guild.get_member(ow["id"])
-                    if member:
-                        target = member
-                if target is None:
-                    continue
-                result[target] = discord.PermissionOverwrite.from_pair(
-                    discord.Permissions(ow.get("allow", 0)),
-                    discord.Permissions(ow.get("deny", 0)),
-                )
-            return result
+        original_save = cog._save_snapshot
 
-        # Cog-Callbacks: discord.py ruft (cog, interaction, **opts) auf
+        async def save_snapshot_with_icon(
+            guild: discord.Guild,
+            name: Optional[str],
+            created_by: int,
+        ) -> int:
+            data = cog._build_structure_snapshot(guild)
+            icon_b64 = await fetch_icon_b64(guild)
+            if icon_b64:
+                data.setdefault("guild", {})["icon_b64"] = icon_b64
+            data_json = json.dumps(data, ensure_ascii=False)
+            if not name:
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                name = f"Snapshot {ts}"
+            async with aiosqlite.connect(db_path) as db:
+                cursor = await db.execute(
+                    """
+                    INSERT INTO snapshots (guild_id, name, created_at, created_by, data)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (guild.id, name, int(time.time()), created_by, data_json),
+                )
+                await db.commit()
+                return cursor.lastrowid  # type: ignore[return-value]
+
+        original_restore = cog._restore_structure
+
+        async def restore_with_extras(
+            guild: discord.Guild,
+            data: dict[str, Any],
+            progress_msg: discord.WebhookMessage | discord.Message,
+            clear_first: bool,
+        ) -> None:
+            await original_restore(guild, data, progress_msg, clear_first)
+
+            # Hierarchie korrigieren (Reihenfolge wie Snapshot, unter Bot-Rolle)
+            try:
+                await apply_role_hierarchy(guild, data.get("roles") or [])
+            except Exception as e:
+                print(f"[Backup] Hierarchie-Nachbearbeitung: {e}")
+
+            # Name + Icon
+            try:
+                await apply_guild_branding(guild, data.get("guild") or {})
+            except Exception as e:
+                print(f"[Backup] Branding-Nachbearbeitung: {e}")
+
+            # Channel-Map für Message-Restore
+            try:
+                mapping: dict[int, int] = {}
+                for ch_data in list(data.get("channels", [])) + list(
+                    data.get("categories", [])
+                ):
+                    old_id = ch_data.get("id")
+                    ch_name = ch_data.get("name")
+                    if not old_id or not ch_name:
+                        continue
+                    for c in guild.channels:
+                        if c.name == ch_name:
+                            mapping[int(old_id)] = c.id
+                            break
+                if mapping:
+                    await save_channel_id_map(db_path, guild.id, mapping)
+                    print(f"[Backup] channel_id_map: {len(mapping)} Einträge")
+            except Exception as e:
+                print(f"[Backup] channel_id_map: {e}")
+
         async def fixed_snapshots(
             _cog: Any, interaction: discord.Interaction
         ) -> None:
@@ -172,7 +196,7 @@ class BackupAdminCog(commands.Cog):
                 async with aiosqlite.connect(db_path) as db:
                     async with db.execute(
                         """
-                        SELECT id, name, created_at, guild_id
+                        SELECT id, name, created_at, guild_id, data
                         FROM snapshots ORDER BY created_at DESC LIMIT 25
                         """
                     ) as cur:
@@ -188,15 +212,23 @@ class BackupAdminCog(commands.Cog):
                 return
 
             lines = []
-            for snap_id, name, created_at, src in rows:
+            for snap_id, snap_name, created_at, src, data_json in rows:
                 ts = datetime.fromtimestamp(created_at, tz=timezone.utc).strftime(
                     "%Y-%m-%d %H:%M UTC"
                 )
+                server_name = "?"
+                try:
+                    g = (json.loads(data_json).get("guild") or {})
+                    server_name = g.get("name") or "?"
+                except Exception:
+                    pass
                 lines.append(
-                    f"**#{snap_id}** · {name or 'Unbenannt'} · `{ts}` · guild `{src}`"
+                    f"**#{snap_id}** · {snap_name or 'Unbenannt'} · `{ts}`\n"
+                    f"└ Server: **{server_name}** · guild `{src}`"
                 )
+
             embed = discord.Embed(
-                title="📦 Struktur-Snapshots (Instanz)",
+                title="📦 Struktur-Snapshots",
                 description="\n".join(lines),
                 color=discord.Color.blurple(),
             )
@@ -210,7 +242,6 @@ class BackupAdminCog(commands.Cog):
             match_by_name: bool = True,
             snapshot_id: Optional[int] = None,
         ) -> None:
-            # Sofort defer, damit Discord nicht „reagiert nicht“ zeigt
             await interaction.response.defer(ephemeral=True)
 
             if not interaction.guild:
@@ -242,7 +273,7 @@ class BackupAdminCog(commands.Cog):
                 if total == 0:
                     total = await count_messages(db_path, None)
             except Exception as e:
-                await interaction.followup.send(f"❌ Fehler beim Laden: `{e}`", ephemeral=True)
+                await interaction.followup.send(f"❌ Fehler: `{e}`", ephemeral=True)
                 return
 
             if total == 0:
@@ -262,19 +293,14 @@ class BackupAdminCog(commands.Cog):
                     f"Ziel: {scope}\n"
                     f"Limit: {limit_txt}\n"
                     f"Name-Match: **{'an' if match_by_name else 'aus'}**\n\n"
-                    "Daten aus der **Instanz-DB** (auch nach Server-Rebuild).\n"
                     "Webhook · Original-Name/Avatar · Mentions aus."
                 ),
                 color=discord.Color.orange(),
             )
 
             view = MessageRestoreConfirmView()
-            # Nach defer: Confirm über followup + View
-            msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True, wait=True)
-            # View an die Message binden (falls nötig)
-            view.message = msg  # type: ignore[attr-defined]
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
             await view.wait()
-
             if not view.confirmed:
                 return
 
@@ -301,7 +327,9 @@ class BackupAdminCog(commands.Cog):
 
         cog._load_snapshot = load_snapshot_by_id  # type: ignore[method-assign]
         cog._load_latest_snapshot_data = load_latest_any  # type: ignore[method-assign]
-        cog._build_overwrites = fixed_build_overwrites  # type: ignore[method-assign]
+        cog._build_overwrites = build_overwrites  # type: ignore[method-assign]
+        cog._save_snapshot = save_snapshot_with_icon  # type: ignore[method-assign]
+        cog._restore_structure = restore_with_extras  # type: ignore[method-assign]
 
         patched = []
         for cmd in getattr(cog, "__cog_app_commands__", []):
@@ -312,35 +340,20 @@ class BackupAdminCog(commands.Cog):
                 cmd._callback = fixed_restore_messages  # type: ignore[attr-defined]
                 patched.append("backup-restore-messages")
 
-        # Tree: _callback falls vorhanden (kein .callback Setter!)
         for cmd in self.bot.tree.get_commands():
             if cmd.name in ("backup-snapshots", "backup-restore-messages"):
                 if hasattr(cmd, "_callback"):
-                    if cmd.name == "backup-snapshots":
-                        cmd._callback = fixed_snapshots  # type: ignore[attr-defined]
-                    else:
-                        cmd._callback = fixed_restore_messages  # type: ignore[attr-defined]
+                    cmd._callback = (  # type: ignore[attr-defined]
+                        fixed_snapshots
+                        if cmd.name == "backup-snapshots"
+                        else fixed_restore_messages
+                    )
                     if cmd.name not in patched:
                         patched.append(cmd.name)
 
         print(
-            f"[BackupAdmin] Patches OK: methods + commands {patched or '(nur methods)'}"
+            f"[BackupAdmin] Patches: hierarchy+branding+icon · commands {patched}"
         )
-
-    async def _load_snapshot_any(self, snapshot_id: int) -> Optional[dict[str, Any]]:
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(
-                "SELECT name, data, guild_id FROM snapshots WHERE id = ?",
-                (snapshot_id,),
-            ) as cur:
-                row = await cur.fetchone()
-        if not row:
-            return None
-        return {
-            "name": row[0],
-            "data": json.loads(row[1]),
-            "source_guild_id": int(row[2]),
-        }
 
     # ---------- Exclude ----------
 
@@ -407,123 +420,6 @@ class BackupAdminCog(commands.Cog):
                 color=discord.Color.orange(),
             ),
             ephemeral=True,
-        )
-
-    @app_commands.command(
-        name="backup-snapshots-all",
-        description="Listet alle Struktur-Snapshots dieser Bot-Instanz",
-    )
-    @app_commands.default_permissions(administrator=True)
-    async def backup_snapshots_all(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(
-                """
-                SELECT id, name, created_at, guild_id
-                FROM snapshots ORDER BY created_at DESC LIMIT 25
-                """
-            ) as cur:
-                rows = await cur.fetchall()
-        if not rows:
-            await interaction.followup.send("Keine Snapshots in der DB.", ephemeral=True)
-            return
-        lines = []
-        for snap_id, name, created_at, src_guild in rows:
-            ts = datetime.fromtimestamp(created_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            lines.append(
-                f"**#{snap_id}** · {name or 'Unbenannt'} · `{ts}` · alte guild_id: `{src_guild}`"
-            )
-        embed = discord.Embed(
-            title="📦 Struktur-Snapshots (Instanz)",
-            description="\n".join(lines),
-            color=discord.Color.blurple(),
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @app_commands.command(
-        name="backup-restore-cross",
-        description="Struktur neu aufbauen (auch nach Server-Löschung / neuer Guild-ID)",
-    )
-    @app_commands.describe(
-        snapshot_id="Snapshot-ID",
-        clear_first="Bestehende Channels/Rollen vorher löschen",
-    )
-    @app_commands.default_permissions(administrator=True)
-    async def backup_restore_cross(
-        self,
-        interaction: discord.Interaction,
-        snapshot_id: int,
-        clear_first: bool = False,
-    ) -> None:
-        if not interaction.guild:
-            await interaction.response.send_message("Nur auf einem Server.", ephemeral=True)
-            return
-
-        backup_cog = self.bot.get_cog("BackupCog")
-        if backup_cog is None:
-            await interaction.response.send_message("❌ BackupCog nicht geladen.", ephemeral=True)
-            return
-
-        if getattr(backup_cog, "_restore_task", None) and not backup_cog._restore_task.done():
-            await interaction.response.send_message("⚠️ Ein Restore läuft bereits.", ephemeral=True)
-            return
-
-        snap = await self._load_snapshot_any(snapshot_id)
-        if not snap:
-            await interaction.response.send_message(
-                f"❌ Snapshot **#{snapshot_id}** nicht in der DB.",
-                ephemeral=True,
-            )
-            return
-
-        data = snap["data"]
-        role_count = len([r for r in data.get("roles", []) if not r.get("managed")])
-        cat_count = len(data.get("categories", []))
-        ch_count = len(data.get("channels", []))
-        src = snap["source_guild_id"]
-
-        warning = "\n\n⚠️ **clear_first**: Channels/Rollen werden gelöscht." if clear_first else ""
-
-        embed = discord.Embed(
-            title="⚠️ Struktur-Restore (Disaster Recovery)",
-            description=(
-                f"Snapshot **#{snapshot_id}** – {snap['name'] or 'Unbenannt'}\n"
-                f"Alte guild_id: `{src}` → Ziel: **{interaction.guild.name}**\n\n"
-                f"Rollen: **{role_count}** · Kategorien: **{cat_count}** · Channels: **{ch_count}**"
-                f"{warning}"
-            ),
-            color=discord.Color.orange(),
-        )
-
-        view = CrossRestoreConfirmView()
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-        await view.wait()
-        if not view.confirmed:
-            return
-
-        progress_msg = await interaction.followup.send(
-            embed=discord.Embed(title="🔄 Struktur-Restore startet…", color=discord.Color.orange()),
-            ephemeral=False,
-        )
-
-        async def wrapped(guild, data, progress_msg, clear_first):
-            await backup_cog._restore_structure(guild, data, progress_msg, clear_first)
-            mapping: dict[int, int] = {}
-            for ch_data in list(data.get("channels", [])) + list(data.get("categories", [])):
-                old_id = ch_data.get("id")
-                name = ch_data.get("name")
-                if not old_id or not name:
-                    continue
-                for c in guild.channels:
-                    if c.name == name:
-                        mapping[int(old_id)] = c.id
-                        break
-            if mapping:
-                await save_channel_id_map(self.db_path, guild.id, mapping)
-                print(f"[Backup] channel_id_map: {len(mapping)} Einträge")
-
-        backup_cog._restore_task = asyncio.create_task(
-            wrapped(interaction.guild, data, progress_msg, clear_first)
         )
 
     @app_commands.command(
