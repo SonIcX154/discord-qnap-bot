@@ -20,7 +20,6 @@ try:
         download_missing_attachments,
         ensure_extra_tables,
         save_channel_id_map,
-        is_guild_excluded,
         add_excluded_guild,
         remove_excluded_guild,
         list_excluded_guilds,
@@ -36,7 +35,6 @@ try:
         dedupe_roles_by_name,
         convert_to_news_channels,
     )
-    from cogs.backup_restore_cmd import register_backup_restore
 except ImportError:
     from ..utils.backup_ops import (
         add_excluded_channel,
@@ -45,7 +43,6 @@ except ImportError:
         download_missing_attachments,
         ensure_extra_tables,
         save_channel_id_map,
-        is_guild_excluded,
         add_excluded_guild,
         remove_excluded_guild,
         list_excluded_guilds,
@@ -61,7 +58,6 @@ except ImportError:
         dedupe_roles_by_name,
         convert_to_news_channels,
     )
-    from .backup_restore_cmd import register_backup_restore
 
 BACKUP_DB_PATH = os.getenv("BACKUP_DATA_PATH", "data/backup.db")
 ATTACHMENTS_DIR = os.getenv("BACKUP_ATTACHMENTS_PATH", "data/backups/attachments")
@@ -93,7 +89,7 @@ class MessageRestoreConfirmView(discord.ui.View):
 
 
 class BackupAdminCog(commands.Cog):
-    """Admin-Hilfen + Patches für Single-Guild Disaster-Recovery."""
+    """Admin-Hilfen + gezielt erweiterte Restore-Logik für Disaster-Recovery."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -182,19 +178,8 @@ class BackupAdminCog(commands.Cog):
                 await db.commit()
                 return cursor.lastrowid  # type: ignore[return-value]
 
-        original_store = cog._store_message
-
-        async def store_filtered(
-            message: discord.Message, *, is_edit: bool = False
-        ) -> None:
-            if message.guild and await is_guild_excluded(db_path, message.guild.id):
-                return
-            task = getattr(cog, "_msg_restore_task", None)
-            if task is not None and not task.done():
-                return
-            await original_store(message, is_edit=is_edit)
-
-        cog._store_message = store_filtered  # type: ignore[method-assign]
+        # NOTE: store_message excludes + msg-restore skip are now in core BackupCog.
+        # We only enhance structure restore + a few command behaviours.
 
         original_restore = cog._restore_structure
 
@@ -517,7 +502,9 @@ class BackupAdminCog(commands.Cog):
         cog._save_snapshot = save_snapshot_with_icon  # type: ignore[method-assign]
         cog._restore_structure = restore_with_extras  # type: ignore[method-assign]
 
-        patched = ["guild-exclude", "news-channels", "as_of-deleted_at"]
+        # Soft-patch only the two commands that need cross-guild / as_of behaviour.
+        # /backup-restore stays the core version (optional id + confirm_clear=DELETE).
+        patched = ["restore_extras", "icon_snapshot", "as_of-deleted_at"]
         for cmd in getattr(cog, "__cog_app_commands__", []):
             if cmd.name == "backup-snapshots":
                 cmd._callback = fixed_snapshots  # type: ignore[attr-defined]
@@ -537,27 +524,6 @@ class BackupAdminCog(commands.Cog):
                 )
                 if cmd.name not in patched:
                     patched.append(cmd.name)
-
-        try:
-            if hasattr(cog, "__cog_app_commands__"):
-                cog.__cog_app_commands__[:] = [
-                    c for c in cog.__cog_app_commands__ if c.name != "backup-restore"
-                ]
-            existing = self.bot.tree.get_command("backup-restore")
-            if existing is not None:
-                self.bot.tree.remove_command("backup-restore")
-
-            new_cmd = register_backup_restore(self.bot, db_path)
-            self.bot.tree.add_command(new_cmd)
-            patched.append("backup-restore(optional id)")
-
-            try:
-                await self.bot.tree.sync()
-                print("[BackupAdmin] tree.sync nach backup-restore Update")
-            except Exception as e:
-                print(f"[BackupAdmin] tree.sync: {e}")
-        except Exception as e:
-            print(f"[BackupAdmin] backup-restore replace fehlgeschlagen: {e}")
 
         print(f"[BackupAdmin] Patches OK: {patched}")
 
