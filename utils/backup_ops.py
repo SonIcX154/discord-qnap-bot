@@ -43,6 +43,12 @@ async def ensure_extra_tables(db_path: str) -> None:
                 reason      TEXT,
                 created_at  INTEGER
             );
+
+            CREATE TABLE IF NOT EXISTS excluded_guilds (
+                guild_id    INTEGER PRIMARY KEY,
+                reason      TEXT,
+                created_at  INTEGER
+            );
         """)
         await db.commit()
 
@@ -76,6 +82,54 @@ async def is_channel_excluded(db_path: str, channel_id: int) -> bool:
                 return await cur.fetchone() is not None
         except aiosqlite.OperationalError:
             return False
+
+
+async def is_guild_excluded(db_path: str, guild_id: int) -> bool:
+    async with aiosqlite.connect(db_path) as db:
+        try:
+            async with db.execute(
+                "SELECT 1 FROM excluded_guilds WHERE guild_id = ?",
+                (guild_id,),
+            ) as cur:
+                return await cur.fetchone() is not None
+        except aiosqlite.OperationalError:
+            return False
+
+
+async def add_excluded_guild(
+    db_path: str, guild_id: int, reason: Optional[str] = None
+) -> None:
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            INSERT INTO excluded_guilds (guild_id, reason, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET reason = excluded.reason
+            """,
+            (guild_id, reason, int(time.time())),
+        )
+        await db.commit()
+
+
+async def remove_excluded_guild(db_path: str, guild_id: int) -> bool:
+    async with aiosqlite.connect(db_path) as db:
+        cur = await db.execute(
+            "DELETE FROM excluded_guilds WHERE guild_id = ?", (guild_id,)
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def list_excluded_guilds(db_path: str) -> list[tuple[int, Optional[str]]]:
+    async with aiosqlite.connect(db_path) as db:
+        try:
+            async with db.execute(
+                "SELECT guild_id, reason FROM excluded_guilds"
+            ) as cur:
+                rows = await cur.fetchall()
+        except aiosqlite.OperationalError:
+            return []
+    return [(int(r[0]), r[1]) for r in rows]
 
 
 async def add_excluded_channel(
@@ -148,10 +202,6 @@ async def download_missing_attachments(
     limit: int = 500,
     on_progress: Optional[Callable[[int, int, int], Awaitable[None]]] = None,
 ) -> dict[str, int]:
-    """
-    Lädt fehlende Attachments anhand der gespeicherten CDN-URL nach.
-    Returns stats: checked, downloaded, failed, already_ok.
-    """
     query = "SELECT message_id, attachments FROM messages WHERE attachments IS NOT NULL AND is_deleted = 0"
     params: list[Any] = []
     if guild_id is not None:
