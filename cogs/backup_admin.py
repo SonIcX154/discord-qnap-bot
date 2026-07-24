@@ -104,6 +104,23 @@ class BackupAdminCog(commands.Cog):
         await ensure_extra_tables(self.db_path)
         self.bot.loop.create_task(self._patch_backup_cog())
 
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
+        """deleted_at setzen (Point-in-Time Restore). is_deleted macht BackupCog parallel."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    """
+                    UPDATE messages
+                    SET is_deleted = 1, deleted_at = COALESCE(deleted_at, ?)
+                    WHERE message_id = ?
+                    """,
+                    (int(time.time()), payload.message_id),
+                )
+                await db.commit()
+        except Exception as e:
+            print(f"[Backup] deleted_at update: {e}")
+
     async def _patch_backup_cog(self) -> None:
         await asyncio.sleep(2)
         cog = self.bot.get_cog("BackupCog")
@@ -118,7 +135,7 @@ class BackupAdminCog(commands.Cog):
         ) -> Optional[dict[str, Any]]:
             async with aiosqlite.connect(db_path) as db:
                 async with db.execute(
-                    "SELECT name, data, guild_id FROM snapshots WHERE id = ?",
+                    "SELECT name, data, guild_id, created_at FROM snapshots WHERE id = ?",
                     (snapshot_id,),
                 ) as cur:
                     row = await cur.fetchone()
@@ -128,6 +145,7 @@ class BackupAdminCog(commands.Cog):
                 "name": row[0],
                 "data": json.loads(row[1]),
                 "source_guild_id": int(row[2]),
+                "created_at": int(row[3]),
             }
 
         async def load_latest_any(guild_id: Optional[int] = None) -> Optional[dict[str, Any]]:
@@ -413,15 +431,21 @@ class BackupAdminCog(commands.Cog):
                 return
 
             snapshot_data: Optional[dict[str, Any]] = None
+            as_of: Optional[int] = None
             try:
                 if snapshot_id is not None:
                     snap = await load_snapshot_by_id(int(snapshot_id))
                     if snap:
                         snapshot_data = snap["data"]
+                        as_of = snap.get("created_at")
                 else:
+                    # Nur Namens-Mapping vom neuesten Snapshot; Messages = alles inkl. gelöschte
                     snapshot_data = await load_latest_any()
+                    as_of = None
 
-                total = await count_messages(db_path, None)
+                total = await count_messages(
+                    db_path, None, as_of=as_of, include_deleted=(as_of is None)
+                )
             except Exception as e:
                 await interaction.response.send_message(
                     f"❌ Fehler: `{e}`", ephemeral=True
@@ -437,14 +461,22 @@ class BackupAdminCog(commands.Cog):
 
             scope = f"nur **#{channel.name}**" if channel else "**alle Channels**"
             limit_txt = f"max. **{limit}**/Channel" if limit else "**alle** Nachrichten"
+            if as_of:
+                ts = datetime.fromtimestamp(as_of, tz=timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M UTC"
+                )
+                time_txt = f"Stand Snapshot **#{snapshot_id}** (`{ts}`) – auch später gelöschte"
+            else:
+                time_txt = "**Disaster-Modus**: alle Messages inkl. gelöschte (kein Snapshot-Zeitpunkt)"
 
             embed = discord.Embed(
                 title="⚠️ Nachrichten-Restore bestätigen",
                 description=(
-                    f"Gespeicherte Nachrichten: **{total:,}**\n"
+                    f"Nachrichten: **{total:,}**\n"
                     f"Ziel: {scope}\n"
                     f"Limit: {limit_txt}\n"
-                    f"Name-Match: **{'an' if match_by_name else 'aus'}**\n\n"
+                    f"Name-Match: **{'an' if match_by_name else 'aus'}**\n"
+                    f"Zeitpunkt: {time_txt}\n\n"
                     "Webhook · Name • Timestamp · Avatar · Mentions aus."
                 ),
                 color=discord.Color.orange(),
@@ -474,6 +506,8 @@ class BackupAdminCog(commands.Cog):
                     match_by_name=match_by_name,
                     snapshot_data=snapshot_data,
                     source_guild_id=None,
+                    as_of=as_of,
+                    include_deleted=(as_of is None),
                 )
             )
 
@@ -483,7 +517,7 @@ class BackupAdminCog(commands.Cog):
         cog._save_snapshot = save_snapshot_with_icon  # type: ignore[method-assign]
         cog._restore_structure = restore_with_extras  # type: ignore[method-assign]
 
-        patched = ["guild-exclude+restore-mute", "news-channels"]
+        patched = ["guild-exclude", "news-channels", "as_of-deleted_at"]
         for cmd in getattr(cog, "__cog_app_commands__", []):
             if cmd.name == "backup-snapshots":
                 cmd._callback = fixed_snapshots  # type: ignore[attr-defined]
