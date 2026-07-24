@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import json
 import time
-import types
 import asyncio
 import aiosqlite
 import discord
@@ -30,6 +29,7 @@ try:
         clear_manageable_roles,
         dedupe_roles_by_name,
     )
+    from cogs.backup_restore_cmd import register_backup_restore
 except ImportError:
     from ..utils.backup_ops import (
         add_excluded_channel,
@@ -48,6 +48,7 @@ except ImportError:
         clear_manageable_roles,
         dedupe_roles_by_name,
     )
+    from .backup_restore_cmd import register_backup_restore
 
 BACKUP_DB_PATH = os.getenv("BACKUP_DATA_PATH", "data/backup.db")
 ATTACHMENTS_DIR = os.getenv("BACKUP_ATTACHMENTS_PATH", "data/backups/attachments")
@@ -90,7 +91,7 @@ class BackupAdminCog(commands.Cog):
         self.bot.loop.create_task(self._patch_backup_cog())
 
     async def _patch_backup_cog(self) -> None:
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)  # nach tree.sync der anderen Commands
         cog = self.bot.get_cog("BackupCog")
         if cog is None:
             print("[BackupAdmin] BackupCog nicht gefunden – Patch übersprungen")
@@ -152,9 +153,7 @@ class BackupAdminCog(commands.Cog):
         original_clear = cog._clear_guild_structure
 
         async def clear_with_roles(guild: discord.Guild) -> tuple[int, int]:
-            # Channels wie bisher
             dc, _ = await original_clear(guild)
-            # Rollen aggressiver / nochmal (original löscht evtl. zu wenig)
             dr = await clear_manageable_roles(guild)
             return dc, dr
 
@@ -166,7 +165,6 @@ class BackupAdminCog(commands.Cog):
             progress_msg: discord.WebhookMessage | discord.Message,
             clear_first: bool,
         ) -> None:
-            # create_role: existierende Rolle gleichen Namens wiederverwenden
             original_create_role = guild.create_role
 
             async def create_role_reuse(*args: Any, **kwargs: Any) -> discord.Role:
@@ -199,7 +197,6 @@ class BackupAdminCog(commands.Cog):
                 if clear_first:
                     extra = await clear_manageable_roles(guild)
                     print(f"[Backup] Extra Rollen-Clear: {extra}")
-
                 await original_restore(guild, data, progress_msg, clear_first)
             finally:
                 guild.create_role = original_create_role  # type: ignore[method-assign]
@@ -290,7 +287,6 @@ class BackupAdminCog(commands.Cog):
             match_by_name: bool = True,
             snapshot_id: Optional[int] = None,
         ) -> None:
-            # KEIN defer vor Confirm – sonst Timing/View-Probleme
             if not interaction.guild:
                 await interaction.response.send_message(
                     "Nur auf einem Server nutzbar.", ephemeral=True
@@ -304,8 +300,6 @@ class BackupAdminCog(commands.Cog):
                 return
 
             snapshot_data: Optional[dict[str, Any]] = None
-            # Immer instanz-weit (eine Instanz = ein logischer Server)
-            source_guild_id: Optional[int] = None
             try:
                 if snapshot_id is not None:
                     snap = await load_snapshot_by_id(int(snapshot_id))
@@ -366,7 +360,7 @@ class BackupAdminCog(commands.Cog):
                     limit_per_channel=int(limit) if limit else None,
                     match_by_name=match_by_name,
                     snapshot_data=snapshot_data,
-                    source_guild_id=None,  # gesamte Instanz-DB
+                    source_guild_id=None,
                 )
             )
 
@@ -398,7 +392,31 @@ class BackupAdminCog(commands.Cog):
                 if cmd.name not in patched:
                     patched.append(cmd.name)
 
-        print(f"[BackupAdmin] Patches OK: roles+messages · {patched}")
+        # --- backup-restore: optional snapshot_id (leer = neuester) ---
+        try:
+            # Alte Variante (required snapshot_id) entfernen
+            if hasattr(cog, "__cog_app_commands__"):
+                cog.__cog_app_commands__[:] = [
+                    c for c in cog.__cog_app_commands__ if c.name != "backup-restore"
+                ]
+            existing = self.bot.tree.get_command("backup-restore")
+            if existing is not None:
+                self.bot.tree.remove_command("backup-restore")
+
+            new_cmd = register_backup_restore(self.bot, db_path)
+            self.bot.tree.add_command(new_cmd)
+            patched.append("backup-restore(optional id)")
+
+            # Nochmal syncen, damit Discord optional sieht
+            try:
+                await self.bot.tree.sync()
+                print("[BackupAdmin] tree.sync nach backup-restore Update")
+            except Exception as e:
+                print(f"[BackupAdmin] tree.sync: {e}")
+        except Exception as e:
+            print(f"[BackupAdmin] backup-restore replace fehlgeschlagen: {e}")
+
+        print(f"[BackupAdmin] Patches OK: {patched}")
 
     # ---------- Exclude / missing ----------
 
