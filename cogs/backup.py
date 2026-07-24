@@ -14,8 +14,18 @@ from datetime import datetime, timezone
 
 try:
     from utils.message_restore import run_message_restore
+    from utils.backup_ops import (
+        is_channel_excluded,
+        is_guild_excluded,
+        ensure_extra_tables,
+    )
 except ImportError:
     from ..utils.message_restore import run_message_restore
+    from ..utils.backup_ops import (
+        is_channel_excluded,
+        is_guild_excluded,
+        ensure_extra_tables,
+    )
 
 BACKUP_DB_PATH = os.getenv("BACKUP_DATA_PATH", "data/backup.db")
 ATTACHMENTS_DIR = os.getenv("BACKUP_ATTACHMENTS_PATH", "data/backups/attachments")
@@ -23,6 +33,7 @@ ATTACHMENTS_DIR = os.getenv("BACKUP_ATTACHMENTS_PATH", "data/backups/attachments
 BACKFILL_BATCH_SIZE = 100
 BACKFILL_DELAY = 1.1
 RESTORE_DELAY = 0.4
+ATTACHMENT_MAX_RETRIES = 2
 
 
 def _safe_filename(name: str) -> str:
@@ -35,7 +46,7 @@ class RestoreConfirmView(discord.ui.View):
     """Bestätigung vor dem Struktur-Restore."""
 
     def __init__(self, cog: "BackupCog", snapshot_id: int, clear_first: bool) -> None:
-        super().__init__(timeout=60)
+        super().__init__(timeout=90)
         self.cog = cog
         self.snapshot_id = snapshot_id
         self.clear_first = clear_first
@@ -66,7 +77,7 @@ class MessageRestoreConfirmView(discord.ui.View):
     """Bestätigung vor dem Nachrichten-Restore."""
 
     def __init__(self) -> None:
-        super().__init__(timeout=60)
+        super().__init__(timeout=90)
         self.confirmed = False
 
     @discord.ui.button(label="✅ Nachrichten wiederherstellen", style=discord.ButtonStyle.danger)
@@ -112,6 +123,11 @@ class BackupCog(commands.Cog):
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
         await self._init_db()
+        # Extra tables (excludes, channel_id_map, restored_messages, deleted_at)
+        try:
+            await ensure_extra_tables(self.db_path)
+        except Exception as e:
+            print(f"[Backup] ensure_extra_tables: {e}")
         print(f"[Backup] Cog loaded. DB: {self.db_path}")
         self.bot.loop.create_task(self._wait_and_catchup())
 
@@ -152,6 +168,9 @@ class BackupCog(commands.Cog):
                 CREATE INDEX IF NOT EXISTS idx_messages_channel_created
                     ON messages(channel_id, created_at);
 
+                CREATE INDEX IF NOT EXISTS idx_messages_guild
+                    ON messages(guild_id);
+
                 CREATE TABLE IF NOT EXISTS snapshots (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
                     guild_id        INTEGER NOT NULL,
@@ -190,11 +209,23 @@ class BackupCog(commands.Cog):
                 result.append(entry)
                 continue
 
-            try:
-                await att.save(local_path)
-                entry["local_path"] = local_path
-            except Exception as e:
-                print(f"[Backup] Attachment-Download fehlgeschlagen ({message.id}/{att.filename}): {e}")
+            # Retry a couple of times – CDN / transient errors are common
+            last_err: Optional[Exception] = None
+            for attempt in range(ATTACHMENT_MAX_RETRIES):
+                try:
+                    await att.save(local_path)
+                    if os.path.isfile(local_path) and os.path.getsize(local_path) > 0:
+                        entry["local_path"] = local_path
+                        break
+                except Exception as e:
+                    last_err = e
+                    await asyncio.sleep(0.4 * (attempt + 1))
+
+            if entry["local_path"] is None and last_err is not None:
+                print(
+                    f"[Backup] Attachment-Download fehlgeschlagen "
+                    f"({message.id}/{att.filename}) after {ATTACHMENT_MAX_RETRIES} tries: {last_err}"
+                )
 
             result.append(entry)
 
@@ -207,6 +238,22 @@ class BackupCog(commands.Cog):
             return
 
         if self.bot.user and message.author.id == self.bot.user.id:
+            return
+
+        # Respect guild / channel excludes (tables created by ensure_extra_tables)
+        try:
+            if await is_guild_excluded(self.db_path, message.guild.id):
+                return
+            if await is_channel_excluded(self.db_path, message.channel.id):
+                return
+        except Exception:
+            # Table may not exist yet on very first start – fail open for logging
+            pass
+
+        # Skip logging while a message-restore is running on this process
+        # (prevents the bot from re-logging its own webhook messages)
+        task = self._msg_restore_task
+        if task is not None and not task.done():
             return
 
         embeds_json = (
@@ -298,10 +345,22 @@ class BackupCog(commands.Cog):
     async def _catchup_all_guilds(self) -> None:
         async with self._catchup_lock:
             for guild in self.bot.guilds:
+                try:
+                    if await is_guild_excluded(self.db_path, guild.id):
+                        print(f"[Backup] Catch-up übersprungen (guild excluded): {guild.name}")
+                        continue
+                except Exception:
+                    pass
+
                 print(f"[Backup] Catch-up für {guild.name}...")
                 for channel in guild.text_channels:
                     if not channel.permissions_for(guild.me).read_message_history:
                         continue
+                    try:
+                        if await is_channel_excluded(self.db_path, channel.id):
+                            continue
+                    except Exception:
+                        pass
                     try:
                         await self._catchup_channel(channel)
                     except Exception as e:
@@ -405,10 +464,32 @@ class BackupCog(commands.Cog):
             "messages_this_run": 0,
         }
 
-        channels = [
-            c for c in guild.text_channels
-            if c.permissions_for(guild.me).read_message_history
-        ]
+        try:
+            if await is_guild_excluded(self.db_path, guild.id):
+                embed = discord.Embed(
+                    title="⚠️ Backfill übersprungen",
+                    description="Dieser Server ist vom Backup ausgeschlossen (`/backup-exclude-guild`).",
+                    color=discord.Color.orange(),
+                )
+                try:
+                    await progress_msg.edit(embed=embed)
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
+
+        channels = []
+        for c in guild.text_channels:
+            if not c.permissions_for(guild.me).read_message_history:
+                continue
+            try:
+                if await is_channel_excluded(self.db_path, c.id):
+                    continue
+            except Exception:
+                pass
+            channels.append(c)
+
         self._backfill_status["channels_total"] = len(channels)
 
         try:
@@ -609,29 +690,47 @@ class BackupCog(commands.Cog):
             await db.commit()
             return cursor.lastrowid  # type: ignore[return-value]
 
-    async def _load_snapshot(self, snapshot_id: int, guild_id: int) -> Optional[dict[str, Any]]:
+    async def _load_snapshot(self, snapshot_id: int, guild_id: Optional[int] = None) -> Optional[dict[str, Any]]:
         async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(
-                "SELECT name, data FROM snapshots WHERE id = ? AND guild_id = ?",
-                (snapshot_id, guild_id),
-            ) as cur:
-                row = await cur.fetchone()
+            if guild_id is not None:
+                async with db.execute(
+                    "SELECT name, data, guild_id, created_at FROM snapshots WHERE id = ? AND guild_id = ?",
+                    (snapshot_id, guild_id),
+                ) as cur:
+                    row = await cur.fetchone()
+            else:
+                async with db.execute(
+                    "SELECT name, data, guild_id, created_at FROM snapshots WHERE id = ?",
+                    (snapshot_id,),
+                ) as cur:
+                    row = await cur.fetchone()
         if not row:
             return None
-        return {"name": row[0], "data": json.loads(row[1])}
+        return {
+            "name": row[0],
+            "data": json.loads(row[1]),
+            "source_guild_id": int(row[2]),
+            "created_at": int(row[3]),
+        }
 
-    async def _load_latest_snapshot_data(self, guild_id: int) -> Optional[dict[str, Any]]:
+    async def _load_latest_snapshot_data(self, guild_id: Optional[int] = None) -> Optional[dict[str, Any]]:
         async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(
-                """
-                SELECT data FROM snapshots
-                WHERE guild_id = ?
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (guild_id,),
-            ) as cur:
-                row = await cur.fetchone()
+            if guild_id is not None:
+                async with db.execute(
+                    """
+                    SELECT data FROM snapshots
+                    WHERE guild_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (guild_id,),
+                ) as cur:
+                    row = await cur.fetchone()
+            else:
+                async with db.execute(
+                    "SELECT data FROM snapshots ORDER BY created_at DESC LIMIT 1"
+                ) as cur:
+                    row = await cur.fetchone()
         if not row:
             return None
         return json.loads(row[0])
@@ -1029,7 +1128,8 @@ class BackupCog(commands.Cog):
             title="📦 Historischer Backfill wird gestartet...",
             description=(
                 "Der Bot holt jetzt die gesamte Nachrichten-History aller Text-Channels.\n"
-                "Attachments werden dabei ebenfalls heruntergeladen."
+                "Attachments werden dabei ebenfalls heruntergeladen.\n"
+                "Ausgeschlossene Channels/Guilds werden übersprungen."
             ),
             color=discord.Color.orange(),
         )
@@ -1127,15 +1227,17 @@ class BackupCog(commands.Cog):
         description="Stellt die Server-Struktur aus einem Snapshot wieder her",
     )
     @app_commands.describe(
-        snapshot_id="ID des Snapshots",
+        snapshot_id="ID des Snapshots (leer = neuester)",
         clear_first="Vorher Channels und (nicht-managed) Rollen löschen",
+        confirm_clear="Bei clear_first=True muss hier exakt DELETE stehen",
     )
     @app_commands.default_permissions(administrator=True)
     async def backup_restore(
         self,
         interaction: discord.Interaction,
-        snapshot_id: int,
+        snapshot_id: Optional[int] = None,
         clear_first: bool = False,
+        confirm_clear: Optional[str] = None,
     ) -> None:
         if not interaction.guild:
             await interaction.response.send_message("Nur auf einem Server nutzbar.", ephemeral=True)
@@ -1145,10 +1247,40 @@ class BackupCog(commands.Cog):
             await interaction.response.send_message("⚠️ Ein Restore läuft bereits.", ephemeral=True)
             return
 
-        snap = await self._load_snapshot(snapshot_id, interaction.guild.id)
-        if not snap:
+        # Hard guard for destructive mode
+        if clear_first and (confirm_clear or "").strip().upper() != "DELETE":
             await interaction.response.send_message(
-                f"❌ Snapshot **#{snapshot_id}** nicht gefunden.",
+                "⚠️ **clear_first** ist sehr destruktiv.\n"
+                "Zum Bestätigen den Parameter `confirm_clear` auf **DELETE** setzen.\n"
+                "Beispiel: `/backup-restore clear_first:True confirm_clear:DELETE`",
+                ephemeral=True,
+            )
+            return
+
+        # Resolve snapshot (optional id → latest)
+        resolved_id = snapshot_id
+        snap: Optional[dict[str, Any]] = None
+
+        if resolved_id is not None:
+            snap = await self._load_snapshot(resolved_id)  # allow cross-guild for disaster recovery
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    "SELECT id, name, data, guild_id, created_at FROM snapshots ORDER BY created_at DESC LIMIT 1"
+                ) as cur:
+                    row = await cur.fetchone()
+            if row:
+                resolved_id = int(row[0])
+                snap = {
+                    "name": row[1],
+                    "data": json.loads(row[2]),
+                    "source_guild_id": int(row[3]),
+                    "created_at": int(row[4]),
+                }
+
+        if not snap or resolved_id is None:
+            await interaction.response.send_message(
+                "❌ Kein Snapshot gefunden. Nutze `/backup-snapshot` oder gib eine ID an.",
                 ephemeral=True,
             )
             return
@@ -1160,19 +1292,22 @@ class BackupCog(commands.Cog):
 
         warning = ""
         if clear_first:
-            warning = "\n\n⚠️ **clear_first**: Bestehende Channels/Rollen werden gelöscht."
+            warning = (
+                "\n\n⚠️ **clear_first + confirm_clear=DELETE**: "
+                "Bestehende Channels und (nicht-managed) Rollen werden **gelöscht**."
+            )
 
         embed = discord.Embed(
             title="⚠️ Struktur-Restore bestätigen",
             description=(
-                f"Snapshot **#{snapshot_id}** – {snap['name'] or 'Unbenannt'}\n\n"
+                f"Snapshot **#{resolved_id}** – {snap.get('name') or 'Unbenannt'}\n\n"
                 f"Rollen: **{role_count}** · Kategorien: **{cat_count}** · Channels: **{ch_count}**"
                 f"{warning}"
             ),
             color=discord.Color.orange(),
         )
 
-        view = RestoreConfirmView(self, snapshot_id, clear_first)
+        view = RestoreConfirmView(self, resolved_id, clear_first)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         await view.wait()
 
@@ -1234,7 +1369,7 @@ class BackupCog(commands.Cog):
 
         snapshot_data: Optional[dict[str, Any]] = None
         if snapshot_id is not None:
-            snap = await self._load_snapshot(snapshot_id, interaction.guild.id)
+            snap = await self._load_snapshot(snapshot_id)
             if snap:
                 snapshot_data = snap["data"]
         else:
