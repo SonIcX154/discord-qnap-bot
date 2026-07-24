@@ -50,6 +50,12 @@ async def ensure_extra_tables(db_path: str) -> None:
                 created_at  INTEGER
             );
         """)
+        # deleted_at für Point-in-Time Restore relativ zu Snapshots
+        try:
+            await db.execute("ALTER TABLE messages ADD COLUMN deleted_at INTEGER")
+            print("[Backup] messages.deleted_at Spalte hinzugefügt")
+        except aiosqlite.OperationalError:
+            pass
         await db.commit()
 
 
