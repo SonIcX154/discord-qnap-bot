@@ -20,6 +20,10 @@ try:
         download_missing_attachments,
         ensure_extra_tables,
         save_channel_id_map,
+        is_guild_excluded,
+        add_excluded_guild,
+        remove_excluded_guild,
+        list_excluded_guilds,
     )
     from utils.message_restore import count_messages
     from utils.structure_helpers import (
@@ -40,6 +44,10 @@ except ImportError:
         download_missing_attachments,
         ensure_extra_tables,
         save_channel_id_map,
+        is_guild_excluded,
+        add_excluded_guild,
+        remove_excluded_guild,
+        list_excluded_guilds,
     )
     from ..utils.message_restore import count_messages
     from ..utils.structure_helpers import (
@@ -154,17 +162,23 @@ class BackupAdminCog(commands.Cog):
                 await db.commit()
                 return cursor.lastrowid  # type: ignore[return-value]
 
-        # Webhook-Nachrichten (Message-Restore) nicht erneut loggen → kein Double-Count
+        # Logging-Filter:
+        # 1) excluded guilds komplett raus
+        # 2) während Message-Restore nichts loggen (kein Double durch Webhooks)
+        # → normale Webhooks auf dem Hauptserver bleiben im Backup
         original_store = cog._store_message
 
-        async def store_skip_webhooks(
+        async def store_filtered(
             message: discord.Message, *, is_edit: bool = False
         ) -> None:
-            if getattr(message, "webhook_id", None):
+            if message.guild and await is_guild_excluded(db_path, message.guild.id):
+                return
+            task = getattr(cog, "_msg_restore_task", None)
+            if task is not None and not task.done():
                 return
             await original_store(message, is_edit=is_edit)
 
-        cog._store_message = store_skip_webhooks  # type: ignore[method-assign]
+        cog._store_message = store_filtered  # type: ignore[method-assign]
 
         original_restore = cog._restore_structure
 
@@ -463,7 +477,7 @@ class BackupAdminCog(commands.Cog):
         cog._save_snapshot = save_snapshot_with_icon  # type: ignore[method-assign]
         cog._restore_structure = restore_with_extras  # type: ignore[method-assign]
 
-        patched = ["skip-webhooks"]
+        patched = ["guild-exclude+restore-mute"]
         for cmd in getattr(cog, "__cog_app_commands__", []):
             if cmd.name == "backup-snapshots":
                 cmd._callback = fixed_snapshots  # type: ignore[attr-defined]
@@ -507,7 +521,78 @@ class BackupAdminCog(commands.Cog):
 
         print(f"[BackupAdmin] Patches OK: {patched}")
 
-    # ---------- Exclude / missing ----------
+    # ---------- Exclude guild / channel / missing ----------
+
+    @app_commands.command(
+        name="backup-exclude-guild",
+        description="Diesen Server vom Message-Logging/Backfill ausschließen",
+    )
+    @app_commands.describe(reason="Optionaler Grund")
+    @app_commands.default_permissions(administrator=True)
+    async def backup_exclude_guild(
+        self,
+        interaction: discord.Interaction,
+        reason: Optional[str] = None,
+    ) -> None:
+        if not interaction.guild:
+            await interaction.response.send_message("Nur auf einem Server.", ephemeral=True)
+            return
+        await add_excluded_guild(
+            self.db_path,
+            interaction.guild.id,
+            reason or "Restore-Server",
+        )
+        await interaction.response.send_message(
+            f"✅ Server **{interaction.guild.name}** (`{interaction.guild.id}`) "
+            f"wird nicht mehr geloggt/backfilled.\n"
+            f"Webhooks & normale Server bleiben unberührt.\n"
+            f"Wieder aktivieren: `/backup-include-guild`",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="backup-include-guild",
+        description="Server wieder ins Message-Logging aufnehmen",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def backup_include_guild(self, interaction: discord.Interaction) -> None:
+        if not interaction.guild:
+            await interaction.response.send_message("Nur auf einem Server.", ephemeral=True)
+            return
+        ok = await remove_excluded_guild(self.db_path, interaction.guild.id)
+        msg = (
+            f"✅ **{interaction.guild.name}** ist wieder im Backup."
+            if ok
+            else f"ℹ️ **{interaction.guild.name}** war nicht excluded."
+        )
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @app_commands.command(
+        name="backup-excluded-guilds",
+        description="Listet vom Backup ausgeschlossene Server",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def backup_excluded_guilds(self, interaction: discord.Interaction) -> None:
+        rows = await list_excluded_guilds(self.db_path)
+        if not rows:
+            await interaction.response.send_message(
+                "Keine excluded Guilds.", ephemeral=True
+            )
+            return
+        lines = []
+        for gid, reason in rows:
+            g = self.bot.get_guild(gid)
+            name = g.name if g else f"`{gid}`"
+            extra = f" – {reason}" if reason else ""
+            lines.append(f"• **{name}** (`{gid}`){extra}")
+        await interaction.response.send_message(
+            embed=discord.Embed(
+                title="🚫 Excluded Guilds",
+                description="\n".join(lines),
+                color=discord.Color.orange(),
+            ),
+            ephemeral=True,
+        )
 
     @app_commands.command(
         name="backup-exclude",
