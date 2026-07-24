@@ -95,7 +95,6 @@ async def count_messages(
     db_path: str,
     source_guild_id: Optional[int] = None,
 ) -> int:
-    """Anzahl gespeicherter Nachrichten. source_guild_id=None → ganze Instanz."""
     async with aiosqlite.connect(db_path) as db:
         if source_guild_id is None:
             async with db.execute(
@@ -115,7 +114,6 @@ async def load_channel_ids_with_messages(
     db_path: str,
     source_guild_id: Optional[int] = None,
 ) -> list[int]:
-    """Channel-IDs mit Nachrichten. None = instanz-weit (Disaster Recovery)."""
     async with aiosqlite.connect(db_path) as db:
         if source_guild_id is None:
             async with db.execute(
@@ -139,21 +137,32 @@ async def load_channel_ids_with_messages(
     return [int(r[0]) for r in rows]
 
 
-async def load_already_restored(db_path: str, message_ids: list[int]) -> set[int]:
-    if not message_ids:
+async def load_already_restored_in_guild(
+    db_path: str,
+    message_ids: list[int],
+    guild_channel_ids: set[int],
+) -> set[int]:
+    """Nur überspringen, wenn bereits in *diesem* Server restored wurde."""
+    if not message_ids or not guild_channel_ids:
         return set()
     restored: set[int] = set()
     async with aiosqlite.connect(db_path) as db:
         try:
             for i in range(0, len(message_ids), 500):
-                chunk = message_ids[i:i + 500]
+                chunk = message_ids[i : i + 500]
                 placeholders = ",".join("?" * len(chunk))
                 async with db.execute(
-                    f"SELECT message_id FROM restored_messages WHERE message_id IN ({placeholders})",
+                    f"""
+                    SELECT message_id, target_channel_id
+                    FROM restored_messages
+                    WHERE message_id IN ({placeholders})
+                    """,
                     chunk,
                 ) as cur:
                     rows = await cur.fetchall()
-                    restored.update(int(r[0]) for r in rows)
+                    for mid, target_ch in rows:
+                        if target_ch is not None and int(target_ch) in guild_channel_ids:
+                            restored.add(int(mid))
         except aiosqlite.OperationalError:
             return set()
     return restored
@@ -164,7 +173,7 @@ async def mark_restored(db_path: str, message_id: int, target_channel_id: int) -
         try:
             await db.execute(
                 """
-                INSERT OR IGNORE INTO restored_messages (message_id, restored_at, target_channel_id)
+                INSERT OR REPLACE INTO restored_messages (message_id, restored_at, target_channel_id)
                 VALUES (?, ?, ?)
                 """,
                 (message_id, int(time.time()), target_channel_id),
@@ -179,6 +188,7 @@ async def load_messages_for_channel(
     channel_id: int,
     *,
     limit: Optional[int],
+    guild_channel_ids: Optional[set[int]] = None,
     skip_restored: bool = True,
 ) -> list[dict[str, Any]]:
     query = """
@@ -208,9 +218,14 @@ async def load_messages_for_channel(
             "created_at": row[6],
         })
 
-    if skip_restored and result:
-        already = await load_already_restored(db_path, [m["message_id"] for m in result])
+    if skip_restored and result and guild_channel_ids is not None:
+        already = await load_already_restored_in_guild(
+            db_path, [m["message_id"] for m in result], guild_channel_ids
+        )
         result = [m for m in result if m["message_id"] not in already]
+    elif skip_restored and result and guild_channel_ids is None:
+        # Fallback: nicht überspringen wenn wir den Ziel-Server nicht kennen
+        pass
 
     return result
 
@@ -331,18 +346,24 @@ async def run_message_restore(
     match_by_name: bool = True,
     snapshot_data: Optional[dict[str, Any]] = None,
     source_guild_id: Optional[int] = None,
+    force: bool = False,
 ) -> None:
     """
-    source_guild_id: Alte Guild-ID aus dem Snapshot.
-    None = alle Nachrichten der Instanz (eine Instanz = ein logischer Server).
+    source_guild_id=None → alle Nachrichten der Instanz (kein Auto-Override mehr).
+    force=True → auch bereits restored erneut senden.
     """
-    if source_guild_id is None and snapshot_data:
-        source_guild_id = (snapshot_data.get("guild") or {}).get("id")
-        if source_guild_id is not None:
-            source_guild_id = int(source_guild_id)
+    # WICHTIG: source_guild_id absichtlich None lassen = ganze DB
+    # (früher wurde hier still die Snapshot-guild_id gesetzt → Filter-Chaos)
 
     name_lookup = build_name_lookup_from_snapshot(snapshot_data)
     id_map = await load_channel_id_map(db_path, guild.id)
+    guild_channel_ids = {c.id for c in guild.channels}
+
+    print(
+        f"[Backup] Message-Restore start: guild={guild.id} "
+        f"id_map={len(id_map)} name_lookup={len(name_lookup)} "
+        f"source_guild_id={source_guild_id} force={force}"
+    )
 
     if channel_filter is not None:
         all_ids = await load_channel_ids_with_messages(db_path, source_guild_id)
@@ -360,9 +381,12 @@ async def run_message_restore(
     else:
         old_ids = await load_channel_ids_with_messages(db_path, source_guild_id)
 
+    print(f"[Backup] Channels mit Nachrichten in DB: {len(old_ids)}")
+
     total_sent = 0
     total_errors = 0
     total_skipped = 0
+    total_empty = 0
     channels_done = 0
     channels_skipped = 0
 
@@ -375,10 +399,13 @@ async def run_message_restore(
         embed.add_field(name="Gesendet", value=f"**{total_sent:,}**", inline=True)
         embed.add_field(name="Channels", value=f"**{channels_done}** / {len(old_ids)}", inline=True)
         embed.add_field(name="Fehler", value=f"**{total_errors}**", inline=True)
-        if channels_skipped or total_skipped:
+        if channels_skipped or total_skipped or total_empty:
             embed.add_field(
                 name="Übersprungen",
-                value=f"Channels: {channels_skipped} · leer/bereits: {total_skipped}",
+                value=(
+                    f"Channels ohne Ziel: {channels_skipped}\n"
+                    f"Leer: {total_empty} · bereits restored: {total_skipped}"
+                ),
                 inline=False,
             )
         try:
@@ -396,7 +423,8 @@ async def run_message_restore(
             )
             if target is None:
                 channels_skipped += 1
-                print(f"[Backup] Kein Ziel-Channel für old_id={oid}")
+                print(f"[Backup] Kein Ziel-Channel für old_id={oid} "
+                      f"(name={name_lookup.get(oid)!r})")
                 continue
 
             if not target.permissions_for(guild.me).manage_webhooks:
@@ -406,28 +434,61 @@ async def run_message_restore(
 
             await update(f"Channel **#{target.name}** …")
 
-            messages = await load_messages_for_channel(
-                db_path, oid, limit=limit_per_channel, skip_restored=True
+            raw_count_query = await load_messages_for_channel(
+                db_path, oid, limit=limit_per_channel,
+                guild_channel_ids=None, skip_restored=False,
             )
-            sent, skipped, errors = await restore_messages_to_channel(
+            messages = await load_messages_for_channel(
+                db_path, oid,
+                limit=limit_per_channel,
+                guild_channel_ids=guild_channel_ids,
+                skip_restored=not force,
+            )
+            already_filtered = len(raw_count_query) - len(messages)
+            if already_filtered > 0:
+                total_skipped += already_filtered
+                print(f"[Backup] #{target.name}: {already_filtered} bereits restored (dieser Server)")
+
+            if not messages:
+                print(f"[Backup] #{target.name}: 0 Nachrichten zum Senden "
+                      f"(DB roh={len(raw_count_query)})")
+                channels_done += 1
+                continue
+
+            sent, empty, errors = await restore_messages_to_channel(
                 target, messages, db_path=db_path
             )
             total_sent += sent
-            total_skipped += skipped
+            total_empty += empty
             total_errors += errors
             channels_done += 1
-            print(f"[Backup] #{target.name}: {sent} sent, {skipped} skip, {errors} err")
+            print(f"[Backup] #{target.name}: {sent} sent, {empty} empty, {errors} err "
+                  f"(loaded {len(messages)})")
 
         embed = discord.Embed(
             title="✅ Nachrichten-Restore abgeschlossen",
-            color=discord.Color.green(),
+            color=discord.Color.green() if total_sent else discord.Color.orange(),
         )
         embed.add_field(name="Gesendet", value=f"**{total_sent:,}**", inline=True)
         embed.add_field(name="Channels", value=f"**{channels_done}**", inline=True)
         embed.add_field(name="Fehler", value=f"**{total_errors}**", inline=True)
-        embed.set_footer(
-            text="Webhook · Avatar/Name aus Backup · bereits restored werden übersprungen"
+        embed.add_field(
+            name="Details",
+            value=(
+                f"Ohne Ziel-Channel: **{channels_skipped}**\n"
+                f"Leer (kein Text/Embed/File): **{total_empty}**\n"
+                f"Bereits restored (dieser Server): **{total_skipped}**\n"
+                f"id_map Einträge: **{len(id_map)}** · name_lookup: **{len(name_lookup)}**"
+            ),
+            inline=False,
         )
+        if total_sent == 0:
+            embed.set_footer(
+                text="0 gesendet – prüfe Logs. Tipp: Struktur-Restore zuerst, "
+                     "oder force falls schon mal restored."
+            )
+        else:
+            embed.set_footer(text="Webhook · Avatar/Name aus Backup")
         try:
             await progress_msg.edit(embed=embed, view=None)
         except Exception:
