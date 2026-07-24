@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import time
+import traceback
 import asyncio
 import aiosqlite
 import discord
@@ -27,6 +28,7 @@ try:
         apply_guild_branding,
         fetch_icon_b64,
         clear_manageable_roles,
+        clear_channels,
         dedupe_roles_by_name,
     )
     from cogs.backup_restore_cmd import register_backup_restore
@@ -46,6 +48,7 @@ except ImportError:
         apply_guild_branding,
         fetch_icon_b64,
         clear_manageable_roles,
+        clear_channels,
         dedupe_roles_by_name,
     )
     from .backup_restore_cmd import register_backup_restore
@@ -91,7 +94,7 @@ class BackupAdminCog(commands.Cog):
         self.bot.loop.create_task(self._patch_backup_cog())
 
     async def _patch_backup_cog(self) -> None:
-        await asyncio.sleep(2)  # nach tree.sync der anderen Commands
+        await asyncio.sleep(2)
         cog = self.bot.get_cog("BackupCog")
         if cog is None:
             print("[BackupAdmin] BackupCog nicht gefunden – Patch übersprungen")
@@ -150,13 +153,6 @@ class BackupAdminCog(commands.Cog):
                 await db.commit()
                 return cursor.lastrowid  # type: ignore[return-value]
 
-        original_clear = cog._clear_guild_structure
-
-        async def clear_with_roles(guild: discord.Guild) -> tuple[int, int]:
-            dc, _ = await original_clear(guild)
-            dr = await clear_manageable_roles(guild)
-            return dc, dr
-
         original_restore = cog._restore_structure
 
         async def restore_with_extras(
@@ -165,71 +161,95 @@ class BackupAdminCog(commands.Cog):
             progress_msg: discord.WebhookMessage | discord.Message,
             clear_first: bool,
         ) -> None:
-            original_create_role = guild.create_role
+            print(f"[Backup] restore_with_extras START clear_first={clear_first} guild={guild.id}")
 
-            async def create_role_reuse(*args: Any, **kwargs: Any) -> discord.Role:
-                role_name = kwargs.get("name") or (args[0] if args else None)
-                if role_name:
-                    existing = discord.utils.get(guild.roles, name=role_name)
-                    if (
-                        existing
-                        and not existing.is_default()
-                        and not existing.managed
-                        and guild.me
-                        and existing.position < guild.me.top_role.position
-                    ):
-                        try:
-                            await existing.edit(
-                                permissions=kwargs.get("permissions", existing.permissions),
-                                colour=kwargs.get("colour", existing.colour),
-                                hoist=kwargs.get("hoist", existing.hoist),
-                                mentionable=kwargs.get("mentionable", existing.mentionable),
-                                reason=kwargs.get("reason", "Backup Restore reuse"),
-                            )
-                        except Exception as e:
-                            print(f"[Backup] Rolle reuse-edit '{role_name}': {e}")
-                        print(f"[Backup] Rolle wiederverwendet: {role_name}")
-                        return existing
-                return await original_create_role(*args, **kwargs)
+            async def bump(text: str) -> None:
+                print(f"[Backup] progress: {text}")
+                try:
+                    await progress_msg.edit(
+                        embed=discord.Embed(
+                            title="🔄 Struktur-Restore läuft...",
+                            description=text,
+                            color=discord.Color.orange(),
+                        ),
+                        view=None,
+                    )
+                except Exception as e:
+                    print(f"[Backup] progress edit fail (ok wenn Channel weg): {e}")
 
-            guild.create_role = create_role_reuse  # type: ignore[method-assign]
             try:
+                await bump("Starte…")
+
+                # Clear genau einmal hier – original bekommt clear_first=False
                 if clear_first:
-                    extra = await clear_manageable_roles(guild)
-                    print(f"[Backup] Extra Rollen-Clear: {extra}")
-                await original_restore(guild, data, progress_msg, clear_first)
+                    keep_id = None
+                    try:
+                        keep_id = progress_msg.channel.id  # type: ignore[union-attr]
+                    except Exception:
+                        keep_id = None
+                    await bump("Lösche Channels…")
+                    dc = await clear_channels(guild, keep_channel_id=keep_id)
+                    await bump(f"Channels gelöscht ({dc}). Lösche Rollen…")
+                    dr = await clear_manageable_roles(guild)
+                    await bump(f"Rollen gelöscht ({dr}). Erstelle Struktur…")
+                else:
+                    await bump("Erstelle Struktur (ohne Clear)…")
+
+                print("[Backup] rufe original_restore (clear_first=False)…")
+                await original_restore(guild, data, progress_msg, False)
+                print("[Backup] original_restore fertig")
+
+                await bump("Hierarchie…")
+                try:
+                    await dedupe_roles_by_name(guild)
+                    await apply_role_hierarchy(guild, data.get("roles") or [])
+                except Exception as e:
+                    print(f"[Backup] Hierarchie: {e}")
+                    traceback.print_exc()
+
+                await bump("Server-Name/Icon…")
+                try:
+                    await apply_guild_branding(guild, data.get("guild") or {})
+                except Exception as e:
+                    print(f"[Backup] Branding: {e}")
+
+                try:
+                    mapping: dict[int, int] = {}
+                    for ch_data in list(data.get("channels", [])) + list(
+                        data.get("categories", [])
+                    ):
+                        old_id = ch_data.get("id")
+                        ch_name = ch_data.get("name")
+                        if not old_id or not ch_name:
+                            continue
+                        for c in guild.channels:
+                            if c.name == ch_name:
+                                mapping[int(old_id)] = c.id
+                                break
+                    if mapping:
+                        await save_channel_id_map(db_path, guild.id, mapping)
+                        print(f"[Backup] channel_id_map: {len(mapping)} Einträge")
+                except Exception as e:
+                    print(f"[Backup] channel_id_map: {e}")
+
+                print("[Backup] restore_with_extras DONE")
+
+            except Exception as e:
+                print(f"[Backup] restore_with_extras CRASH: {e}")
+                traceback.print_exc()
+                try:
+                    await progress_msg.edit(
+                        embed=discord.Embed(
+                            title="❌ Restore fehlgeschlagen",
+                            description=f"`{e}`",
+                            color=discord.Color.red(),
+                        ),
+                        view=None,
+                    )
+                except Exception:
+                    pass
             finally:
-                guild.create_role = original_create_role  # type: ignore[method-assign]
-
-            try:
-                await dedupe_roles_by_name(guild)
-                await apply_role_hierarchy(guild, data.get("roles") or [])
-            except Exception as e:
-                print(f"[Backup] Hierarchie: {e}")
-
-            try:
-                await apply_guild_branding(guild, data.get("guild") or {})
-            except Exception as e:
-                print(f"[Backup] Branding: {e}")
-
-            try:
-                mapping: dict[int, int] = {}
-                for ch_data in list(data.get("channels", [])) + list(
-                    data.get("categories", [])
-                ):
-                    old_id = ch_data.get("id")
-                    ch_name = ch_data.get("name")
-                    if not old_id or not ch_name:
-                        continue
-                    for c in guild.channels:
-                        if c.name == ch_name:
-                            mapping[int(old_id)] = c.id
-                            break
-                if mapping:
-                    await save_channel_id_map(db_path, guild.id, mapping)
-                    print(f"[Backup] channel_id_map: {len(mapping)} Einträge")
-            except Exception as e:
-                print(f"[Backup] channel_id_map: {e}")
+                cog._restore_task = None
 
         async def fixed_snapshots(
             _cog: Any, interaction: discord.Interaction
@@ -368,7 +388,6 @@ class BackupAdminCog(commands.Cog):
         cog._load_latest_snapshot_data = load_latest_any  # type: ignore[method-assign]
         cog._build_overwrites = build_overwrites  # type: ignore[method-assign]
         cog._save_snapshot = save_snapshot_with_icon  # type: ignore[method-assign]
-        cog._clear_guild_structure = clear_with_roles  # type: ignore[method-assign]
         cog._restore_structure = restore_with_extras  # type: ignore[method-assign]
 
         patched = []
@@ -392,9 +411,7 @@ class BackupAdminCog(commands.Cog):
                 if cmd.name not in patched:
                     patched.append(cmd.name)
 
-        # --- backup-restore: optional snapshot_id (leer = neuester) ---
         try:
-            # Alte Variante (required snapshot_id) entfernen
             if hasattr(cog, "__cog_app_commands__"):
                 cog.__cog_app_commands__[:] = [
                     c for c in cog.__cog_app_commands__ if c.name != "backup-restore"
@@ -407,7 +424,6 @@ class BackupAdminCog(commands.Cog):
             self.bot.tree.add_command(new_cmd)
             patched.append("backup-restore(optional id)")
 
-            # Nochmal syncen, damit Discord optional sieht
             try:
                 await self.bot.tree.sync()
                 print("[BackupAdmin] tree.sync nach backup-restore Update")
