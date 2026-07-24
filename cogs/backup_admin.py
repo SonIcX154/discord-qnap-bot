@@ -34,6 +34,7 @@ try:
         clear_manageable_roles,
         clear_channels,
         dedupe_roles_by_name,
+        convert_to_news_channels,
     )
     from cogs.backup_restore_cmd import register_backup_restore
 except ImportError:
@@ -58,6 +59,7 @@ except ImportError:
         clear_manageable_roles,
         clear_channels,
         dedupe_roles_by_name,
+        convert_to_news_channels,
     )
     from .backup_restore_cmd import register_backup_restore
 
@@ -162,10 +164,6 @@ class BackupAdminCog(commands.Cog):
                 await db.commit()
                 return cursor.lastrowid  # type: ignore[return-value]
 
-        # Logging-Filter:
-        # 1) excluded guilds komplett raus
-        # 2) während Message-Restore nichts loggen (kein Double durch Webhooks)
-        # → normale Webhooks auf dem Hauptserver bleiben im Backup
         original_store = cog._store_message
 
         async def store_filtered(
@@ -286,6 +284,14 @@ class BackupAdminCog(commands.Cog):
                 print("[Backup] rufe original_restore (clear_first=False)…")
                 await original_restore(guild, data, current_progress, False)
                 print("[Backup] original_restore fertig")
+
+                await bump("Announcement-Channels…")
+                try:
+                    n = await convert_to_news_channels(guild, data.get("channels") or [])
+                    if n:
+                        print(f"[Backup] {n} Channel(s) → News/Announcement")
+                except Exception as e:
+                    print(f"[Backup] News-Channel convert: {e}")
 
                 await bump("Setze Rollen-Hierarchie…")
                 try:
@@ -439,7 +445,7 @@ class BackupAdminCog(commands.Cog):
                     f"Ziel: {scope}\n"
                     f"Limit: {limit_txt}\n"
                     f"Name-Match: **{'an' if match_by_name else 'aus'}**\n\n"
-                    "Webhook · Original-Name/Avatar · Mentions aus."
+                    "Webhook · Name • Timestamp · Avatar · Mentions aus."
                 ),
                 color=discord.Color.orange(),
             )
@@ -477,7 +483,7 @@ class BackupAdminCog(commands.Cog):
         cog._save_snapshot = save_snapshot_with_icon  # type: ignore[method-assign]
         cog._restore_structure = restore_with_extras  # type: ignore[method-assign]
 
-        patched = ["guild-exclude+restore-mute"]
+        patched = ["guild-exclude+restore-mute", "news-channels"]
         for cmd in getattr(cog, "__cog_app_commands__", []):
             if cmd.name == "backup-snapshots":
                 cmd._callback = fixed_snapshots  # type: ignore[attr-defined]
