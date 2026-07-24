@@ -47,13 +47,48 @@ def format_username_with_timestamp(author_name: str, created_at: Optional[int]) 
     try:
         ts = datetime.fromtimestamp(int(created_at), tz=timezone.utc)
         stamp = ts.strftime("%d.%m.%Y %H:%M")
-        # Platz für " • " + Timestamp freilassen
         max_name = 80 - len(stamp) - 3
         if max_name < 1:
             return stamp[:80]
         return f"{base[:max_name]} • {stamp}"
     except Exception:
         return base[:80]
+
+
+def _visibility_sql(as_of: Optional[int], include_deleted: bool) -> tuple[str, list[Any]]:
+    """
+    as_of gesetzt (Snapshot-Zeit):
+      Nachricht existierte zum Zeitpunkt: created_at <= as_of
+      und war da noch nicht gelöscht: deleted_at IS NULL OR deleted_at > as_of
+
+    as_of None + include_deleted True (Disaster / Nuke):
+      alle jemals gespeicherten Nachrichten
+
+    as_of None + include_deleted False:
+      nur aktuell nicht gelöschte
+    """
+    params: list[Any] = []
+    if as_of is not None:
+        clause = (
+            "created_at <= ? AND (deleted_at IS NULL OR deleted_at > ?)"
+        )
+        params.extend([int(as_of), int(as_of)])
+        return clause, params
+    if include_deleted:
+        return "1=1", params
+    return "is_deleted = 0", params
+
+
+async def ensure_deleted_at_column(db_path: str) -> None:
+    async with aiosqlite.connect(db_path) as db:
+        try:
+            await db.execute(
+                "ALTER TABLE messages ADD COLUMN deleted_at INTEGER"
+            )
+            await db.commit()
+            print("[Backup] messages.deleted_at Spalte hinzugefügt")
+        except aiosqlite.OperationalError:
+            pass  # existiert schon
 
 
 async def load_channel_id_map(db_path: str, guild_id: int) -> dict[int, int]:
@@ -112,46 +147,48 @@ def build_name_lookup_from_snapshot(snapshot_data: Optional[dict[str, Any]]) -> 
 async def count_messages(
     db_path: str,
     source_guild_id: Optional[int] = None,
+    *,
+    as_of: Optional[int] = None,
+    include_deleted: bool = True,
 ) -> int:
+    vis, vparams = _visibility_sql(as_of, include_deleted)
     async with aiosqlite.connect(db_path) as db:
         if source_guild_id is None:
-            async with db.execute(
-                "SELECT COUNT(*) FROM messages WHERE is_deleted = 0"
-            ) as cur:
-                row = await cur.fetchone()
+            sql = f"SELECT COUNT(*) FROM messages WHERE {vis}"
+            params: list[Any] = list(vparams)
         else:
-            async with db.execute(
-                "SELECT COUNT(*) FROM messages WHERE guild_id = ? AND is_deleted = 0",
-                (source_guild_id,),
-            ) as cur:
-                row = await cur.fetchone()
+            sql = f"SELECT COUNT(*) FROM messages WHERE guild_id = ? AND {vis}"
+            params = [source_guild_id, *vparams]
+        async with db.execute(sql, params) as cur:
+            row = await cur.fetchone()
     return int(row[0]) if row else 0
 
 
 async def load_channel_ids_with_messages(
     db_path: str,
     source_guild_id: Optional[int] = None,
+    *,
+    as_of: Optional[int] = None,
+    include_deleted: bool = True,
 ) -> list[int]:
+    vis, vparams = _visibility_sql(as_of, include_deleted)
     async with aiosqlite.connect(db_path) as db:
         if source_guild_id is None:
-            async with db.execute(
-                """
+            sql = f"""
                 SELECT DISTINCT channel_id FROM messages
-                WHERE is_deleted = 0
+                WHERE {vis}
                 ORDER BY channel_id
-                """
-            ) as cur:
-                rows = await cur.fetchall()
+            """
+            params: list[Any] = list(vparams)
         else:
-            async with db.execute(
-                """
+            sql = f"""
                 SELECT DISTINCT channel_id FROM messages
-                WHERE guild_id = ? AND is_deleted = 0
+                WHERE guild_id = ? AND {vis}
                 ORDER BY channel_id
-                """,
-                (source_guild_id,),
-            ) as cur:
-                rows = await cur.fetchall()
+            """
+            params = [source_guild_id, *vparams]
+        async with db.execute(sql, params) as cur:
+            rows = await cur.fetchall()
     return [int(r[0]) for r in rows]
 
 
@@ -160,7 +197,6 @@ async def load_already_restored_in_guild(
     message_ids: list[int],
     guild_channel_ids: set[int],
 ) -> set[int]:
-    """Nur überspringen, wenn bereits in *diesem* Server restored wurde."""
     if not message_ids or not guild_channel_ids:
         return set()
     restored: set[int] = set()
@@ -208,14 +244,17 @@ async def load_messages_for_channel(
     limit: Optional[int],
     guild_channel_ids: Optional[set[int]] = None,
     skip_restored: bool = True,
+    as_of: Optional[int] = None,
+    include_deleted: bool = True,
 ) -> list[dict[str, Any]]:
-    query = """
+    vis, vparams = _visibility_sql(as_of, include_deleted)
+    query = f"""
         SELECT message_id, author_name, author_avatar, content, embeds, attachments, created_at
         FROM messages
-        WHERE channel_id = ? AND is_deleted = 0
+        WHERE channel_id = ? AND {vis}
         ORDER BY created_at ASC
     """
-    params: list[Any] = [channel_id]
+    params: list[Any] = [channel_id, *vparams]
     if limit is not None and limit > 0:
         query += " LIMIT ?"
         params.append(limit)
@@ -241,8 +280,6 @@ async def load_messages_for_channel(
             db_path, [m["message_id"] for m in result], guild_channel_ids
         )
         result = [m for m in result if m["message_id"] not in already]
-    elif skip_restored and result and guild_channel_ids is None:
-        pass
 
     return result
 
@@ -367,23 +404,30 @@ async def run_message_restore(
     snapshot_data: Optional[dict[str, Any]] = None,
     source_guild_id: Optional[int] = None,
     force: bool = False,
+    as_of: Optional[int] = None,
+    include_deleted: bool = True,
 ) -> None:
     """
-    source_guild_id=None → alle Nachrichten der Instanz (kein Auto-Override mehr).
-    force=True → auch bereits restored erneut senden.
+    as_of = Snapshot created_at → Point-in-Time (auch später gelöschte Messages).
+    as_of=None + include_deleted=True → Disaster/Nuke: alles aus der DB.
     """
+    await ensure_deleted_at_column(db_path)
+
     name_lookup = build_name_lookup_from_snapshot(snapshot_data)
     id_map = await load_channel_id_map(db_path, guild.id)
     guild_channel_ids = {c.id for c in guild.channels}
 
+    mode = f"as_of={as_of}" if as_of else f"include_deleted={include_deleted}"
     print(
         f"[Backup] Message-Restore start: guild={guild.id} "
         f"id_map={len(id_map)} name_lookup={len(name_lookup)} "
-        f"source_guild_id={source_guild_id} force={force}"
+        f"source_guild_id={source_guild_id} force={force} {mode}"
     )
 
     if channel_filter is not None:
-        all_ids = await load_channel_ids_with_messages(db_path, source_guild_id)
+        all_ids = await load_channel_ids_with_messages(
+            db_path, source_guild_id, as_of=as_of, include_deleted=include_deleted
+        )
         mapped: list[int] = []
         for oid in all_ids:
             target = await resolve_target_channel(
@@ -396,7 +440,9 @@ async def run_message_restore(
                 mapped.append(oid)
         old_ids = mapped or [channel_filter.id]
     else:
-        old_ids = await load_channel_ids_with_messages(db_path, source_guild_id)
+        old_ids = await load_channel_ids_with_messages(
+            db_path, source_guild_id, as_of=as_of, include_deleted=include_deleted
+        )
 
     print(f"[Backup] Channels mit Nachrichten in DB: {len(old_ids)}")
 
@@ -454,12 +500,14 @@ async def run_message_restore(
             raw_count_query = await load_messages_for_channel(
                 db_path, oid, limit=limit_per_channel,
                 guild_channel_ids=None, skip_restored=False,
+                as_of=as_of, include_deleted=include_deleted,
             )
             messages = await load_messages_for_channel(
                 db_path, oid,
                 limit=limit_per_channel,
                 guild_channel_ids=guild_channel_ids,
                 skip_restored=not force,
+                as_of=as_of, include_deleted=include_deleted,
             )
             already_filtered = len(raw_count_query) - len(messages)
             if already_filtered > 0:
@@ -482,6 +530,10 @@ async def run_message_restore(
             print(f"[Backup] #{target.name}: {sent} sent, {empty} empty, {errors} err "
                   f"(loaded {len(messages)})")
 
+        as_of_txt = (
+            datetime.fromtimestamp(as_of, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            if as_of else "alle (inkl. gelöschte)"
+        )
         embed = discord.Embed(
             title="✅ Nachrichten-Restore abgeschlossen",
             color=discord.Color.green() if total_sent else discord.Color.orange(),
@@ -492,20 +544,20 @@ async def run_message_restore(
         embed.add_field(
             name="Details",
             value=(
+                f"Zeitpunkt: **{as_of_txt}**\n"
                 f"Ohne Ziel-Channel: **{channels_skipped}**\n"
                 f"Leer (kein Text/Embed/File): **{total_empty}**\n"
                 f"Bereits restored (dieser Server): **{total_skipped}**\n"
-                f"id_map Einträge: **{len(id_map)}** · name_lookup: **{len(name_lookup)}**"
+                f"id_map: **{len(id_map)}** · name_lookup: **{len(name_lookup)}**"
             ),
             inline=False,
         )
         if total_sent == 0:
             embed.set_footer(
-                text="0 gesendet – prüfe Logs. Tipp: Struktur-Restore zuerst, "
-                     "oder force falls schon mal restored."
+                text="0 gesendet – prüfe Logs. Tipp: Struktur-Restore zuerst."
             )
         else:
-            embed.set_footer(text="Webhook · Avatar/Name · Timestamp im Namen (UTC)")
+            embed.set_footer(text="Webhook · Avatar/Name · Timestamp · Snapshot-Zeitpunkt")
         try:
             await progress_msg.edit(embed=embed, view=None)
         except Exception:
