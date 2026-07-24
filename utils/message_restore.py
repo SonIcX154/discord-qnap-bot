@@ -6,6 +6,7 @@ import time
 import asyncio
 import aiosqlite
 import discord
+from datetime import datetime, timezone
 from typing import Any, Optional, Callable, Awaitable
 
 MESSAGE_RESTORE_DELAY = 0.75
@@ -36,6 +37,23 @@ async def with_retry(coro_factory: Callable[[], Awaitable[Any]], *,
             raise
     assert last_exc is not None
     raise last_exc
+
+
+def format_username_with_timestamp(author_name: str, created_at: Optional[int]) -> str:
+    """Webhook-Username max 80 Zeichen: 'Name • TT.MM.JJJJ HH:MM'."""
+    base = (author_name or "Unknown").strip() or "Unknown"
+    if not created_at:
+        return base[:80]
+    try:
+        ts = datetime.fromtimestamp(int(created_at), tz=timezone.utc)
+        stamp = ts.strftime("%d.%m.%Y %H:%M")
+        # Platz für " • " + Timestamp freilassen
+        max_name = 80 - len(stamp) - 3
+        if max_name < 1:
+            return stamp[:80]
+        return f"{base[:max_name]} • {stamp}"
+    except Exception:
+        return base[:80]
 
 
 async def load_channel_id_map(db_path: str, guild_id: int) -> dict[int, int]:
@@ -224,7 +242,6 @@ async def load_messages_for_channel(
         )
         result = [m for m in result if m["message_id"] not in already]
     elif skip_restored and result and guild_channel_ids is None:
-        # Fallback: nicht überspringen wenn wir den Ziel-Server nicht kennen
         pass
 
     return result
@@ -301,7 +318,10 @@ async def restore_messages_to_channel(
                 skipped += 1
                 continue
 
-            username = (msg.get("author_name") or "Unknown")[:80]
+            username = format_username_with_timestamp(
+                msg.get("author_name") or "Unknown",
+                msg.get("created_at"),
+            )
             avatar_url = msg.get("author_avatar") or None
 
             try:
@@ -352,9 +372,6 @@ async def run_message_restore(
     source_guild_id=None → alle Nachrichten der Instanz (kein Auto-Override mehr).
     force=True → auch bereits restored erneut senden.
     """
-    # WICHTIG: source_guild_id absichtlich None lassen = ganze DB
-    # (früher wurde hier still die Snapshot-guild_id gesetzt → Filter-Chaos)
-
     name_lookup = build_name_lookup_from_snapshot(snapshot_data)
     id_map = await load_channel_id_map(db_path, guild.id)
     guild_channel_ids = {c.id for c in guild.channels}
@@ -488,7 +505,7 @@ async def run_message_restore(
                      "oder force falls schon mal restored."
             )
         else:
-            embed.set_footer(text="Webhook · Avatar/Name aus Backup")
+            embed.set_footer(text="Webhook · Avatar/Name · Timestamp im Namen (UTC)")
         try:
             await progress_msg.edit(embed=embed, view=None)
         except Exception:
