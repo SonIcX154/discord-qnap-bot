@@ -133,6 +133,49 @@ async def dedupe_roles_by_name(guild: discord.Guild) -> int:
     return removed
 
 
+async def convert_to_news_channels(
+    guild: discord.Guild,
+    channels_data: list[dict[str, Any]],
+) -> int:
+    """
+    Wandelt Text-Channels, die im Snapshot Typ 5 (Announcement) hatten,
+    in News-Channels um. Braucht Community-Features auf dem Server.
+    """
+    wanted_names = {
+        str(ch.get("name"))
+        for ch in channels_data
+        if ch.get("type") == 5 and ch.get("name")
+    }
+    if not wanted_names:
+        return 0
+
+    converted = 0
+    for channel in list(guild.text_channels):
+        if channel.name not in wanted_names:
+            continue
+        if getattr(channel, "is_news", lambda: False)():
+            print(f"[Backup] #{channel.name} ist bereits News-Channel")
+            continue
+        try:
+            await _with_timeout(
+                channel.edit(
+                    type=discord.ChannelType.news,
+                    reason="Backup Restore: Announcement Channel",
+                ),
+                15.0,
+                f"channel.edit news {channel.name}",
+            )
+            converted += 1
+            print(f"[Backup] #{channel.name} → Announcement/News")
+            await asyncio.sleep(0.4)
+        except Exception as e:
+            print(
+                f"[Backup] #{channel.name} konnte nicht zu News werden: {e} "
+                f"(Server braucht ggf. Community-Features)"
+            )
+    return converted
+
+
 async def apply_role_hierarchy(
     guild: discord.Guild,
     roles_data: list[dict[str, Any]],
