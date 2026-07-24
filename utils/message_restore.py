@@ -256,7 +256,6 @@ async def load_messages_page(
     vis, vparams = _visibility_sql(as_of, include_deleted)
 
     if after_created_at is not None and after_message_id is not None:
-        # Keyset: (created_at, message_id) > (after_created_at, after_message_id)
         query = f"""
             SELECT message_id, author_name, author_avatar, content, embeds, attachments, created_at
             FROM messages
@@ -265,7 +264,11 @@ async def load_messages_page(
             ORDER BY created_at ASC, message_id ASC
             LIMIT ?
         """
-        params: list[Any] = [channel_id, *vparams, after_created_at, after_created_at, after_message_id, page_size]
+        params: list[Any] = [
+            channel_id, *vparams,
+            after_created_at, after_created_at, after_message_id,
+            page_size,
+        ]
     else:
         query = f"""
             SELECT message_id, author_name, author_avatar, content, embeds, attachments, created_at
@@ -304,11 +307,7 @@ async def load_messages_for_channel(
     as_of: Optional[int] = None,
     include_deleted: bool = True,
 ) -> list[dict[str, Any]]:
-    """
-    Compatibility wrapper. Prefer the paginated path in run_message_restore.
-    Still used for small counts / already-restored filtering of a single page.
-    """
-    # Cap even the compatibility path so a caller cannot accidentally load 100k rows
+    """Compatibility wrapper – capped so callers cannot load unbounded rows."""
     effective_limit = PAGE_SIZE if limit is None else min(int(limit), PAGE_SIZE * 4)
 
     vis, vparams = _visibility_sql(as_of, include_deleted)
@@ -474,6 +473,7 @@ async def run_message_restore(
     as_of=None + include_deleted=True → Disaster/Nuke: alles aus der DB.
 
     Messages are loaded page-by-page (PAGE_SIZE) so large channels do not OOM.
+    Cursor always advances from the raw DB page (before already-restored filter).
     """
     await ensure_deleted_at_column(db_path)
 
@@ -550,8 +550,10 @@ async def run_message_restore(
             )
             if target is None:
                 channels_skipped += 1
-                print(f"[Backup] Kein Ziel-Channel für old_id={oid} "
-                      f"(name={name_lookup.get(oid)!r})")
+                print(
+                    f"[Backup] Kein Ziel-Channel für old_id={oid} "
+                    f"(name={name_lookup.get(oid)!r})"
+                )
                 continue
 
             if not target.permissions_for(guild.me).manage_webhooks:
@@ -561,7 +563,6 @@ async def run_message_restore(
 
             await update(f"Channel **#{target.name}** …")
 
-            # --- Paginated restore for this channel ---
             channel_sent = 0
             channel_empty = 0
             channel_errors = 0
@@ -576,7 +577,7 @@ async def run_message_restore(
                     break
 
                 page_limit = PAGE_SIZE if remaining is None else min(PAGE_SIZE, remaining)
-                page = await load_messages_page(
+                raw_page = await load_messages_page(
                     db_path,
                     oid,
                     after_created_at=after_created_at,
@@ -586,89 +587,41 @@ async def run_message_restore(
                     include_deleted=include_deleted,
                 )
 
-                if not page:
+                if not raw_page:
                     break
 
-                # Filter already-restored on this page
+                # Always advance cursor from the raw page (before any filter)
+                last_raw = raw_page[-1]
+                after_created_at = (
+                    int(last_raw["created_at"])
+                    if last_raw.get("created_at") is not None
+                    else None
+                )
+                after_message_id = int(last_raw["message_id"])
+
+                to_send = raw_page
                 if not force and guild_channel_ids:
                     already = await load_already_restored_in_guild(
                         db_path,
-                        [m["message_id"] for m in page],
+                        [m["message_id"] for m in raw_page],
                         guild_channel_ids,
                     )
-                    before = len(page)
-                    page = [m for m in page if m["message_id"] not in already]
-                    channel_skipped += before - len(page)
+                    to_send = [m for m in raw_page if m["message_id"] not in already]
+                    channel_skipped += len(raw_page) - len(to_send)
 
-                if page:
+                if to_send:
                     sent, empty, errors = await restore_messages_to_channel(
-                        target, page, db_path=db_path
+                        target, to_send, db_path=db_path
                     )
                     channel_sent += sent
                     channel_empty += empty
                     channel_errors += errors
 
-                # Advance keyset cursor from the *raw* page (before filter)
-                # so we never re-fetch the same rows
-                last = page[-1] if page else None
-                # We need the last row of the *unfiltered* page for correct pagination.
-                # Re-fetch is avoided by using the original page before filtering.
-                # To keep it simple and correct, advance using the last loaded row
-                # from the DB page (we still have the ids from the query).
-                # Re-load the last raw row for cursor if we filtered everything away.
-                if not page:
-                    # All were already restored – still advance past this page
-                    # by using a synthetic advance: fetch one more without filter
-                    # is complex; instead break if empty after filter and page was full
-                    # Safer: re-query the last message_id of the original page size.
-                    # Simplest robust approach: keep the last row of the DB page.
-                    # We lost it when filtering. So re-fetch the page without skip
-                    # only for the cursor (small cost).
-                    raw_page = await load_messages_page(
-                        db_path,
-                        oid,
-                        after_created_at=after_created_at,
-                        after_message_id=after_message_id,
-                        page_size=page_limit,
-                        as_of=as_of,
-                        include_deleted=include_deleted,
-                    )
-                    if not raw_page:
-                        break
-                    last_raw = raw_page[-1]
-                    after_created_at = int(last_raw["created_at"]) if last_raw.get("created_at") is not None else None
-                    after_message_id = int(last_raw["message_id"])
-                else:
-                    last = page[-1]
-                    after_created_at = int(last["created_at"]) if last.get("created_at") is not None else None
-                    after_message_id = int(last["message_id"])
-
                 if remaining is not None:
-                    remaining -= page_limit
+                    remaining -= len(raw_page)
 
-                if len(page) < page_limit and not (not force and channel_skipped):
-                    # Incomplete page → end of channel
-                    # (if we filtered a lot, we may need another iteration)
-                    if len(await load_messages_page(
-                        db_path, oid,
-                        after_created_at=after_created_at,
-                        after_message_id=after_message_id,
-                        page_size=1,
-                        as_of=as_of,
-                        include_deleted=include_deleted,
-                    )) == 0:
-                        break
-
-                # Safety: if the unfiltered page was shorter than requested, we're done
-                raw_len_check = await load_messages_page(
-                    db_path, oid,
-                    after_created_at=after_created_at,
-                    after_message_id=after_message_id,
-                    page_size=1,
-                    as_of=as_of,
-                    include_deleted=include_deleted,
-                )
-                if not raw_len_check:
+                # Last page from DB
+                if len(raw_page) < page_limit:
                     break
 
             total_sent += channel_sent
