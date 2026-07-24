@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import time
+import types
 import asyncio
 import aiosqlite
 import discord
@@ -26,6 +27,8 @@ try:
         apply_role_hierarchy,
         apply_guild_branding,
         fetch_icon_b64,
+        clear_manageable_roles,
+        dedupe_roles_by_name,
     )
 except ImportError:
     from ..utils.backup_ops import (
@@ -42,6 +45,8 @@ except ImportError:
         apply_role_hierarchy,
         apply_guild_branding,
         fetch_icon_b64,
+        clear_manageable_roles,
+        dedupe_roles_by_name,
     )
 
 BACKUP_DB_PATH = os.getenv("BACKUP_DATA_PATH", "data/backup.db")
@@ -50,7 +55,7 @@ ATTACHMENTS_DIR = os.getenv("BACKUP_ATTACHMENTS_PATH", "data/backups/attachments
 
 class MessageRestoreConfirmView(discord.ui.View):
     def __init__(self) -> None:
-        super().__init__(timeout=60)
+        super().__init__(timeout=90)
         self.confirmed = False
 
     @discord.ui.button(label="✅ Nachrichten wiederherstellen", style=discord.ButtonStyle.danger)
@@ -120,8 +125,6 @@ class BackupAdminCog(commands.Cog):
                 return None
             return json.loads(row[0])
 
-        original_save = cog._save_snapshot
-
         async def save_snapshot_with_icon(
             guild: discord.Guild,
             name: Optional[str],
@@ -146,6 +149,15 @@ class BackupAdminCog(commands.Cog):
                 await db.commit()
                 return cursor.lastrowid  # type: ignore[return-value]
 
+        original_clear = cog._clear_guild_structure
+
+        async def clear_with_roles(guild: discord.Guild) -> tuple[int, int]:
+            # Channels wie bisher
+            dc, _ = await original_clear(guild)
+            # Rollen aggressiver / nochmal (original löscht evtl. zu wenig)
+            dr = await clear_manageable_roles(guild)
+            return dc, dr
+
         original_restore = cog._restore_structure
 
         async def restore_with_extras(
@@ -154,21 +166,55 @@ class BackupAdminCog(commands.Cog):
             progress_msg: discord.WebhookMessage | discord.Message,
             clear_first: bool,
         ) -> None:
-            await original_restore(guild, data, progress_msg, clear_first)
+            # create_role: existierende Rolle gleichen Namens wiederverwenden
+            original_create_role = guild.create_role
 
-            # Hierarchie korrigieren (Reihenfolge wie Snapshot, unter Bot-Rolle)
+            async def create_role_reuse(*args: Any, **kwargs: Any) -> discord.Role:
+                role_name = kwargs.get("name") or (args[0] if args else None)
+                if role_name:
+                    existing = discord.utils.get(guild.roles, name=role_name)
+                    if (
+                        existing
+                        and not existing.is_default()
+                        and not existing.managed
+                        and guild.me
+                        and existing.position < guild.me.top_role.position
+                    ):
+                        try:
+                            await existing.edit(
+                                permissions=kwargs.get("permissions", existing.permissions),
+                                colour=kwargs.get("colour", existing.colour),
+                                hoist=kwargs.get("hoist", existing.hoist),
+                                mentionable=kwargs.get("mentionable", existing.mentionable),
+                                reason=kwargs.get("reason", "Backup Restore reuse"),
+                            )
+                        except Exception as e:
+                            print(f"[Backup] Rolle reuse-edit '{role_name}': {e}")
+                        print(f"[Backup] Rolle wiederverwendet: {role_name}")
+                        return existing
+                return await original_create_role(*args, **kwargs)
+
+            guild.create_role = create_role_reuse  # type: ignore[method-assign]
             try:
+                if clear_first:
+                    extra = await clear_manageable_roles(guild)
+                    print(f"[Backup] Extra Rollen-Clear: {extra}")
+
+                await original_restore(guild, data, progress_msg, clear_first)
+            finally:
+                guild.create_role = original_create_role  # type: ignore[method-assign]
+
+            try:
+                await dedupe_roles_by_name(guild)
                 await apply_role_hierarchy(guild, data.get("roles") or [])
             except Exception as e:
-                print(f"[Backup] Hierarchie-Nachbearbeitung: {e}")
+                print(f"[Backup] Hierarchie: {e}")
 
-            # Name + Icon
             try:
                 await apply_guild_branding(guild, data.get("guild") or {})
             except Exception as e:
-                print(f"[Backup] Branding-Nachbearbeitung: {e}")
+                print(f"[Backup] Branding: {e}")
 
-            # Channel-Map für Message-Restore
             try:
                 mapping: dict[int, int] = {}
                 for ch_data in list(data.get("channels", [])) + list(
@@ -218,7 +264,7 @@ class BackupAdminCog(commands.Cog):
                 )
                 server_name = "?"
                 try:
-                    g = (json.loads(data_json).get("guild") or {})
+                    g = json.loads(data_json).get("guild") or {}
                     server_name = g.get("name") or "?"
                 except Exception:
                     pass
@@ -227,12 +273,14 @@ class BackupAdminCog(commands.Cog):
                     f"└ Server: **{server_name}** · guild `{src}`"
                 )
 
-            embed = discord.Embed(
-                title="📦 Struktur-Snapshots",
-                description="\n".join(lines),
-                color=discord.Color.blurple(),
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    title="📦 Struktur-Snapshots",
+                    description="\n".join(lines),
+                    color=discord.Color.blurple(),
+                ),
+                ephemeral=True,
             )
-            await interaction.followup.send(embed=embed, ephemeral=True)
 
         async def fixed_restore_messages(
             _cog: Any,
@@ -242,42 +290,39 @@ class BackupAdminCog(commands.Cog):
             match_by_name: bool = True,
             snapshot_id: Optional[int] = None,
         ) -> None:
-            await interaction.response.defer(ephemeral=True)
-
+            # KEIN defer vor Confirm – sonst Timing/View-Probleme
             if not interaction.guild:
-                await interaction.followup.send("Nur auf einem Server nutzbar.", ephemeral=True)
+                await interaction.response.send_message(
+                    "Nur auf einem Server nutzbar.", ephemeral=True
+                )
                 return
 
             if cog._msg_restore_task and not cog._msg_restore_task.done():
-                await interaction.followup.send(
+                await interaction.response.send_message(
                     "⚠️ Ein Nachrichten-Restore läuft bereits.", ephemeral=True
                 )
                 return
 
             snapshot_data: Optional[dict[str, Any]] = None
+            # Immer instanz-weit (eine Instanz = ein logischer Server)
             source_guild_id: Optional[int] = None
             try:
                 if snapshot_id is not None:
                     snap = await load_snapshot_by_id(int(snapshot_id))
                     if snap:
                         snapshot_data = snap["data"]
-                        source_guild_id = snap.get("source_guild_id")
                 else:
                     snapshot_data = await load_latest_any()
-                    if snapshot_data:
-                        gid = (snapshot_data.get("guild") or {}).get("id")
-                        if gid:
-                            source_guild_id = int(gid)
 
-                total = await count_messages(db_path, source_guild_id)
-                if total == 0:
-                    total = await count_messages(db_path, None)
+                total = await count_messages(db_path, None)
             except Exception as e:
-                await interaction.followup.send(f"❌ Fehler: `{e}`", ephemeral=True)
+                await interaction.response.send_message(
+                    f"❌ Fehler: `{e}`", ephemeral=True
+                )
                 return
 
             if total == 0:
-                await interaction.followup.send(
+                await interaction.response.send_message(
                     "Keine gespeicherten Nachrichten in der Backup-DB.",
                     ephemeral=True,
                 )
@@ -299,7 +344,7 @@ class BackupAdminCog(commands.Cog):
             )
 
             view = MessageRestoreConfirmView()
-            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             await view.wait()
             if not view.confirmed:
                 return
@@ -321,7 +366,7 @@ class BackupAdminCog(commands.Cog):
                     limit_per_channel=int(limit) if limit else None,
                     match_by_name=match_by_name,
                     snapshot_data=snapshot_data,
-                    source_guild_id=source_guild_id,
+                    source_guild_id=None,  # gesamte Instanz-DB
                 )
             )
 
@@ -329,6 +374,7 @@ class BackupAdminCog(commands.Cog):
         cog._load_latest_snapshot_data = load_latest_any  # type: ignore[method-assign]
         cog._build_overwrites = build_overwrites  # type: ignore[method-assign]
         cog._save_snapshot = save_snapshot_with_icon  # type: ignore[method-assign]
+        cog._clear_guild_structure = clear_with_roles  # type: ignore[method-assign]
         cog._restore_structure = restore_with_extras  # type: ignore[method-assign]
 
         patched = []
@@ -341,21 +387,20 @@ class BackupAdminCog(commands.Cog):
                 patched.append("backup-restore-messages")
 
         for cmd in self.bot.tree.get_commands():
-            if cmd.name in ("backup-snapshots", "backup-restore-messages"):
-                if hasattr(cmd, "_callback"):
-                    cmd._callback = (  # type: ignore[attr-defined]
-                        fixed_snapshots
-                        if cmd.name == "backup-snapshots"
-                        else fixed_restore_messages
-                    )
-                    if cmd.name not in patched:
-                        patched.append(cmd.name)
+            if cmd.name in ("backup-snapshots", "backup-restore-messages") and hasattr(
+                cmd, "_callback"
+            ):
+                cmd._callback = (  # type: ignore[attr-defined]
+                    fixed_snapshots
+                    if cmd.name == "backup-snapshots"
+                    else fixed_restore_messages
+                )
+                if cmd.name not in patched:
+                    patched.append(cmd.name)
 
-        print(
-            f"[BackupAdmin] Patches: hierarchy+branding+icon · commands {patched}"
-        )
+        print(f"[BackupAdmin] Patches OK: roles+messages · {patched}")
 
-    # ---------- Exclude ----------
+    # ---------- Exclude / missing ----------
 
     @app_commands.command(
         name="backup-exclude",
