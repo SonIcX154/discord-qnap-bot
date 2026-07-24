@@ -19,7 +19,7 @@ try:
         ensure_extra_tables,
         save_channel_id_map,
     )
-    from utils.message_restore import count_messages, run_message_restore
+    from utils.message_restore import count_messages
 except ImportError:
     from ..utils.backup_ops import (
         add_excluded_channel,
@@ -29,7 +29,7 @@ except ImportError:
         ensure_extra_tables,
         save_channel_id_map,
     )
-    from ..utils.message_restore import count_messages, run_message_restore
+    from ..utils.message_restore import count_messages
 
 BACKUP_DB_PATH = os.getenv("BACKUP_DATA_PATH", "data/backup.db")
 ATTACHMENTS_DIR = os.getenv("BACKUP_ATTACHMENTS_PATH", "data/backups/attachments")
@@ -163,22 +163,30 @@ class BackupAdminCog(commands.Cog):
                 )
             return result
 
-        # --- /backup-snapshots: alle Snapshots der Instanz ---
-        async def fixed_snapshots(interaction: discord.Interaction) -> None:
+        # Cog-Callbacks: discord.py ruft (cog, interaction, **opts) auf
+        async def fixed_snapshots(
+            _cog: Any, interaction: discord.Interaction
+        ) -> None:
             await interaction.response.defer(ephemeral=True)
-            async with aiosqlite.connect(db_path) as db:
-                async with db.execute(
-                    """
-                    SELECT id, name, created_at, guild_id
-                    FROM snapshots ORDER BY created_at DESC LIMIT 25
-                    """
-                ) as cur:
-                    rows = await cur.fetchall()
+            try:
+                async with aiosqlite.connect(db_path) as db:
+                    async with db.execute(
+                        """
+                        SELECT id, name, created_at, guild_id
+                        FROM snapshots ORDER BY created_at DESC LIMIT 25
+                        """
+                    ) as cur:
+                        rows = await cur.fetchall()
+            except Exception as e:
+                await interaction.followup.send(f"❌ DB-Fehler: `{e}`", ephemeral=True)
+                return
+
             if not rows:
                 await interaction.followup.send(
                     "Noch keine Snapshots. Nutze `/backup-snapshot`.", ephemeral=True
                 )
                 return
+
             lines = []
             for snap_id, name, created_at, src in rows:
                 ts = datetime.fromtimestamp(created_at, tz=timezone.utc).strftime(
@@ -194,47 +202,51 @@ class BackupAdminCog(commands.Cog):
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
 
-        # --- /backup-restore-messages: Nachrichten instanz-weit ---
         async def fixed_restore_messages(
+            _cog: Any,
             interaction: discord.Interaction,
             channel: Optional[discord.TextChannel] = None,
-            limit: Optional[app_commands.Range[int, 1, 10000]] = None,
+            limit: Optional[int] = None,
             match_by_name: bool = True,
             snapshot_id: Optional[int] = None,
         ) -> None:
+            # Sofort defer, damit Discord nicht „reagiert nicht“ zeigt
+            await interaction.response.defer(ephemeral=True)
+
             if not interaction.guild:
-                await interaction.response.send_message(
-                    "Nur auf einem Server nutzbar.", ephemeral=True
-                )
+                await interaction.followup.send("Nur auf einem Server nutzbar.", ephemeral=True)
                 return
 
             if cog._msg_restore_task and not cog._msg_restore_task.done():
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "⚠️ Ein Nachrichten-Restore läuft bereits.", ephemeral=True
                 )
                 return
 
-            # Snapshot für Name-Mapping + source_guild_id
             snapshot_data: Optional[dict[str, Any]] = None
             source_guild_id: Optional[int] = None
-            if snapshot_id is not None:
-                snap = await load_snapshot_by_id(snapshot_id)
-                if snap:
-                    snapshot_data = snap["data"]
-                    source_guild_id = snap.get("source_guild_id")
-            else:
-                snapshot_data = await load_latest_any()
-                if snapshot_data:
-                    gid = (snapshot_data.get("guild") or {}).get("id")
-                    if gid:
-                        source_guild_id = int(gid)
+            try:
+                if snapshot_id is not None:
+                    snap = await load_snapshot_by_id(int(snapshot_id))
+                    if snap:
+                        snapshot_data = snap["data"]
+                        source_guild_id = snap.get("source_guild_id")
+                else:
+                    snapshot_data = await load_latest_any()
+                    if snapshot_data:
+                        gid = (snapshot_data.get("guild") or {}).get("id")
+                        if gid:
+                            source_guild_id = int(gid)
 
-            # Instanz-weit zählen (nach Rebuild ist interaction.guild.id neu)
-            total = await count_messages(db_path, source_guild_id)
+                total = await count_messages(db_path, source_guild_id)
+                if total == 0:
+                    total = await count_messages(db_path, None)
+            except Exception as e:
+                await interaction.followup.send(f"❌ Fehler beim Laden: `{e}`", ephemeral=True)
+                return
+
             if total == 0:
-                total = await count_messages(db_path, None)
-            if total == 0:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "Keine gespeicherten Nachrichten in der Backup-DB.",
                     ephemeral=True,
                 )
@@ -250,15 +262,19 @@ class BackupAdminCog(commands.Cog):
                     f"Ziel: {scope}\n"
                     f"Limit: {limit_txt}\n"
                     f"Name-Match: **{'an' if match_by_name else 'aus'}**\n\n"
-                    "Daten kommen aus der **Instanz-DB** (auch nach Server-Rebuild).\n"
+                    "Daten aus der **Instanz-DB** (auch nach Server-Rebuild).\n"
                     "Webhook · Original-Name/Avatar · Mentions aus."
                 ),
                 color=discord.Color.orange(),
             )
 
             view = MessageRestoreConfirmView()
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            # Nach defer: Confirm über followup + View
+            msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True, wait=True)
+            # View an die Message binden (falls nötig)
+            view.message = msg  # type: ignore[attr-defined]
             await view.wait()
+
             if not view.confirmed:
                 return
 
@@ -287,22 +303,28 @@ class BackupAdminCog(commands.Cog):
         cog._load_latest_snapshot_data = load_latest_any  # type: ignore[method-assign]
         cog._build_overwrites = fixed_build_overwrites  # type: ignore[method-assign]
 
-        # Callbacks der App-Commands austauschen
+        patched = []
         for cmd in getattr(cog, "__cog_app_commands__", []):
             if cmd.name == "backup-snapshots":
                 cmd._callback = fixed_snapshots  # type: ignore[attr-defined]
+                patched.append("backup-snapshots")
             elif cmd.name == "backup-restore-messages":
                 cmd._callback = fixed_restore_messages  # type: ignore[attr-defined]
+                patched.append("backup-restore-messages")
 
-        # Tree-Commands (falls schon registriert)
+        # Tree: _callback falls vorhanden (kein .callback Setter!)
         for cmd in self.bot.tree.get_commands():
-            if cmd.name == "backup-snapshots":
-                cmd.callback = fixed_snapshots  # type: ignore[attr-defined]
-            elif cmd.name == "backup-restore-messages":
-                cmd.callback = fixed_restore_messages  # type: ignore[attr-defined]
+            if cmd.name in ("backup-snapshots", "backup-restore-messages"):
+                if hasattr(cmd, "_callback"):
+                    if cmd.name == "backup-snapshots":
+                        cmd._callback = fixed_snapshots  # type: ignore[attr-defined]
+                    else:
+                        cmd._callback = fixed_restore_messages  # type: ignore[attr-defined]
+                    if cmd.name not in patched:
+                        patched.append(cmd.name)
 
         print(
-            "[BackupAdmin] Patches: Snapshots/Messages instanz-weit · overwrites-dict · ID-Lookup"
+            f"[BackupAdmin] Patches OK: methods + commands {patched or '(nur methods)'}"
         )
 
     async def _load_snapshot_any(self, snapshot_id: int) -> Optional[dict[str, Any]]:
