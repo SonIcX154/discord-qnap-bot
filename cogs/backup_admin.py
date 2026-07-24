@@ -58,7 +58,13 @@ class CrossRestoreConfirmView(discord.ui.View):
 
 
 class BackupAdminCog(commands.Cog):
-    """Admin-Hilfen: Exclude, Missing-Attachments, Cross-Server-Restore."""
+    """
+    Admin-Hilfen + Single-Guild Disaster-Recovery.
+
+    Design: eine Bot-Instanz / Container = eine Guild.
+    Nach Server-Löschung vergibt Discord eine neue guild_id –
+    Snapshots müssen daher per ID (nicht per guild_id) gefunden werden.
+    """
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -67,9 +73,52 @@ class BackupAdminCog(commands.Cog):
 
     async def cog_load(self) -> None:
         await ensure_extra_tables(self.db_path)
+        # BackupCog lädt alphabetisch vor uns → hier patchen
+        self.bot.loop.create_task(self._patch_backup_cog())
+
+    async def _patch_backup_cog(self) -> None:
+        """Macht /backup-restore und Snapshots guild-unabhängig (Disaster Recovery)."""
+        await asyncio.sleep(1)  # kurz warten bis alle Cogs da sind
+        cog = self.bot.get_cog("BackupCog")
+        if cog is None:
+            print("[BackupAdmin] BackupCog nicht gefunden – Patch übersprungen")
+            return
+
+        db_path = self.db_path
+
+        async def load_snapshot_by_id(
+            snapshot_id: int, guild_id: Optional[int] = None
+        ) -> Optional[dict[str, Any]]:
+            # guild_id wird absichtlich ignoriert – Snapshot-ID ist global pro Instanz
+            async with aiosqlite.connect(db_path) as db:
+                async with db.execute(
+                    "SELECT name, data, guild_id FROM snapshots WHERE id = ?",
+                    (snapshot_id,),
+                ) as cur:
+                    row = await cur.fetchone()
+            if not row:
+                return None
+            return {
+                "name": row[0],
+                "data": json.loads(row[1]),
+                "source_guild_id": int(row[2]),
+            }
+
+        async def load_latest_any(guild_id: Optional[int] = None) -> Optional[dict[str, Any]]:
+            async with aiosqlite.connect(db_path) as db:
+                async with db.execute(
+                    "SELECT data FROM snapshots ORDER BY created_at DESC LIMIT 1"
+                ) as cur:
+                    row = await cur.fetchone()
+            if not row:
+                return None
+            return json.loads(row[0])
+
+        cog._load_snapshot = load_snapshot_by_id  # type: ignore[method-assign]
+        cog._load_latest_snapshot_data = load_latest_any  # type: ignore[method-assign]
+        print("[BackupAdmin] Disaster-Recovery Patch aktiv: Snapshots per ID (ohne guild_id-Filter)")
 
     async def _load_snapshot_any(self, snapshot_id: int) -> Optional[dict[str, Any]]:
-        """Lädt Snapshot nur per ID – funktioniert server-übergreifend."""
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 "SELECT name, data, guild_id FROM snapshots WHERE id = ?",
@@ -151,11 +200,11 @@ class BackupAdminCog(commands.Cog):
             ephemeral=True,
         )
 
-    # ---------- Snapshots all + cross restore ----------
+    # ---------- Snapshots (alle, da eine Instanz = ein logischer Server) ----------
 
     @app_commands.command(
         name="backup-snapshots-all",
-        description="Listet ALLE Struktur-Snapshots (auch von anderen Servern)",
+        description="Listet alle Struktur-Snapshots dieser Bot-Instanz",
     )
     @app_commands.default_permissions(administrator=True)
     async def backup_snapshots_all(self, interaction: discord.Interaction) -> None:
@@ -178,26 +227,26 @@ class BackupAdminCog(commands.Cog):
         lines = []
         for snap_id, name, created_at, src_guild in rows:
             ts = datetime.fromtimestamp(created_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            g = self.bot.get_guild(int(src_guild))
-            gname = g.name if g else str(src_guild)
             lines.append(
-                f"**#{snap_id}** · {name or 'Unbenannt'} · `{ts}` · Quelle: **{gname}**"
+                f"**#{snap_id}** · {name or 'Unbenannt'} · `{ts}` · alte guild_id: `{src_guild}`"
             )
 
         embed = discord.Embed(
-            title="📦 Alle Struktur-Snapshots",
+            title="📦 Struktur-Snapshots (Instanz)",
             description="\n".join(lines),
             color=discord.Color.blurple(),
         )
-        embed.set_footer(text="Cross-Server: /backup-restore-cross snapshot_id:<id>")
+        embed.set_footer(
+            text="Nach Server-Löschung: /backup-restore oder /backup-restore-cross mit der ID"
+        )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(
         name="backup-restore-cross",
-        description="Struktur-Restore auf DIESEM Server (Snapshot von beliebigem Server)",
+        description="Struktur neu aufbauen (auch nach Server-Löschung / neuer Guild-ID)",
     )
     @app_commands.describe(
-        snapshot_id="ID aus /backup-snapshots-all",
+        snapshot_id="ID aus /backup-snapshots-all oder /backup-snapshot",
         clear_first="Bestehende Channels/Rollen vorher löschen",
     )
     @app_commands.default_permissions(administrator=True)
@@ -227,8 +276,8 @@ class BackupAdminCog(commands.Cog):
         snap = await self._load_snapshot_any(snapshot_id)
         if not snap:
             await interaction.response.send_message(
-                f"❌ Snapshot **#{snapshot_id}** existiert nicht in der DB.\n"
-                f"Prüfe mit `/backup-snapshots-all`.",
+                f"❌ Snapshot **#{snapshot_id}** nicht in der DB.\n"
+                f"→ `/backup-snapshots-all`",
                 ephemeral=True,
             )
             return
@@ -238,19 +287,16 @@ class BackupAdminCog(commands.Cog):
         cat_count = len(data.get("categories", []))
         ch_count = len(data.get("channels", []))
         src = snap["source_guild_id"]
-        src_g = self.bot.get_guild(src)
-        src_name = src_g.name if src_g else str(src)
 
         warning = ""
         if clear_first:
-            warning = "\n\n⚠️ **clear_first**: Channels/Rollen auf DIESEM Server werden gelöscht."
+            warning = "\n\n⚠️ **clear_first**: Channels/Rollen werden gelöscht."
 
         embed = discord.Embed(
-            title="⚠️ Cross-Server Struktur-Restore",
+            title="⚠️ Struktur-Restore (Disaster Recovery)",
             description=(
                 f"Snapshot **#{snapshot_id}** – {snap['name'] or 'Unbenannt'}\n"
-                f"Quelle: **{src_name}** (`{src}`)\n"
-                f"Ziel: **{interaction.guild.name}**\n\n"
+                f"Alte guild_id: `{src}` → Ziel: **{interaction.guild.name}**\n\n"
                 f"Rollen: **{role_count}** · Kategorien: **{cat_count}** · Channels: **{ch_count}**"
                 f"{warning}"
             ),
@@ -265,43 +311,32 @@ class BackupAdminCog(commands.Cog):
 
         progress_msg = await interaction.followup.send(
             embed=discord.Embed(
-                title="🔄 Cross-Server Restore startet…",
+                title="🔄 Struktur-Restore startet…",
                 color=discord.Color.orange(),
             ),
             ephemeral=False,
         )
 
-        async def run_and_save_map() -> None:
-            try:
-                # Hook: BackupCog speichert channel_map intern – wir wrappen leicht
-                original = backup_cog._restore_structure
+        async def wrapped(guild, data, progress_msg, clear_first):
+            await backup_cog._restore_structure(guild, data, progress_msg, clear_first)
+            # channel_id_map per Name speichern (neue IDs nach Rebuild)
+            mapping: dict[int, int] = {}
+            for ch_data in list(data.get("channels", [])) + list(data.get("categories", [])):
+                old_id = ch_data.get("id")
+                name = ch_data.get("name")
+                if not old_id or not name:
+                    continue
+                for c in guild.channels:
+                    if c.name == name:
+                        mapping[int(old_id)] = c.id
+                        break
+            if mapping:
+                await save_channel_id_map(self.db_path, guild.id, mapping)
+                print(f"[Backup] channel_id_map: {len(mapping)} Einträge für guild {guild.id}")
 
-                async def wrapped(guild, data, progress_msg, clear_first):
-                    # Kopie der Logik-Aufruf; channel_map speichern nach Erfolg
-                    # indem wir original aufrufen und danach Map aus DB-Snapshot-Namen matchen
-                    await original(guild, data, progress_msg, clear_first)
-                    # Name-basiertes Mapping als Fallback speichern
-                    mapping: dict[int, int] = {}
-                    for ch_data in data.get("channels", []) + data.get("categories", []):
-                        old_id = ch_data.get("id")
-                        name = ch_data.get("name")
-                        if not old_id or not name:
-                            continue
-                        for c in guild.channels:
-                            if c.name == name:
-                                mapping[int(old_id)] = c.id
-                                break
-                    if mapping:
-                        await save_channel_id_map(self.db_path, guild.id, mapping)
-                        print(f"[Backup] channel_id_map gespeichert: {len(mapping)} Einträge")
-
-                backup_cog._restore_task = asyncio.create_task(
-                    wrapped(interaction.guild, data, progress_msg, clear_first)
-                )
-            except Exception as e:
-                print(f"[Backup] Cross-restore start failed: {e}")
-
-        await run_and_save_map()
+        backup_cog._restore_task = asyncio.create_task(
+            wrapped(interaction.guild, data, progress_msg, clear_first)
+        )
 
     # ---------- Missing attachments ----------
 
@@ -349,7 +384,7 @@ class BackupAdminCog(commands.Cog):
                 stats = await download_missing_attachments(
                     self.db_path,
                     ATTACHMENTS_DIR,
-                    guild_id=None,  # alle Guilds – wichtig für Migration
+                    guild_id=None,
                     limit=int(limit),
                     on_progress=on_progress,
                 )
