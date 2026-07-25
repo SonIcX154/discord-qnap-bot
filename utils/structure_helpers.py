@@ -48,20 +48,60 @@ async def _with_timeout(coro, seconds: float, label: str):
         raise
 
 
+def _can_manage_role(me: discord.Member, role: discord.Role) -> tuple[bool, str]:
+    """
+    Discord hierarchy rules (independent of Administrator):
+    - cannot touch @everyone
+    - cannot touch managed roles (bots, integrations, boosts)
+    - can only manage roles *strictly below* the bot's highest role
+    """
+    if role.is_default():
+        return False, "@everyone"
+    if role.managed:
+        return False, "managed (bot/integration/boost)"
+    if role >= me.top_role:
+        return False, (
+            f"hierarchy (role pos={role.position} >= bot top "
+            f"'{me.top_role.name}' pos={me.top_role.position})"
+        )
+    if not (me.guild_permissions.manage_roles or me.guild_permissions.administrator):
+        return False, "missing Manage Roles / Administrator permission"
+    return True, ""
+
+
 async def clear_manageable_roles(guild: discord.Guild) -> int:
-    if not guild.me:
+    me = guild.me
+    if me is None:
         print("[Backup] clear roles: guild.me fehlt")
         return 0
-    bot_top = guild.me.top_role.position
-    deleted = 0
+
+    if not (me.guild_permissions.manage_roles or me.guild_permissions.administrator):
+        print(
+            "[Backup] clear roles: Bot hat weder Manage Roles noch Administrator – Abbruch"
+        )
+        return 0
+
+    bot_top = me.top_role
+    print(
+        f"[Backup] clear roles: bot='{me.display_name}' top_role='{bot_top.name}' "
+        f"pos={bot_top.position} admin={me.guild_permissions.administrator} "
+        f"manage_roles={me.guild_permissions.manage_roles}"
+    )
+
+    # Snapshot sorted high → low (delete higher first so hierarchy stays consistent)
     roles = sorted(list(guild.roles), key=lambda r: r.position, reverse=True)
-    print(f"[Backup] clear roles: {len(roles)} Rollen, bot_top={bot_top}")
+    print(f"[Backup] clear roles: {len(roles)} Rollen im Cache")
+
+    deleted = 0
+    skipped: list[str] = []
+    failed: list[str] = []
+
     for role in roles:
-        if role.is_default() or role.managed:
+        ok, reason = _can_manage_role(me, role)
+        if not ok:
+            skipped.append(f"{role.name} ({reason})")
             continue
-        if role.position >= bot_top:
-            print(f"[Backup] Rolle '{role.name}' zu hoch – skip")
-            continue
+
         try:
             await _with_timeout(
                 role.delete(reason="Backup Restore: clear roles"),
@@ -69,11 +109,58 @@ async def clear_manageable_roles(guild: discord.Guild) -> int:
                 f"role.delete {role.name}",
             )
             deleted += 1
-            print(f"[Backup] Rolle gelöscht: {role.name}")
-            await asyncio.sleep(0.35)
+            print(f"[Backup] Rolle gelöscht: {role.name} (pos={role.position})")
+            await asyncio.sleep(0.4)
+        except discord.Forbidden as e:
+            failed.append(f"{role.name}: Forbidden ({e})")
+            print(f"[Backup] Rolle löschen Forbidden '{role.name}': {e}")
+        except discord.HTTPException as e:
+            failed.append(f"{role.name}: HTTP {e.status} ({e})")
+            print(f"[Backup] Rolle löschen HTTP '{role.name}': {e}")
         except Exception as e:
+            failed.append(f"{role.name}: {e}")
             print(f"[Backup] Rolle löschen '{role.name}': {e}")
+
+    # Second pass: Discord sometimes keeps stale hierarchy after bulk deletes.
+    # Refresh member/role cache and try remaining roles once more.
+    if deleted > 0 or failed:
+        await asyncio.sleep(1.0)
+        try:
+            # Force a lightweight refresh of the guild's role list via HTTP
+            fetched = await guild.fetch_roles()
+            remaining = sorted(fetched, key=lambda r: r.position, reverse=True)
+        except Exception as e:
+            print(f"[Backup] clear roles refresh fehlgeschlagen: {e}")
+            remaining = sorted(list(guild.roles), key=lambda r: r.position, reverse=True)
+
+        # Re-resolve me after potential role changes
+        me = guild.me or me
+        for role in remaining:
+            ok, reason = _can_manage_role(me, role)
+            if not ok:
+                continue
+            try:
+                await _with_timeout(
+                    role.delete(reason="Backup Restore: clear roles (pass 2)"),
+                    15.0,
+                    f"role.delete.pass2 {role.name}",
+                )
+                deleted += 1
+                print(f"[Backup] Rolle gelöscht (pass 2): {role.name}")
+                await asyncio.sleep(0.4)
+            except Exception as e:
+                print(f"[Backup] Rolle löschen pass2 '{role.name}': {e}")
+                failed.append(f"{role.name} (pass2): {e}")
+
     print(f"[Backup] clear roles fertig: {deleted} gelöscht")
+    if skipped:
+        # Only log a summary – can be long
+        print(f"[Backup] clear roles übersprungen ({len(skipped)}): " + "; ".join(skipped[:15]))
+        if len(skipped) > 15:
+            print(f"[Backup]   … und {len(skipped) - 15} weitere")
+    if failed:
+        print(f"[Backup] clear roles fehlgeschlagen ({len(failed)}): " + "; ".join(failed[:10]))
+
     return deleted
 
 
@@ -101,9 +188,10 @@ async def clear_channels(guild: discord.Guild, keep_channel_id: Optional[int] = 
 
 
 async def dedupe_roles_by_name(guild: discord.Guild) -> int:
-    if not guild.me:
+    me = guild.me
+    if me is None:
         return 0
-    bot_top = guild.me.top_role.position
+
     by_name: dict[str, list[discord.Role]] = {}
     for role in guild.roles:
         if role.is_default() or role.managed:
@@ -114,9 +202,11 @@ async def dedupe_roles_by_name(guild: discord.Guild) -> int:
     for name, roles in by_name.items():
         if len(roles) < 2:
             continue
+        # Keep the highest; delete the rest if manageable
         roles_sorted = sorted(roles, key=lambda r: r.position, reverse=True)
         for role in roles_sorted[1:]:
-            if role.position >= bot_top:
+            ok, _ = _can_manage_role(me, role)
+            if not ok:
                 continue
             try:
                 await _with_timeout(
@@ -180,12 +270,13 @@ async def apply_role_hierarchy(
     guild: discord.Guild,
     roles_data: list[dict[str, Any]],
 ) -> None:
-    if not guild.me:
+    me = guild.me
+    if me is None:
         return
 
     await dedupe_roles_by_name(guild)
 
-    bot_top = guild.me.top_role.position
+    bot_top = me.top_role.position
     max_usable = max(1, bot_top - 1)
 
     wanted = sorted(
@@ -200,7 +291,7 @@ async def apply_role_hierarchy(
     for role in guild.roles:
         if role.is_default() or role.managed:
             continue
-        if role.position >= bot_top:
+        if role >= me.top_role:
             continue
         if role.name not in by_name:
             by_name[role.name] = role
