@@ -46,8 +46,6 @@ _CLEARCHAT_USER_RE = re.compile(
     r"CLEARCHAT\s+#\S+\s+:(\S+)",
     re.IGNORECASE,
 )
-
-# Twitch /me → IRC CTCP ACTION: \x01ACTION text\x01
 _ACTION_RE = re.compile(r"^\x01ACTION[ ]?(.*)\x01$", re.DOTALL | re.IGNORECASE)
 _ACTION_FALLBACK_RE = re.compile(
     r"^(?:\x01|\u0001)?ACTION[ ]?(.*?)(?:\x01|\u0001)?$",
@@ -168,11 +166,6 @@ def _unescape_twitch_tag(value: str) -> str:
 
 
 def _normalize_content(raw: str) -> tuple[str, bool]:
-    """
-    Strip Twitch /me CTCP ACTION framing.
-    Returns (clean_content, is_action).
-    /me is mirrored as normal plain text (no special formatting).
-    """
     text = (raw or "").strip()
     if not text:
         return "", False
@@ -192,7 +185,42 @@ def _normalize_content(raw: str) -> tuple[str, bool]:
     return text, False
 
 
+def _parent_names_from_tags(tags: dict[str, Any]) -> list[str]:
+    """Login + display name of the message being replied to."""
+    names: list[str] = []
+    for key in ("reply-parent-user-login", "reply-parent-display-name"):
+        raw = tags.get(key)
+        if not raw:
+            continue
+        name = _unescape_twitch_tag(str(raw)).lstrip("@").strip()
+        if name and name.lower() not in {n.lower() for n in names}:
+            names.append(name)
+    return names
+
+
+def _strip_leading_reply_mention(content: str, tags: dict[str, Any]) -> str:
+    """
+    Twitch bots often prefix replies with @ParentName.
+    Remove that leading mention when we already show a reply header.
+    """
+    names = _parent_names_from_tags(tags)
+    if not names or not content:
+        return content
+
+    # Longest first so display names win over shorter logins when both match
+    alt = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    # @Name / Name at start, optional : or , then whitespace
+    cleaned = re.sub(
+        rf"^(?i)@?(?:{alt})\b[:,]?\s+",
+        "",
+        content,
+        count=1,
+    ).strip()
+    return cleaned or content
+
+
 def _reply_header_from_tags(tags: dict[str, Any]) -> Optional[str]:
+    """Chatterino-style: Replying to Name: parent text"""
     parent_id = tags.get("reply-parent-msg-id")
     if not parent_id:
         return None
@@ -202,7 +230,7 @@ def _reply_header_from_tags(tags: dict[str, Any]) -> Optional[str]:
         or tags.get("reply-parent-user-login")
         or "someone"
     )
-    display = _unescape_twitch_tag(str(display))
+    display = _unescape_twitch_tag(str(display)).lstrip("@")
 
     body = tags.get("reply-parent-msg-body") or ""
     body = _unescape_twitch_tag(str(body)).replace("\n", " ").strip()
@@ -211,8 +239,8 @@ def _reply_header_from_tags(tags: dict[str, Any]) -> Optional[str]:
         body = body[:117] + "…"
 
     if body:
-        return f"-# ↩️ **{display}**: {body}"
-    return f"-# ↩️ **{display}**"
+        return f"-# ↩️ Replying to **{display}**: {body}"
+    return f"-# ↩️ Replying to **{display}**"
 
 
 class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # type: ignore[misc]
@@ -269,7 +297,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 + ", ".join(f"{k}→<@{v}>" for k, v in OWNER_PING_MAP.items())
             )
         print("[TwitchMirror] Moderation sync: CLEARMSG + CLEARCHAT → Discord deletes")
-        print("[TwitchMirror] /me ACTION stripped (plain text) · Twitch replies formatted")
+        print("[TwitchMirror] /me plain · replies: Chatterino-style + strip parent @")
         if self._worker_task is None or self._worker_task.done():
             self._worker_task = asyncio.create_task(self._discord_worker())
 
@@ -287,6 +315,10 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
         tags = _message_tags(message)
         reply_header = _reply_header_from_tags(tags)
+        if reply_header:
+            content = _strip_leading_reply_mention(content, tags)
+            if not content:
+                return
 
         await self._queue.put(
             (login, display, content[:1900], _twitch_msg_id(message), reply_header, is_action)
@@ -441,7 +473,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         reply_header: Optional[str],
         is_action: bool,
     ) -> str:
-        # /me: ACTION framing already stripped — plain text only, no italics
         body = content
         if reply_header:
             return f"{reply_header}\n{body}"
