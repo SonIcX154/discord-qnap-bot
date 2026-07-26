@@ -21,9 +21,6 @@ except ImportError:
     aiohttp = None  # type: ignore
 
 
-# ---------------------------------------------------------------------------
-# Config from environment
-# ---------------------------------------------------------------------------
 TWITCH_TOKEN = os.getenv("TWITCH_TOKEN", "").strip()
 TWITCH_CHANNEL = os.getenv("TWITCH_CHANNEL", "").strip().lstrip("#").lower()
 TWITCH_DISCORD_CHANNEL_ID = os.getenv("TWITCH_DISCORD_CHANNEL_ID", "").strip()
@@ -51,6 +48,8 @@ _ACTION_FALLBACK_RE = re.compile(
     r"^(?:\x01|\u0001)ACTION[ ]?(.*?)(?:\x01|\u0001)$",
     re.DOTALL | re.IGNORECASE,
 )
+# Leading @Name on a reply body (bots always ping the parent first)
+_LEADING_AT_RE = re.compile(r"^@\S+\s+")
 
 
 def _configured() -> bool:
@@ -149,13 +148,23 @@ def _message_tags(message: Any) -> dict[str, Any]:
     tags = getattr(message, "tags", None)
     if isinstance(tags, dict):
         return tags
-    # twitchio sometimes exposes a Tag-like object
     if tags is not None and hasattr(tags, "items"):
         try:
             return dict(tags.items())  # type: ignore[arg-type]
         except Exception:
             pass
     return {}
+
+
+def _tag_get(tags: dict[str, Any], *keys: str) -> Optional[str]:
+    """Read a tag trying hyphen and underscore forms."""
+    for key in keys:
+        if key in tags and tags[key] not in (None, ""):
+            return str(tags[key])
+        alt = key.replace("-", "_")
+        if alt in tags and tags[alt] not in (None, ""):
+            return str(tags[alt])
+    return None
 
 
 def _unescape_twitch_tag(value: str) -> str:
@@ -182,7 +191,6 @@ def _normalize_content(raw: str) -> tuple[str, bool]:
         body = body.replace("\x01", "").replace("\u0001", "").strip()
         return body, True
 
-    # Only treat as ACTION if SOH framing is present (avoid false positives)
     m = _ACTION_FALLBACK_RE.match(text)
     if m:
         body = (m.group(1) or "").strip()
@@ -198,69 +206,62 @@ def _normalize_content(raw: str) -> tuple[str, bool]:
     return text, False
 
 
-def _parent_names_from_tags(tags: dict[str, Any]) -> list[str]:
-    names: list[str] = []
-    for key in ("reply-parent-user-login", "reply-parent-display-name"):
-        raw = tags.get(key)
-        if not raw:
-            continue
-        name = _unescape_twitch_tag(str(raw)).lstrip("@").strip()
-        if name and name.lower() not in {n.lower() for n in names}:
-            names.append(name)
-    return names
-
-
 def _strip_leading_reply_mention(content: str, tags: dict[str, Any]) -> str:
     """
-    Remove a leading @ParentName that Twitch bots often prepend to replies.
-    Never returns empty if the original content had other text — on failure
-    returns the original content unchanged.
-    """
-    original = content
-    names = _parent_names_from_tags(tags)
-    if not names or not content:
-        return content
+    Twitch bots prefix replies with @ParentName. Remove that leading mention.
 
-    try:
-        alt = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
-        # Require @ OR a clear name+separator so we don't eat random text
-        cleaned = re.sub(
-            rf"^(?i)(?:@({alt})|({alt})[:\,])\s+",
-            "",
-            content,
-            count=1,
-        ).strip()
-        # Also handle bare "@Name rest" without colon
-        if cleaned == content:
-            cleaned = re.sub(
-                rf"^(?i)@({alt})\s+",
-                "",
-                content,
-                count=1,
-            ).strip()
-        return cleaned if cleaned else original
-    except Exception as e:
-        print(f"[TwitchMirror] strip reply mention failed: {e}")
+    Strategy:
+    1. Prefer matching known parent login/display from IRC tags
+    2. If this is a reply at all, strip the first @token + whitespace anyway
+       (safe: the reply header already shows who was replied to)
+    """
+    original = (content or "").strip()
+    if not original:
         return original
+
+    parent_login = _tag_get(tags, "reply-parent-user-login")
+    parent_display = _tag_get(tags, "reply-parent-display-name")
+    names: list[str] = []
+    for raw in (parent_login, parent_display):
+        if not raw:
+            continue
+        name = _unescape_twitch_tag(raw).lstrip("@").strip()
+        if name and name.lower() not in {n.lower() for n in names}:
+            names.append(name)
+
+    # 1) Explicit parent name match
+    for name in sorted(names, key=len, reverse=True):
+        pat = re.compile(rf"^@{re.escape(name)}\b[:,]?\s+", re.IGNORECASE)
+        cleaned = pat.sub("", original, count=1).strip()
+        if cleaned and cleaned != original:
+            return cleaned
+
+    # 2) Any leading @mention on a reply (bots always do this)
+    is_reply = bool(_tag_get(tags, "reply-parent-msg-id"))
+    if is_reply and original.startswith("@"):
+        cleaned = _LEADING_AT_RE.sub("", original, count=1).strip()
+        if cleaned:
+            return cleaned
+
+    return original
 
 
 def _reply_header_from_tags(tags: dict[str, Any]) -> Optional[str]:
-    """Chatterino-style: Replying to Name: parent text"""
-    parent_id = tags.get("reply-parent-msg-id")
+    parent_id = _tag_get(tags, "reply-parent-msg-id")
     if not parent_id:
         return None
 
     display = (
-        tags.get("reply-parent-display-name")
-        or tags.get("reply-parent-user-login")
+        _tag_get(tags, "reply-parent-display-name")
+        or _tag_get(tags, "reply-parent-user-login")
         or "someone"
     )
-    display = _unescape_twitch_tag(str(display)).lstrip("@")
-    # Discord markdown-safe-ish
+    display = _unescape_twitch_tag(display).lstrip("@")
+    # Avoid Discord markdown eating underscores inside **bold**
     display = display.replace("*", "").replace("`", "").replace("_", "\u02cd")[:64]
 
-    body = tags.get("reply-parent-msg-body") or ""
-    body = _unescape_twitch_tag(str(body)).replace("\n", " ").strip()
+    body = _tag_get(tags, "reply-parent-msg-body") or ""
+    body = _unescape_twitch_tag(body).replace("\n", " ").strip()
     body, _ = _normalize_content(body)
     body = body.replace("*", "\u2217").replace("`", "'")
     if len(body) > 120:
@@ -272,8 +273,6 @@ def _reply_header_from_tags(tags: dict[str, Any]) -> Optional[str]:
 
 
 class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # type: ignore[misc]
-    """Twitch chat → Discord webhook, with moderated-message deletes."""
-
     def __init__(self, discord_bot: commands.Bot, discord_channel_id: int) -> None:
         if twitch_commands is None:
             raise RuntimeError("twitchio is not installed")
@@ -296,7 +295,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
         self._msg_map: OrderedDict[str, int] = OrderedDict()
         self._login_msgs: dict[str, set[str]] = defaultdict(set)
-        self._parent_discord: OrderedDict[str, int] = OrderedDict()
         self._webhook: Optional[discord.Webhook] = None
         self._text_channel: Optional[discord.TextChannel] = None
 
@@ -324,8 +322,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 f"[TwitchMirror] Owner ping map (@ or bare): "
                 + ", ".join(f"{k}→<@{v}>" for k, v in OWNER_PING_MAP.items())
             )
-        print("[TwitchMirror] Moderation sync: CLEARMSG + CLEARCHAT → Discord deletes")
-        print("[TwitchMirror] /me plain · replies: Chatterino-style + strip parent @")
+        print("[TwitchMirror] Moderation sync + reply @ strip (aggressive)")
         if self._worker_task is None or self._worker_task.done():
             self._worker_task = asyncio.create_task(self._discord_worker())
 
@@ -351,7 +348,13 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             try:
                 reply_header = _reply_header_from_tags(tags)
                 if reply_header:
+                    before = content
                     content = _strip_leading_reply_mention(content, tags)
+                    if content != before:
+                        print(
+                            f"[TwitchMirror] stripped reply @mention: "
+                            f"{before[:40]!r} → {content[:40]!r}"
+                        )
             except Exception as e:
                 print(f"[TwitchMirror] reply format error (sending plain): {e}")
                 reply_header = None
@@ -522,6 +525,11 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         is_action: bool,
     ) -> str:
         body = content
+        # Safety net: if this is a reply and body still starts with @Name, strip it
+        if reply_header and body.startswith("@"):
+            stripped = _LEADING_AT_RE.sub("", body, count=1).strip()
+            if stripped:
+                body = stripped
         if reply_header:
             return f"{reply_header}\n{body}"
         return body
@@ -586,6 +594,13 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 username = _safe_webhook_username(display)
                 avatar_url = await self._fetch_avatar(login)
 
+                # Strip reply @ before owner-ping conversion so @Parent isn't
+                # turned into a Discord mention when Parent is the owner
+                if reply_header and content.startswith("@"):
+                    stripped = _LEADING_AT_RE.sub("", content, count=1).strip()
+                    if stripped:
+                        content = stripped
+
                 content, ping_ids = _apply_owner_pings(content)
                 final = self._compose_content(content, reply_header, is_action)
                 if not final.strip():
@@ -619,7 +634,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                             discord_msg_id = sent.id
                     except discord.HTTPException as e:
                         print(f"[TwitchMirror] Webhook send failed: {e}")
-                        # Retry without reply header if that was the problem
                         if reply_header:
                             try:
                                 sent = await webhook.send(
@@ -630,7 +644,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                                     allowed_mentions=mentions,
                                 )
                                 discord_msg_id = sent.id
-                                print("[TwitchMirror] Sent reply as plain (header rejected)")
                             except Exception as e2:
                                 print(f"[TwitchMirror] Plain retry failed: {e2}")
                         else:
@@ -661,8 +674,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
 
 class TwitchMirrorCog(commands.Cog):
-    """Mirrors Twitch chat into Discord via webhook (name + avatar + mod deletes)."""
-
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self._twitch: Optional[TwitchMirrorBot] = None
@@ -670,12 +681,12 @@ class TwitchMirrorCog(commands.Cog):
 
     async def cog_load(self) -> None:
         if twitch_commands is None:
-            print("[TwitchMirror] twitchio not installed – cog idle (pip install twitchio)")
+            print("[TwitchMirror] twitchio not installed – cog idle")
             return
         if not _configured():
             print(
                 "[TwitchMirror] Disabled – set TWITCH_TOKEN, TWITCH_CHANNEL, "
-                "TWITCH_DISCORD_CHANNEL_ID in .env to enable"
+                "TWITCH_DISCORD_CHANNEL_ID in .env"
             )
             return
 
@@ -684,12 +695,6 @@ class TwitchMirrorCog(commands.Cog):
         except ValueError:
             print(f"[TwitchMirror] Invalid TWITCH_DISCORD_CHANNEL_ID: {TWITCH_DISCORD_CHANNEL_ID!r}")
             return
-
-        if not TWITCH_CLIENT_ID:
-            print(
-                "[TwitchMirror] TWITCH_CLIENT_ID not set – messages will use "
-                "Twitch display names but default avatars until you add it"
-            )
 
         self._twitch = TwitchMirrorBot(self.bot, channel_id)
         self._task = asyncio.create_task(self._run_twitch())
@@ -735,8 +740,7 @@ class TwitchMirrorCog(commands.Cog):
     async def twitch_mirror_status(self, interaction: discord.Interaction) -> None:
         if not _configured():
             await interaction.response.send_message(
-                "Twitch mirror is **not configured**.\n"
-                "Set `TWITCH_TOKEN`, `TWITCH_CHANNEL`, `TWITCH_DISCORD_CHANNEL_ID` in `.env`.",
+                "Twitch mirror is **not configured**.",
                 ephemeral=True,
             )
             return
@@ -758,18 +762,7 @@ class TwitchMirrorCog(commands.Cog):
             value="🟢 connected" if connected else "🔴 disconnected / starting",
             inline=True,
         )
-        embed.add_field(name="Mode", value="Webhook + mod deletes + replies", inline=True)
-        embed.add_field(
-            name="Avatar API",
-            value="Helix OK" if TWITCH_CLIENT_ID else "no CLIENT_ID (default avatars)",
-            inline=True,
-        )
         embed.add_field(name="Tracked msgs", value=str(tracked), inline=True)
-        if OWNER_PING_MAP:
-            ping_desc = "\n".join(
-                f"`@{k}` / `{k}` → <@{v}>" for k, v in OWNER_PING_MAP.items()
-            )
-            embed.add_field(name="Owner pings", value=ping_desc, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
