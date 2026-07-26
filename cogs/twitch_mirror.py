@@ -48,7 +48,7 @@ _CLEARCHAT_USER_RE = re.compile(
 )
 _ACTION_RE = re.compile(r"^\x01ACTION[ ]?(.*)\x01$", re.DOTALL | re.IGNORECASE)
 _ACTION_FALLBACK_RE = re.compile(
-    r"^(?:\x01|\u0001)?ACTION[ ]?(.*?)(?:\x01|\u0001)?$",
+    r"^(?:\x01|\u0001)ACTION[ ]?(.*?)(?:\x01|\u0001)$",
     re.DOTALL | re.IGNORECASE,
 )
 
@@ -149,6 +149,12 @@ def _message_tags(message: Any) -> dict[str, Any]:
     tags = getattr(message, "tags", None)
     if isinstance(tags, dict):
         return tags
+    # twitchio sometimes exposes a Tag-like object
+    if tags is not None and hasattr(tags, "items"):
+        try:
+            return dict(tags.items())  # type: ignore[arg-type]
+        except Exception:
+            pass
     return {}
 
 
@@ -170,7 +176,14 @@ def _normalize_content(raw: str) -> tuple[str, bool]:
     if not text:
         return "", False
 
-    m = _ACTION_RE.match(text) or _ACTION_FALLBACK_RE.match(text)
+    m = _ACTION_RE.match(text)
+    if m:
+        body = (m.group(1) or "").strip()
+        body = body.replace("\x01", "").replace("\u0001", "").strip()
+        return body, True
+
+    # Only treat as ACTION if SOH framing is present (avoid false positives)
+    m = _ACTION_FALLBACK_RE.match(text)
     if m:
         body = (m.group(1) or "").strip()
         body = body.replace("\x01", "").replace("\u0001", "").strip()
@@ -186,7 +199,6 @@ def _normalize_content(raw: str) -> tuple[str, bool]:
 
 
 def _parent_names_from_tags(tags: dict[str, Any]) -> list[str]:
-    """Login + display name of the message being replied to."""
     names: list[str] = []
     for key in ("reply-parent-user-login", "reply-parent-display-name"):
         raw = tags.get(key)
@@ -200,23 +212,36 @@ def _parent_names_from_tags(tags: dict[str, Any]) -> list[str]:
 
 def _strip_leading_reply_mention(content: str, tags: dict[str, Any]) -> str:
     """
-    Twitch bots often prefix replies with @ParentName.
-    Remove that leading mention when we already show a reply header.
+    Remove a leading @ParentName that Twitch bots often prepend to replies.
+    Never returns empty if the original content had other text — on failure
+    returns the original content unchanged.
     """
+    original = content
     names = _parent_names_from_tags(tags)
     if not names or not content:
         return content
 
-    # Longest first so display names win over shorter logins when both match
-    alt = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
-    # @Name / Name at start, optional : or , then whitespace
-    cleaned = re.sub(
-        rf"^(?i)@?(?:{alt})\b[:,]?\s+",
-        "",
-        content,
-        count=1,
-    ).strip()
-    return cleaned or content
+    try:
+        alt = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+        # Require @ OR a clear name+separator so we don't eat random text
+        cleaned = re.sub(
+            rf"^(?i)(?:@({alt})|({alt})[:\,])\s+",
+            "",
+            content,
+            count=1,
+        ).strip()
+        # Also handle bare "@Name rest" without colon
+        if cleaned == content:
+            cleaned = re.sub(
+                rf"^(?i)@({alt})\s+",
+                "",
+                content,
+                count=1,
+            ).strip()
+        return cleaned if cleaned else original
+    except Exception as e:
+        print(f"[TwitchMirror] strip reply mention failed: {e}")
+        return original
 
 
 def _reply_header_from_tags(tags: dict[str, Any]) -> Optional[str]:
@@ -231,10 +256,13 @@ def _reply_header_from_tags(tags: dict[str, Any]) -> Optional[str]:
         or "someone"
     )
     display = _unescape_twitch_tag(str(display)).lstrip("@")
+    # Discord markdown-safe-ish
+    display = display.replace("*", "").replace("`", "").replace("_", "\u02cd")[:64]
 
     body = tags.get("reply-parent-msg-body") or ""
     body = _unescape_twitch_tag(str(body)).replace("\n", " ").strip()
     body, _ = _normalize_content(body)
+    body = body.replace("*", "\u2217").replace("`", "'")
     if len(body) > 120:
         body = body[:117] + "…"
 
@@ -302,27 +330,47 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             self._worker_task = asyncio.create_task(self._discord_worker())
 
     async def event_message(self, message) -> None:  # type: ignore[no-untyped-def]
-        if getattr(message, "echo", False):
-            return
+        try:
+            if getattr(message, "echo", False):
+                return
 
-        author = message.author
-        login = (getattr(author, "name", None) or "unknown").lower()
-        display = getattr(author, "display_name", None) or getattr(author, "name", None) or "unknown"
-        raw = message.content or ""
-        content, is_action = _normalize_content(raw)
-        if not content:
-            return
-
-        tags = _message_tags(message)
-        reply_header = _reply_header_from_tags(tags)
-        if reply_header:
-            content = _strip_leading_reply_mention(content, tags)
+            author = message.author
+            login = (getattr(author, "name", None) or "unknown").lower()
+            display = (
+                getattr(author, "display_name", None)
+                or getattr(author, "name", None)
+                or "unknown"
+            )
+            raw = message.content or ""
+            content, is_action = _normalize_content(raw)
             if not content:
                 return
 
-        await self._queue.put(
-            (login, display, content[:1900], _twitch_msg_id(message), reply_header, is_action)
-        )
+            tags = _message_tags(message)
+            reply_header: Optional[str] = None
+            try:
+                reply_header = _reply_header_from_tags(tags)
+                if reply_header:
+                    content = _strip_leading_reply_mention(content, tags)
+            except Exception as e:
+                print(f"[TwitchMirror] reply format error (sending plain): {e}")
+                reply_header = None
+
+            if not content:
+                return
+
+            await self._queue.put(
+                (
+                    login,
+                    display,
+                    content[:1900],
+                    _twitch_msg_id(message),
+                    reply_header,
+                    is_action,
+                )
+            )
+        except Exception as e:
+            print(f"[TwitchMirror] event_message error: {e}")
 
     async def event_raw_data(self, data: str) -> None:  # type: ignore[no-untyped-def]
         if not data:
@@ -540,6 +588,8 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
                 content, ping_ids = _apply_owner_pings(content)
                 final = self._compose_content(content, reply_header, is_action)
+                if not final.strip():
+                    continue
                 mentions = _allowed_mentions_for(ping_ids)
 
                 discord_msg_id: Optional[int] = None
@@ -569,14 +619,29 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                             discord_msg_id = sent.id
                     except discord.HTTPException as e:
                         print(f"[TwitchMirror] Webhook send failed: {e}")
-                        try:
-                            sent = await channel.send(
-                                f"**{username}**: {final}",
-                                allowed_mentions=mentions,
-                            )
-                            discord_msg_id = sent.id
-                        except Exception as e2:
-                            print(f"[TwitchMirror] Fallback send failed: {e2}")
+                        # Retry without reply header if that was the problem
+                        if reply_header:
+                            try:
+                                sent = await webhook.send(
+                                    content=content,
+                                    username=username,
+                                    avatar_url=avatar_url or discord.utils.MISSING,
+                                    wait=True,
+                                    allowed_mentions=mentions,
+                                )
+                                discord_msg_id = sent.id
+                                print("[TwitchMirror] Sent reply as plain (header rejected)")
+                            except Exception as e2:
+                                print(f"[TwitchMirror] Plain retry failed: {e2}")
+                        else:
+                            try:
+                                sent = await channel.send(
+                                    f"**{username}**: {final}",
+                                    allowed_mentions=mentions,
+                                )
+                                discord_msg_id = sent.id
+                            except Exception as e2:
+                                print(f"[TwitchMirror] Fallback send failed: {e2}")
                 else:
                     sent = await channel.send(
                         f"**{username}**: {final}",
