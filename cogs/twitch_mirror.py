@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import asyncio
 import discord
 from discord.ext import commands
@@ -27,19 +28,17 @@ TWITCH_DISCORD_CHANNEL_ID = os.getenv("TWITCH_DISCORD_CHANNEL_ID", "").strip()
 TWITCH_NICK = os.getenv("TWITCH_NICK", "").strip()
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "").strip()
 
+# Map Twitch @name → Discord user ping (your main account)
+# DISCORD_OWNER_ID = your Discord snowflake
+# TWITCH_OWNER_NAMES = comma-separated Twitch logins/display names to match
+#   (defaults to TWITCH_CHANNEL if only DISCORD_OWNER_ID is set)
+DISCORD_OWNER_ID = os.getenv("DISCORD_OWNER_ID", "").strip()
+TWITCH_OWNER_NAMES = os.getenv("TWITCH_OWNER_NAMES", "").strip()
+
 # Soft rate limit so a busy Twitch chat does not hammer Discord
 SEND_DELAY = float(os.getenv("TWITCH_MIRROR_DELAY", "0.35"))
 
 WEBHOOK_NAME = "Twitch Mirror"
-DEFAULT_AVATAR = (
-    "https://static-cdn.jtvnw.net/user-default-pictures-uv/"
-    "294c98b6-e37d-4448-8f9f-8c0cb0c0c0c0-profile_image-70x70.png"
-)
-# Fallback generic Twitch-like icon if Helix is unavailable
-FALLBACK_AVATAR = (
-    "https://static-cdn.jtvnw.net/jtv_user_pictures/"
-    "8a6381ca-29f0-4e97-a3c8-5c8c0c0c0c0c-profile_image-70x70.png"
-)
 
 
 def _configured() -> bool:
@@ -47,7 +46,6 @@ def _configured() -> bool:
 
 
 def _normalize_token(token: str) -> str:
-    """twitchio accepts oauth:xxx or bare access token."""
     t = token.strip()
     if t.lower().startswith("oauth:"):
         return t
@@ -62,11 +60,78 @@ def _bearer_token(token: str) -> str:
 
 
 def _safe_webhook_username(name: str) -> str:
-    """Discord webhook usernames: 1–80 chars, no "clyde"."""
     base = (name or "Twitch User").strip() or "Twitch User"
     if base.lower() == "clyde":
         base = "Clyde_"
     return base[:80]
+
+
+def _build_owner_ping_map() -> dict[str, int]:
+    """
+    Lowercase Twitch name → Discord user id.
+
+    Env:
+      DISCORD_OWNER_ID=123456789012345678
+      TWITCH_OWNER_NAMES=mylogin,MyDisplayName   # optional, default TWITCH_CHANNEL
+    """
+    mapping: dict[str, int] = {}
+    if not DISCORD_OWNER_ID:
+        return mapping
+    try:
+        owner_id = int(DISCORD_OWNER_ID)
+    except ValueError:
+        print(f"[TwitchMirror] Invalid DISCORD_OWNER_ID: {DISCORD_OWNER_ID!r}")
+        return mapping
+
+    raw = TWITCH_OWNER_NAMES or TWITCH_CHANNEL
+    for part in raw.split(","):
+        name = part.strip().lstrip("@").lower()
+        if name:
+            mapping[name] = owner_id
+    return mapping
+
+
+OWNER_PING_MAP = _build_owner_ping_map()
+
+# Case-insensitive @name matcher for configured owner names
+_OWNER_MENTION_RE: Optional[re.Pattern[str]] = None
+if OWNER_PING_MAP:
+    # Longest names first so partial overlaps prefer the longer match
+    names = sorted(OWNER_PING_MAP.keys(), key=len, reverse=True)
+    alternation = "|".join(re.escape(n) for n in names)
+    _OWNER_MENTION_RE = re.compile(rf"(?i)@({alternation})\b")
+
+
+def _apply_owner_pings(content: str) -> tuple[str, list[int]]:
+    """
+    Replace @TwitchName with <@discord_id> for configured owner names.
+    Returns (new_content, list of discord user ids that were mentioned).
+    """
+    if not _OWNER_MENTION_RE or not OWNER_PING_MAP:
+        return content, []
+
+    mentioned: list[int] = []
+
+    def repl(match: re.Match[str]) -> str:
+        key = match.group(1).lower()
+        uid = OWNER_PING_MAP.get(key)
+        if uid is None:
+            return match.group(0)
+        if uid not in mentioned:
+            mentioned.append(uid)
+        return f"<@{uid}>"
+
+    return _OWNER_MENTION_RE.sub(repl, content), mentioned
+
+
+def _allowed_mentions_for(user_ids: list[int]) -> discord.AllowedMentions:
+    if not user_ids:
+        return discord.AllowedMentions.none()
+    return discord.AllowedMentions(
+        everyone=False,
+        roles=False,
+        users=[discord.Object(id=uid) for uid in user_ids],
+    )
 
 
 class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # type: ignore[misc]
@@ -83,7 +148,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         )
         self.discord_bot = discord_bot
         self.discord_channel_id = discord_channel_id
-        # login, display_name, content
         self._queue: asyncio.Queue[tuple[str, str, str]] = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None
         self.connected = False
@@ -94,6 +158,11 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         self.connected = True
         nick = getattr(self, "nick", None) or TWITCH_NICK or "?"
         print(f"[TwitchMirror] Connected as {nick} → #{TWITCH_CHANNEL}")
+        if OWNER_PING_MAP:
+            print(
+                f"[TwitchMirror] Owner ping map: "
+                + ", ".join(f"@{k}→<@{v}>" for k, v in OWNER_PING_MAP.items())
+            )
         if self._worker_task is None or self._worker_task.done():
             self._worker_task = asyncio.create_task(self._discord_worker())
 
@@ -111,7 +180,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         await self._queue.put((login, display, content[:2000]))
 
     async def _fetch_avatar(self, login: str) -> Optional[str]:
-        """Resolve Twitch profile image via Helix (cached). Needs TWITCH_CLIENT_ID."""
         login = login.lower()
         if login in self._avatar_cache:
             return self._avatar_cache[login]
@@ -204,6 +272,9 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 username = _safe_webhook_username(display)
                 avatar_url = await self._fetch_avatar(login)
 
+                content, ping_ids = _apply_owner_pings(content)
+                mentions = _allowed_mentions_for(ping_ids)
+
                 if webhook is not None:
                     try:
                         await webhook.send(
@@ -211,10 +282,9 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                             username=username,
                             avatar_url=avatar_url or discord.utils.MISSING,
                             wait=False,
-                            allowed_mentions=discord.AllowedMentions.none(),
+                            allowed_mentions=mentions,
                         )
                     except discord.NotFound:
-                        # Webhook was deleted – recreate once
                         print("[TwitchMirror] Webhook missing – recreating")
                         webhook = await self._get_or_create_webhook(channel)
                         if webhook is not None:
@@ -223,21 +293,21 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                                 username=username,
                                 avatar_url=avatar_url or discord.utils.MISSING,
                                 wait=False,
-                                allowed_mentions=discord.AllowedMentions.none(),
+                                allowed_mentions=mentions,
                             )
                     except discord.HTTPException as e:
                         print(f"[TwitchMirror] Webhook send failed: {e}")
                         try:
                             await channel.send(
                                 f"**{username}**: {content}",
-                                allowed_mentions=discord.AllowedMentions.none(),
+                                allowed_mentions=mentions,
                             )
                         except Exception as e2:
                             print(f"[TwitchMirror] Fallback send failed: {e2}")
                 else:
                     await channel.send(
                         f"**{username}**: {content}",
-                        allowed_mentions=discord.AllowedMentions.none(),
+                        allowed_mentions=mentions,
                     )
 
                 await asyncio.sleep(SEND_DELAY)
@@ -346,17 +416,22 @@ class TwitchMirrorCog(commands.Cog):
             value="🟢 connected" if connected else "🔴 disconnected / starting",
             inline=True,
         )
-        embed.add_field(
-            name="Mode",
-            value="Webhook (name + avatar)",
-            inline=True,
-        )
+        embed.add_field(name="Mode", value="Webhook (name + avatar)", inline=True)
         embed.add_field(
             name="Avatar API",
             value="Helix OK" if TWITCH_CLIENT_ID else "no CLIENT_ID (default avatars)",
             inline=True,
         )
         embed.add_field(name="Avatar cache", value=str(cached), inline=True)
+        if OWNER_PING_MAP:
+            ping_desc = "\n".join(f"`@{k}` → <@{v}>" for k, v in OWNER_PING_MAP.items())
+            embed.add_field(name="Owner pings", value=ping_desc, inline=False)
+        else:
+            embed.add_field(
+                name="Owner pings",
+                value="Off – set `DISCORD_OWNER_ID` to enable",
+                inline=False,
+            )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
