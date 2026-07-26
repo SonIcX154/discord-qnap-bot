@@ -9,10 +9,37 @@ import discord
 from datetime import datetime, timezone
 from typing import Any, Optional, Callable, Awaitable
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
+
 MESSAGE_RESTORE_DELAY = 0.75
 MAX_RETRIES = 5
-# Hard cap per page to keep memory bounded even if limit_per_channel is None
 PAGE_SIZE = 250
+
+
+def _display_tz():
+    """
+    Timezone for human-readable restore timestamps in webhook usernames.
+
+    Prefers BACKUP_DISPLAY_TZ, then Docker/system TZ, then Europe/Berlin.
+    Unix timestamps in the DB are always UTC; we only convert for display.
+    """
+    name = (
+        os.getenv("BACKUP_DISPLAY_TZ")
+        or os.getenv("TZ")
+        or "Europe/Berlin"
+    ).strip()
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            try:
+                return ZoneInfo("Europe/Berlin")
+            except Exception:
+                pass
+    return timezone.utc
 
 
 async def with_retry(coro_factory: Callable[[], Awaitable[Any]], *,
@@ -42,12 +69,13 @@ async def with_retry(coro_factory: Callable[[], Awaitable[Any]], *,
 
 
 def format_username_with_timestamp(author_name: str, created_at: Optional[int]) -> str:
-    """Webhook-Username max 80 Zeichen: 'Name • TT.MM.JJJJ HH:MM'."""
+    """Webhook-Username max 80 Zeichen: 'Name • TT.MM.JJJJ HH:MM' (local TZ)."""
     base = (author_name or "Unknown").strip() or "Unknown"
     if not created_at:
         return base[:80]
     try:
-        ts = datetime.fromtimestamp(int(created_at), tz=timezone.utc)
+        # DB stores unix epoch (UTC); convert to display timezone
+        ts = datetime.fromtimestamp(int(created_at), tz=timezone.utc).astimezone(_display_tz())
         stamp = ts.strftime("%d.%m.%Y %H:%M")
         max_name = 80 - len(stamp) - 3
         if max_name < 1:
@@ -58,17 +86,6 @@ def format_username_with_timestamp(author_name: str, created_at: Optional[int]) 
 
 
 def _visibility_sql(as_of: Optional[int], include_deleted: bool) -> tuple[str, list[Any]]:
-    """
-    as_of gesetzt (Snapshot-Zeit):
-      Nachricht existierte zum Zeitpunkt: created_at <= as_of
-      und war da noch nicht gelöscht: deleted_at IS NULL OR deleted_at > as_of
-
-    as_of None + include_deleted True (Disaster / Nuke):
-      alle jemals gespeicherten Nachrichten
-
-    as_of None + include_deleted False:
-      nur aktuell nicht gelöschte
-    """
     params: list[Any] = []
     if as_of is not None:
         clause = (
@@ -90,7 +107,7 @@ async def ensure_deleted_at_column(db_path: str) -> None:
             await db.commit()
             print("[Backup] messages.deleted_at Spalte hinzugefügt")
         except aiosqlite.OperationalError:
-            pass  # existiert schon
+            pass
 
 
 async def load_channel_id_map(db_path: str, guild_id: int) -> dict[int, int]:
@@ -249,10 +266,6 @@ async def load_messages_page(
     as_of: Optional[int] = None,
     include_deleted: bool = True,
 ) -> list[dict[str, Any]]:
-    """
-    Load one page of messages ordered by (created_at, message_id).
-    Uses keyset pagination to avoid OFFSET on large tables and keep memory bounded.
-    """
     vis, vparams = _visibility_sql(as_of, include_deleted)
 
     if after_created_at is not None and after_message_id is not None:
@@ -307,7 +320,6 @@ async def load_messages_for_channel(
     as_of: Optional[int] = None,
     include_deleted: bool = True,
 ) -> list[dict[str, Any]]:
-    """Compatibility wrapper – capped so callers cannot load unbounded rows."""
     effective_limit = PAGE_SIZE if limit is None else min(int(limit), PAGE_SIZE * 4)
 
     vis, vparams = _visibility_sql(as_of, include_deleted)
@@ -468,13 +480,6 @@ async def run_message_restore(
     as_of: Optional[int] = None,
     include_deleted: bool = True,
 ) -> None:
-    """
-    as_of = Snapshot created_at → Point-in-Time (auch später gelöschte Messages).
-    as_of=None + include_deleted=True → Disaster/Nuke: alles aus der DB.
-
-    Messages are loaded page-by-page (PAGE_SIZE) so large channels do not OOM.
-    Cursor always advances from the raw DB page (before already-restored filter).
-    """
     await ensure_deleted_at_column(db_path)
 
     name_lookup = build_name_lookup_from_snapshot(snapshot_data)
@@ -485,7 +490,8 @@ async def run_message_restore(
     print(
         f"[Backup] Message-Restore start: guild={guild.id} "
         f"id_map={len(id_map)} name_lookup={len(name_lookup)} "
-        f"source_guild_id={source_guild_id} force={force} {mode}"
+        f"source_guild_id={source_guild_id} force={force} {mode} "
+        f"display_tz={os.getenv('BACKUP_DISPLAY_TZ') or os.getenv('TZ') or 'Europe/Berlin'}"
     )
 
     if channel_filter is not None:
@@ -567,7 +573,7 @@ async def run_message_restore(
             channel_empty = 0
             channel_errors = 0
             channel_skipped = 0
-            remaining = limit_per_channel  # None = unlimited
+            remaining = limit_per_channel
 
             after_created_at: Optional[int] = None
             after_message_id: Optional[int] = None
@@ -590,7 +596,6 @@ async def run_message_restore(
                 if not raw_page:
                     break
 
-                # Always advance cursor from the raw page (before any filter)
                 last_raw = raw_page[-1]
                 after_created_at = (
                     int(last_raw["created_at"])
@@ -620,7 +625,6 @@ async def run_message_restore(
                 if remaining is not None:
                     remaining -= len(raw_page)
 
-                # Last page from DB
                 if len(raw_page) < page_limit:
                     break
 
@@ -635,7 +639,9 @@ async def run_message_restore(
             )
 
         as_of_txt = (
-            datetime.fromtimestamp(as_of, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            datetime.fromtimestamp(as_of, tz=timezone.utc)
+            .astimezone(_display_tz())
+            .strftime("%Y-%m-%d %H:%M %Z")
             if as_of else "alle (inkl. gelöschte)"
         )
         embed = discord.Embed(
@@ -661,7 +667,7 @@ async def run_message_restore(
                 text="0 gesendet – prüfe Logs. Tipp: Struktur-Restore zuerst."
             )
         else:
-            embed.set_footer(text="Webhook · Avatar/Name · Timestamp · Snapshot-Zeitpunkt · batched")
+            embed.set_footer(text="Webhook · Avatar/Name · Timestamp (local TZ) · batched")
         try:
             await progress_msg.edit(embed=embed, view=None)
         except Exception:
