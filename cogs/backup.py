@@ -123,7 +123,6 @@ class BackupCog(commands.Cog):
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
         await self._init_db()
-        # Extra tables (excludes, channel_id_map, restored_messages, deleted_at)
         try:
             await ensure_extra_tables(self.db_path)
         except Exception as e:
@@ -182,8 +181,6 @@ class BackupCog(commands.Cog):
             """)
             await db.commit()
 
-    # ==================== ATTACHMENTS ====================
-
     async def _download_attachments(self, message: discord.Message) -> list[dict[str, Any]]:
         if not message.attachments:
             return []
@@ -209,7 +206,6 @@ class BackupCog(commands.Cog):
                 result.append(entry)
                 continue
 
-            # Retry a couple of times – CDN / transient errors are common
             last_err: Optional[Exception] = None
             for attempt in range(ATTACHMENT_MAX_RETRIES):
                 try:
@@ -231,8 +227,6 @@ class BackupCog(commands.Cog):
 
         return result
 
-    # ==================== MESSAGE LOGGING ====================
-
     async def _store_message(self, message: discord.Message, *, is_edit: bool = False) -> None:
         if not message.guild:
             return
@@ -240,18 +234,14 @@ class BackupCog(commands.Cog):
         if self.bot.user and message.author.id == self.bot.user.id:
             return
 
-        # Respect guild / channel excludes (tables created by ensure_extra_tables)
         try:
             if await is_guild_excluded(self.db_path, message.guild.id):
                 return
             if await is_channel_excluded(self.db_path, message.channel.id):
                 return
         except Exception:
-            # Table may not exist yet on very first start – fail open for logging
             pass
 
-        # Skip logging while a message-restore is running on this process
-        # (prevents the bot from re-logging its own webhook messages)
         task = self._msg_restore_task
         if task is not None and not task.done():
             return
@@ -335,8 +325,6 @@ class BackupCog(commands.Cog):
             )
             await db.commit()
 
-    # ==================== CATCH-UP ====================
-
     async def _wait_and_catchup(self) -> None:
         await self.bot.wait_until_ready()
         await asyncio.sleep(5)
@@ -393,8 +381,6 @@ class BackupCog(commands.Cog):
 
         if count:
             print(f"[Backup] #{channel.name}: {count} Nachrichten nachgeholt")
-
-    # ==================== BACKFILL ====================
 
     async def _backfill_channel(self, channel: discord.TextChannel) -> int:
         async with aiosqlite.connect(self.db_path) as db:
@@ -542,8 +528,6 @@ class BackupCog(commands.Cog):
             self._backfill_status["running"] = False
             self._backfill_status["current_channel"] = None
             self._backfill_task = None
-
-    # ==================== STRUKTUR-SNAPSHOT ====================
 
     def _serialize_overwrite(self, ow: discord.PermissionOverwrite, target_id: int, target_type: str) -> dict[str, Any]:
         allow, deny = ow.pair()
@@ -735,8 +719,6 @@ class BackupCog(commands.Cog):
             return None
         return json.loads(row[0])
 
-    # ==================== STRUCTURE RESTORE ====================
-
     def _build_overwrites(
         self,
         guild: discord.Guild,
@@ -851,12 +833,16 @@ class BackupCog(commands.Cog):
                     stats["errors"] += 1
 
             await update_progress("Erstelle Rollen...")
-            roles_sorted = sorted(
+            # Discord always inserts a new role just above @everyone.
+            # Creating highest-first pushes earlier roles upward, so the first
+            # created (highest) ends on top — matching the snapshot order.
+            roles_hi_first = sorted(
                 [r for r in data.get("roles", []) if not r.get("managed")],
                 key=lambda r: r.get("position", 0),
+                reverse=True,
             )
 
-            for role_data in roles_sorted:
+            for role_data in roles_hi_first:
                 try:
                     new_role = await guild.create_role(
                         name=role_data["name"],
@@ -868,26 +854,17 @@ class BackupCog(commands.Cog):
                     )
                     role_map[role_data["id"]] = new_role.id
                     stats["roles"] += 1
+                    print(
+                        f"[Backup] Rolle erstellt: {role_data.get('name')} "
+                        f"(snapshot pos={role_data.get('position')})"
+                    )
                     await asyncio.sleep(RESTORE_DELAY)
                 except Exception as e:
                     print(f"[Backup] Rolle '{role_data.get('name')}' fehlgeschlagen: {e}")
                     stats["errors"] += 1
 
-            for role_data in sorted(roles_sorted, key=lambda r: r.get("position", 0), reverse=True):
-                new_id = role_map.get(role_data["id"])
-                if not new_id:
-                    continue
-                role = guild.get_role(new_id)
-                if not role:
-                    continue
-                try:
-                    pos = min(role_data.get("position", 1), guild.me.top_role.position - 1) if guild.me else 1
-                    if pos < 1:
-                        pos = 1
-                    await role.edit(position=pos, reason="Backup Restore positions")
-                    await asyncio.sleep(0.3)
-                except Exception:
-                    pass
+            # No per-role position edits here: creation order already yields the
+            # correct hierarchy. BackupAdmin still runs apply_role_hierarchy after.
 
             await update_progress("Erstelle Kategorien...")
             for cat_data in sorted(data.get("categories", []), key=lambda c: c.get("position", 0)):
@@ -1031,8 +1008,6 @@ class BackupCog(commands.Cog):
             await run_message_restore(**kwargs)
         finally:
             self._msg_restore_task = None
-
-    # ==================== COMMANDS ====================
 
     @app_commands.command(name="backup-status", description="Zeigt den aktuellen Backup-Status an")
     @app_commands.default_permissions(administrator=True)
@@ -1247,7 +1222,6 @@ class BackupCog(commands.Cog):
             await interaction.response.send_message("⚠️ Ein Restore läuft bereits.", ephemeral=True)
             return
 
-        # Hard guard for destructive mode
         if clear_first and (confirm_clear or "").strip().upper() != "DELETE":
             await interaction.response.send_message(
                 "⚠️ **clear_first** ist sehr destruktiv.\n"
@@ -1257,12 +1231,11 @@ class BackupCog(commands.Cog):
             )
             return
 
-        # Resolve snapshot (optional id → latest)
         resolved_id = snapshot_id
         snap: Optional[dict[str, Any]] = None
 
         if resolved_id is not None:
-            snap = await self._load_snapshot(resolved_id)  # allow cross-guild for disaster recovery
+            snap = await self._load_snapshot(resolved_id)
         else:
             async with aiosqlite.connect(self.db_path) as db:
                 async with db.execute(
