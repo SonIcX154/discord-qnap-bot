@@ -1,4 +1,4 @@
 discord.py[voice]>=2.3.0
 python-dotenv>=1.0.0
 aiosqlite>=0.20.0
-twitchio>=2.10.0
+twitchio>=2.10.0,<3.0.0
