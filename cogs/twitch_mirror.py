@@ -49,7 +49,6 @@ _CLEARCHAT_USER_RE = re.compile(
 
 # Twitch /me → IRC CTCP ACTION: \x01ACTION text\x01
 _ACTION_RE = re.compile(r"^\x01ACTION[ ]?(.*)\x01$", re.DOTALL | re.IGNORECASE)
-# Fallback if the SOH bytes already got mangled in transit
 _ACTION_FALLBACK_RE = re.compile(
     r"^(?:\x01|\u0001)?ACTION[ ]?(.*?)(?:\x01|\u0001)?$",
     re.DOTALL | re.IGNORECASE,
@@ -156,10 +155,8 @@ def _message_tags(message: Any) -> dict[str, Any]:
 
 
 def _unescape_twitch_tag(value: str) -> str:
-    """IRC tag unescaping: \\s space, \\n newline, \\r, \\:, \\\\."""
     if not value:
         return ""
-    # Some clients URL-encode; try both
     text = unquote(value)
     return (
         text.replace(r"\s", " ")
@@ -174,7 +171,7 @@ def _normalize_content(raw: str) -> tuple[str, bool]:
     """
     Strip Twitch /me CTCP ACTION framing.
     Returns (clean_content, is_action).
-    /me messages are shown in italics on Discord.
+    /me is mirrored as normal plain text (no special formatting).
     """
     text = (raw or "").strip()
     if not text:
@@ -183,11 +180,9 @@ def _normalize_content(raw: str) -> tuple[str, bool]:
     m = _ACTION_RE.match(text) or _ACTION_FALLBACK_RE.match(text)
     if m:
         body = (m.group(1) or "").strip()
-        # Remove any leftover control chars
         body = body.replace("\x01", "").replace("\u0001", "").strip()
         return body, True
 
-    # Defensive: strip stray SOH bytes anywhere
     if "\x01" in text or "\u0001" in text:
         cleaned = text.replace("\x01", "").replace("\u0001", "")
         if cleaned.upper().startswith("ACTION "):
@@ -198,10 +193,6 @@ def _normalize_content(raw: str) -> tuple[str, bool]:
 
 
 def _reply_header_from_tags(tags: dict[str, Any]) -> Optional[str]:
-    """
-    Build a Discord-style reply preview from Twitch reply-* IRC tags.
-    Webhooks cannot create real Discord reply threads, so this is visual.
-    """
     parent_id = tags.get("reply-parent-msg-id")
     if not parent_id:
         return None
@@ -215,7 +206,6 @@ def _reply_header_from_tags(tags: dict[str, Any]) -> Optional[str]:
 
     body = tags.get("reply-parent-msg-body") or ""
     body = _unescape_twitch_tag(str(body)).replace("\n", " ").strip()
-    # Also strip ACTION noise from parent preview
     body, _ = _normalize_content(body)
     if len(body) > 120:
         body = body[:117] + "…"
@@ -239,7 +229,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         )
         self.discord_bot = discord_bot
         self.discord_channel_id = discord_channel_id
-        # login, display, content, twitch_msg_id, reply_header, is_action
         self._queue: asyncio.Queue[
             tuple[str, str, str, Optional[str], Optional[str], bool]
         ] = asyncio.Queue()
@@ -251,7 +240,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
         self._msg_map: OrderedDict[str, int] = OrderedDict()
         self._login_msgs: dict[str, set[str]] = defaultdict(set)
-        # twitch_id → discord message id (for native-ish reply jump links)
         self._parent_discord: OrderedDict[str, int] = OrderedDict()
         self._webhook: Optional[discord.Webhook] = None
         self._text_channel: Optional[discord.TextChannel] = None
@@ -281,7 +269,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 + ", ".join(f"{k}→<@{v}>" for k, v in OWNER_PING_MAP.items())
             )
         print("[TwitchMirror] Moderation sync: CLEARMSG + CLEARCHAT → Discord deletes")
-        print("[TwitchMirror] /me ACTION stripped · Twitch replies formatted")
+        print("[TwitchMirror] /me ACTION stripped (plain text) · Twitch replies formatted")
         if self._worker_task is None or self._worker_task.done():
             self._worker_task = asyncio.create_task(self._discord_worker())
 
@@ -453,7 +441,8 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         reply_header: Optional[str],
         is_action: bool,
     ) -> str:
-        body = f"*{content}*" if is_action else content
+        # /me: ACTION framing already stripped — plain text only, no italics
+        body = content
         if reply_header:
             return f"{reply_header}\n{body}"
         return body
@@ -520,8 +509,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
                 content, ping_ids = _apply_owner_pings(content)
                 final = self._compose_content(content, reply_header, is_action)
-                # Owner pings in reply header names are intentionally not converted
-                # (header is display-only context, not a live mention of the parent author)
                 mentions = _allowed_mentions_for(ping_ids)
 
                 discord_msg_id: Optional[int] = None
