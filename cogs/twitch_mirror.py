@@ -8,6 +8,7 @@ from discord.ext import commands
 from discord import app_commands
 from typing import Optional, Any
 from collections import OrderedDict, defaultdict
+from urllib.parse import unquote
 
 try:
     from twitchio.ext import commands as twitch_commands
@@ -33,7 +34,6 @@ DISCORD_OWNER_ID = os.getenv("DISCORD_OWNER_ID", "").strip()
 TWITCH_OWNER_NAMES = os.getenv("TWITCH_OWNER_NAMES", "").strip()
 
 SEND_DELAY = float(os.getenv("TWITCH_MIRROR_DELAY", "0.35"))
-# How many recent Twitch→Discord message pairs to remember for deletes
 MSG_CACHE_MAX = int(os.getenv("TWITCH_MIRROR_MSG_CACHE", "3000"))
 
 WEBHOOK_NAME = "Twitch Mirror"
@@ -46,9 +46,13 @@ _CLEARCHAT_USER_RE = re.compile(
     r"CLEARCHAT\s+#\S+\s+:(\S+)",
     re.IGNORECASE,
 )
-_CLEARCHAT_ALL_RE = re.compile(
-    r"CLEARCHAT\s+#\S+\s*$",
-    re.IGNORECASE | re.MULTILINE,
+
+# Twitch /me → IRC CTCP ACTION: \x01ACTION text\x01
+_ACTION_RE = re.compile(r"^\x01ACTION[ ]?(.*)\x01$", re.DOTALL | re.IGNORECASE)
+# Fallback if the SOH bytes already got mangled in transit
+_ACTION_FALLBACK_RE = re.compile(
+    r"^(?:\x01|\u0001)?ACTION[ ]?(.*?)(?:\x01|\u0001)?$",
+    re.DOTALL | re.IGNORECASE,
 )
 
 
@@ -133,7 +137,6 @@ def _allowed_mentions_for(user_ids: list[int]) -> discord.AllowedMentions:
 
 
 def _twitch_msg_id(message: Any) -> Optional[str]:
-    """Extract IRC msg-id from a twitchio Message."""
     mid = getattr(message, "id", None)
     if mid:
         return str(mid)
@@ -143,6 +146,83 @@ def _twitch_msg_id(message: Any) -> Optional[str]:
             if tags.get(key):
                 return str(tags[key])
     return None
+
+
+def _message_tags(message: Any) -> dict[str, Any]:
+    tags = getattr(message, "tags", None)
+    if isinstance(tags, dict):
+        return tags
+    return {}
+
+
+def _unescape_twitch_tag(value: str) -> str:
+    """IRC tag unescaping: \\s space, \\n newline, \\r, \\:, \\\\."""
+    if not value:
+        return ""
+    # Some clients URL-encode; try both
+    text = unquote(value)
+    return (
+        text.replace(r"\s", " ")
+        .replace(r"\n", "\n")
+        .replace(r"\r", "\r")
+        .replace(r"\:", ";")
+        .replace(r"\\", "\\")
+    )
+
+
+def _normalize_content(raw: str) -> tuple[str, bool]:
+    """
+    Strip Twitch /me CTCP ACTION framing.
+    Returns (clean_content, is_action).
+    /me messages are shown in italics on Discord.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return "", False
+
+    m = _ACTION_RE.match(text) or _ACTION_FALLBACK_RE.match(text)
+    if m:
+        body = (m.group(1) or "").strip()
+        # Remove any leftover control chars
+        body = body.replace("\x01", "").replace("\u0001", "").strip()
+        return body, True
+
+    # Defensive: strip stray SOH bytes anywhere
+    if "\x01" in text or "\u0001" in text:
+        cleaned = text.replace("\x01", "").replace("\u0001", "")
+        if cleaned.upper().startswith("ACTION "):
+            return cleaned[7:].strip(), True
+        return cleaned.strip(), False
+
+    return text, False
+
+
+def _reply_header_from_tags(tags: dict[str, Any]) -> Optional[str]:
+    """
+    Build a Discord-style reply preview from Twitch reply-* IRC tags.
+    Webhooks cannot create real Discord reply threads, so this is visual.
+    """
+    parent_id = tags.get("reply-parent-msg-id")
+    if not parent_id:
+        return None
+
+    display = (
+        tags.get("reply-parent-display-name")
+        or tags.get("reply-parent-user-login")
+        or "someone"
+    )
+    display = _unescape_twitch_tag(str(display))
+
+    body = tags.get("reply-parent-msg-body") or ""
+    body = _unescape_twitch_tag(str(body)).replace("\n", " ").strip()
+    # Also strip ACTION noise from parent preview
+    body, _ = _normalize_content(body)
+    if len(body) > 120:
+        body = body[:117] + "…"
+
+    if body:
+        return f"-# ↩️ **{display}**: {body}"
+    return f"-# ↩️ **{display}**"
 
 
 class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # type: ignore[misc]
@@ -159,19 +239,20 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         )
         self.discord_bot = discord_bot
         self.discord_channel_id = discord_channel_id
-        # login, display, content, twitch_msg_id
-        self._queue: asyncio.Queue[tuple[str, str, str, Optional[str]]] = asyncio.Queue()
+        # login, display, content, twitch_msg_id, reply_header, is_action
+        self._queue: asyncio.Queue[
+            tuple[str, str, str, Optional[str], Optional[str], bool]
+        ] = asyncio.Queue()
         self._delete_queue: asyncio.Queue[tuple[str, Optional[str]]] = asyncio.Queue()
-        # action: ("id", twitch_msg_id) | ("user", login) | ("all", None)
         self._worker_task: Optional[asyncio.Task] = None
         self.connected = False
         self._avatar_cache: dict[str, Optional[str]] = {}
         self._avatar_lock = asyncio.Lock()
 
-        # twitch_msg_id → discord message id
         self._msg_map: OrderedDict[str, int] = OrderedDict()
-        # login → set of twitch_msg_ids we mirrored
         self._login_msgs: dict[str, set[str]] = defaultdict(set)
+        # twitch_id → discord message id (for native-ish reply jump links)
+        self._parent_discord: OrderedDict[str, int] = OrderedDict()
         self._webhook: Optional[discord.Webhook] = None
         self._text_channel: Optional[discord.TextChannel] = None
 
@@ -200,6 +281,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 + ", ".join(f"{k}→<@{v}>" for k, v in OWNER_PING_MAP.items())
             )
         print("[TwitchMirror] Moderation sync: CLEARMSG + CLEARCHAT → Discord deletes")
+        print("[TwitchMirror] /me ACTION stripped · Twitch replies formatted")
         if self._worker_task is None or self._worker_task.done():
             self._worker_task = asyncio.create_task(self._discord_worker())
 
@@ -210,14 +292,19 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         author = message.author
         login = (getattr(author, "name", None) or "unknown").lower()
         display = getattr(author, "display_name", None) or getattr(author, "name", None) or "unknown"
-        content = (message.content or "").strip()
+        raw = message.content or ""
+        content, is_action = _normalize_content(raw)
         if not content:
             return
 
-        await self._queue.put((login, display, content[:2000], _twitch_msg_id(message)))
+        tags = _message_tags(message)
+        reply_header = _reply_header_from_tags(tags)
+
+        await self._queue.put(
+            (login, display, content[:1900], _twitch_msg_id(message), reply_header, is_action)
+        )
 
     async def event_raw_data(self, data: str) -> None:  # type: ignore[no-untyped-def]
-        """Catch CLEARMSG (single delete) and CLEARCHAT (user / full clear)."""
         if not data:
             return
 
@@ -235,11 +322,9 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 login = m.group(1).strip().lower()
                 await self._delete_queue.put(("user", login))
                 return
-            # Full chat clear (no username target)
             if re.search(r"CLEARCHAT\s+#\S+\s*$", data.strip(), re.IGNORECASE):
                 await self._delete_queue.put(("all", None))
 
-    # Some twitchio builds expose a higher-level delete event – handle if present
     async def event_message_delete(self, message) -> None:  # type: ignore[no-untyped-def]
         tid = _twitch_msg_id(message)
         if tid:
@@ -320,7 +405,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             except Exception as e:
                 print(f"[TwitchMirror] Webhook delete failed: {e}")
 
-        # Fallback: bot Manage Messages
         channel = self._text_channel
         if channel is not None:
             try:
@@ -363,6 +447,17 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             if deleted:
                 print(f"[TwitchMirror] Full CLEARCHAT: removed {deleted} Discord msg(s)")
 
+    def _compose_content(
+        self,
+        content: str,
+        reply_header: Optional[str],
+        is_action: bool,
+    ) -> str:
+        body = f"*{content}*" if is_action else content
+        if reply_header:
+            return f"{reply_header}\n{body}"
+        return body
+
     async def _discord_worker(self) -> None:
         await self.discord_bot.wait_until_ready()
         channel = self.discord_bot.get_channel(self.discord_channel_id)
@@ -390,7 +485,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
         while True:
             try:
-                # Prefer processing deletes promptly
                 try:
                     kind, value = self._delete_queue.get_nowait()
                     await self._process_delete(kind, value)
@@ -401,7 +495,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 try:
                     item = self._queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    # Wait for either queue
                     get_msg = asyncio.create_task(self._queue.get())
                     get_del = asyncio.create_task(self._delete_queue.get())
                     done, pending = await asyncio.wait(
@@ -421,11 +514,14 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                         continue
                     item = result
 
-                login, display, content, twitch_id = item
+                login, display, content, twitch_id, reply_header, is_action = item
                 username = _safe_webhook_username(display)
                 avatar_url = await self._fetch_avatar(login)
 
                 content, ping_ids = _apply_owner_pings(content)
+                final = self._compose_content(content, reply_header, is_action)
+                # Owner pings in reply header names are intentionally not converted
+                # (header is display-only context, not a live mention of the parent author)
                 mentions = _allowed_mentions_for(ping_ids)
 
                 discord_msg_id: Optional[int] = None
@@ -433,7 +529,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 if webhook is not None:
                     try:
                         sent = await webhook.send(
-                            content=content,
+                            content=final,
                             username=username,
                             avatar_url=avatar_url or discord.utils.MISSING,
                             wait=True,
@@ -446,7 +542,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                         self._webhook = webhook
                         if webhook is not None:
                             sent = await webhook.send(
-                                content=content,
+                                content=final,
                                 username=username,
                                 avatar_url=avatar_url or discord.utils.MISSING,
                                 wait=True,
@@ -457,7 +553,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                         print(f"[TwitchMirror] Webhook send failed: {e}")
                         try:
                             sent = await channel.send(
-                                f"**{username}**: {content}",
+                                f"**{username}**: {final}",
                                 allowed_mentions=mentions,
                             )
                             discord_msg_id = sent.id
@@ -465,7 +561,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                             print(f"[TwitchMirror] Fallback send failed: {e2}")
                 else:
                     sent = await channel.send(
-                        f"**{username}**: {content}",
+                        f"**{username}**: {final}",
                         allowed_mentions=mentions,
                     )
                     discord_msg_id = sent.id
@@ -563,7 +659,6 @@ class TwitchMirrorCog(commands.Cog):
             return
 
         connected = bool(self._twitch and self._twitch.connected)
-        cached = len(self._twitch._avatar_cache) if self._twitch else 0
         tracked = len(self._twitch._msg_map) if self._twitch else 0
         embed = discord.Embed(
             title="Twitch Mirror Status",
@@ -580,7 +675,7 @@ class TwitchMirrorCog(commands.Cog):
             value="🟢 connected" if connected else "🔴 disconnected / starting",
             inline=True,
         )
-        embed.add_field(name="Mode", value="Webhook + mod deletes", inline=True)
+        embed.add_field(name="Mode", value="Webhook + mod deletes + replies", inline=True)
         embed.add_field(
             name="Avatar API",
             value="Helix OK" if TWITCH_CLIENT_ID else "no CLIENT_ID (default avatars)",
