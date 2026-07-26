@@ -28,10 +28,11 @@ TWITCH_DISCORD_CHANNEL_ID = os.getenv("TWITCH_DISCORD_CHANNEL_ID", "").strip()
 TWITCH_NICK = os.getenv("TWITCH_NICK", "").strip()
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "").strip()
 
-# Map Twitch @name → Discord user ping (your main account)
+# Map Twitch name → Discord user ping (your main account)
 # DISCORD_OWNER_ID = your Discord snowflake
 # TWITCH_OWNER_NAMES = comma-separated Twitch logins/display names to match
 #   (defaults to TWITCH_CHANNEL if only DISCORD_OWNER_ID is set)
+# Matches both "@Name" and bare "Name" (word-boundary, case-insensitive)
 DISCORD_OWNER_ID = os.getenv("DISCORD_OWNER_ID", "").strip()
 TWITCH_OWNER_NAMES = os.getenv("TWITCH_OWNER_NAMES", "").strip()
 
@@ -72,7 +73,7 @@ def _build_owner_ping_map() -> dict[str, int]:
 
     Env:
       DISCORD_OWNER_ID=123456789012345678
-      TWITCH_OWNER_NAMES=mylogin,MyDisplayName   # optional, default TWITCH_CHANNEL
+      TWITCH_OWNER_NAMES=Ich_Klau_Gratis_Brot   # optional, default TWITCH_CHANNEL
     """
     mapping: dict[str, int] = {}
     if not DISCORD_OWNER_ID:
@@ -93,18 +94,19 @@ def _build_owner_ping_map() -> dict[str, int]:
 
 OWNER_PING_MAP = _build_owner_ping_map()
 
-# Case-insensitive @name matcher for configured owner names
+# Case-insensitive matcher: optional @, then owner name, word boundary
+# e.g. "@Ich_Klau_Gratis_Brot" and "Ich_Klau_Gratis_Brot" both match
 _OWNER_MENTION_RE: Optional[re.Pattern[str]] = None
 if OWNER_PING_MAP:
-    # Longest names first so partial overlaps prefer the longer match
     names = sorted(OWNER_PING_MAP.keys(), key=len, reverse=True)
     alternation = "|".join(re.escape(n) for n in names)
-    _OWNER_MENTION_RE = re.compile(rf"(?i)@({alternation})\b")
+    # (?<!\w) avoids matching inside a longer token; @? allows with/without @
+    _OWNER_MENTION_RE = re.compile(rf"(?i)(?<!\w)@?({alternation})(?!\w)")
 
 
 def _apply_owner_pings(content: str) -> tuple[str, list[int]]:
     """
-    Replace @TwitchName with <@discord_id> for configured owner names.
+    Replace @Name or bare Name with <@discord_id> for configured owner names.
     Returns (new_content, list of discord user ids that were mentioned).
     """
     if not _OWNER_MENTION_RE or not OWNER_PING_MAP:
@@ -160,8 +162,8 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         print(f"[TwitchMirror] Connected as {nick} → #{TWITCH_CHANNEL}")
         if OWNER_PING_MAP:
             print(
-                f"[TwitchMirror] Owner ping map: "
-                + ", ".join(f"@{k}→<@{v}>" for k, v in OWNER_PING_MAP.items())
+                f"[TwitchMirror] Owner ping map (@ or bare): "
+                + ", ".join(f"{k}→<@{v}>" for k, v in OWNER_PING_MAP.items())
             )
         if self._worker_task is None or self._worker_task.done():
             self._worker_task = asyncio.create_task(self._discord_worker())
@@ -424,7 +426,9 @@ class TwitchMirrorCog(commands.Cog):
         )
         embed.add_field(name="Avatar cache", value=str(cached), inline=True)
         if OWNER_PING_MAP:
-            ping_desc = "\n".join(f"`@{k}` → <@{v}>" for k, v in OWNER_PING_MAP.items())
+            ping_desc = "\n".join(
+                f"`@{k}` / `{k}` → <@{v}>" for k, v in OWNER_PING_MAP.items()
+            )
             embed.add_field(name="Owner pings", value=ping_desc, inline=False)
         else:
             embed.add_field(
