@@ -7,7 +7,7 @@ import time
 import shutil
 import asyncio
 import aiosqlite
-from typing import Any, Optional, Callable, Awaitable
+from typing import Any, Optional, Callable, Awaitable, Iterable, Collection
 
 try:
     import aiohttp
@@ -106,6 +106,39 @@ async def is_guild_excluded(db_path: str, guild_id: int) -> bool:
             return False
 
 
+async def _delete_channel_progress(
+    db_path: str,
+    *,
+    channel_ids: Optional[Collection[int]] = None,
+    guild_ids: Optional[Collection[int]] = None,
+) -> int:
+    """Delete channel_progress rows by channel_id and/or guild_id."""
+    removed = 0
+    async with aiosqlite.connect(db_path) as db:
+        if channel_ids:
+            ids = list(channel_ids)
+            for i in range(0, len(ids), 400):
+                chunk = ids[i : i + 400]
+                placeholders = ",".join("?" * len(chunk))
+                cur = await db.execute(
+                    f"DELETE FROM channel_progress WHERE channel_id IN ({placeholders})",
+                    chunk,
+                )
+                removed += cur.rowcount or 0
+        if guild_ids:
+            ids = list(guild_ids)
+            for i in range(0, len(ids), 400):
+                chunk = ids[i : i + 400]
+                placeholders = ",".join("?" * len(chunk))
+                cur = await db.execute(
+                    f"DELETE FROM channel_progress WHERE guild_id IN ({placeholders})",
+                    chunk,
+                )
+                removed += cur.rowcount or 0
+        await db.commit()
+    return removed
+
+
 async def add_excluded_guild(
     db_path: str, guild_id: int, reason: Optional[str] = None
 ) -> None:
@@ -119,6 +152,10 @@ async def add_excluded_guild(
             (guild_id, reason, int(time.time())),
         )
         await db.commit()
+    # Stop tracking this guild in channel_progress
+    n = await _delete_channel_progress(db_path, guild_ids=[guild_id])
+    if n:
+        print(f"[Backup] channel_progress: removed {n} rows for excluded guild {guild_id}")
 
 
 async def remove_excluded_guild(db_path: str, guild_id: int) -> bool:
@@ -156,6 +193,9 @@ async def add_excluded_channel(
             (channel_id, guild_id, reason, int(time.time())),
         )
         await db.commit()
+    n = await _delete_channel_progress(db_path, channel_ids=[channel_id])
+    if n:
+        print(f"[Backup] channel_progress: removed {n} rows for excluded channel {channel_id}")
 
 
 async def remove_excluded_channel(db_path: str, channel_id: int) -> bool:
@@ -185,6 +225,66 @@ async def list_all_excluded_channel_ids(db_path: str) -> list[int]:
         except aiosqlite.OperationalError:
             return []
     return [int(r[0]) for r in rows]
+
+
+async def prune_channel_progress(
+    db_path: str,
+    live_channel_ids: Iterable[int],
+    live_guild_ids: Iterable[int],
+) -> dict[str, int]:
+    """
+    Remove channel_progress rows that should not be tracked:
+    - channels that no longer exist in any connected guild
+    - channels belonging to excluded guilds
+    - individually excluded channels
+    - guilds the bot is no longer in (optional via live_guild_ids)
+    """
+    await ensure_extra_tables(db_path)
+    live_channels = {int(c) for c in live_channel_ids}
+    live_guilds = {int(g) for g in live_guild_ids}
+
+    excluded_guild_ids = {g for g, _ in await list_excluded_guilds(db_path)}
+    excluded_channel_ids = set(await list_all_excluded_channel_ids(db_path))
+
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute(
+            "SELECT channel_id, guild_id FROM channel_progress"
+        ) as cur:
+            rows = await cur.fetchall()
+
+    stale_channels: list[int] = []
+    excluded_hit: list[int] = []
+
+    for channel_id, guild_id in rows:
+        cid = int(channel_id)
+        gid = int(guild_id)
+
+        if gid in excluded_guild_ids or cid in excluded_channel_ids:
+            excluded_hit.append(cid)
+            continue
+
+        # Gone from Discord (deleted channel) or guild bot left
+        if cid not in live_channels or (live_guilds and gid not in live_guilds):
+            stale_channels.append(cid)
+
+    to_remove = list({*stale_channels, *excluded_hit})
+    removed = 0
+    if to_remove:
+        removed = await _delete_channel_progress(db_path, channel_ids=to_remove)
+
+    stats = {
+        "removed": removed,
+        "stale": len(stale_channels),
+        "excluded": len(excluded_hit),
+        "remaining": max(0, len(rows) - removed),
+    }
+    if removed:
+        print(
+            f"[Backup] channel_progress prune: removed={removed} "
+            f"(stale={stats['stale']}, excluded={stats['excluded']}, "
+            f"remaining≈{stats['remaining']})"
+        )
+    return stats
 
 
 def _remove_attachment_dir(attachments_dir: str, message_id: int) -> bool:
@@ -321,10 +421,6 @@ async def purge_excluded_messages(
     db_path: str,
     attachments_dir: str,
 ) -> dict[str, int]:
-    """
-    Hard-delete messages from excluded guilds AND excluded channels.
-    Guild exclusion wins for whole servers; channel exclusion targets specific channels.
-    """
     await ensure_extra_tables(db_path)
     excluded_guilds = await list_excluded_guilds(db_path)
     excluded_channels = await list_all_excluded_channel_ids(db_path)
@@ -372,10 +468,16 @@ async def purge_excluded_messages(
             break
         await asyncio.sleep(0.05)
 
+    # Also drop channel_progress for excluded scopes
+    await _delete_channel_progress(
+        db_path,
+        channel_ids=excluded_channels or None,
+        guild_ids=guild_ids or None,
+    )
+
     return totals
 
 
-# Backwards-compatible alias
 async def purge_excluded_guild_messages(
     db_path: str,
     attachments_dir: str,
