@@ -25,7 +25,7 @@ try:
         list_excluded_guilds,
         purge_soft_deleted,
         purge_all_soft_deleted,
-        purge_excluded_guild_messages,
+        purge_excluded_messages,
         count_purge_candidates,
         SOFT_DELETE_RETENTION_DAYS,
     )
@@ -53,7 +53,7 @@ except ImportError:
         list_excluded_guilds,
         purge_soft_deleted,
         purge_all_soft_deleted,
-        purge_excluded_guild_messages,
+        purge_excluded_messages,
         count_purge_candidates,
         SOFT_DELETE_RETENTION_DAYS,
     )
@@ -72,7 +72,6 @@ except ImportError:
 BACKUP_DB_PATH = os.getenv("BACKUP_DATA_PATH", "data/backup.db")
 ATTACHMENTS_DIR = os.getenv("BACKUP_ATTACHMENTS_PATH", "data/backups/attachments")
 PROGRESS_CHANNEL_NAME = "backup-restore-progress"
-# How often the automatic soft-delete retention job runs
 PURGE_INTERVAL_HOURS = float(os.getenv("BACKUP_PURGE_INTERVAL_HOURS", "24"))
 
 
@@ -147,9 +146,7 @@ class BackupAdminCog(commands.Cog):
                 pass
 
     async def _soft_delete_retention_loop(self) -> None:
-        """Once per interval: hard-delete soft-deleted rows older than retention days."""
         await self.bot.wait_until_ready()
-        # Small delay so startup logging settles
         await asyncio.sleep(30)
         interval = max(1.0, PURGE_INTERVAL_HOURS) * 3600.0
         print(
@@ -181,7 +178,6 @@ class BackupAdminCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
-        """deleted_at setzen (Point-in-Time Restore). is_deleted macht BackupCog parallel."""
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute(
@@ -266,7 +262,6 @@ class BackupAdminCog(commands.Cog):
             clear_first: bool,
         ) -> None:
             print(f"[Backup] restore_with_extras START clear_first={clear_first} guild={guild.id}")
-
             progress_channel: Optional[discord.TextChannel] = None
             current_progress = progress_msg
 
@@ -313,14 +308,11 @@ class BackupAdminCog(commands.Cog):
                                     await ch.delete(reason="Backup Restore: alter Progress-Channel")
                                 except Exception:
                                     pass
-
                         progress_channel = await guild.create_text_channel(
                             PROGRESS_CHANNEL_NAME,
                             reason="Backup Restore progress",
                             topic="Temporärer Fortschritts-Channel – wird nach dem Restore gelöscht",
                         )
-                        print(f"[Backup] Progress-Channel erstellt: #{progress_channel.name}")
-
                         current_progress = await progress_channel.send(
                             embed=discord.Embed(
                                 title="🔄 Struktur-Restore läuft...",
@@ -328,7 +320,6 @@ class BackupAdminCog(commands.Cog):
                                 color=discord.Color.orange(),
                             )
                         )
-
                         try:
                             await progress_msg.edit(
                                 embed=discord.Embed(
@@ -349,7 +340,6 @@ class BackupAdminCog(commands.Cog):
                         current_progress = progress_msg
 
                 await bump("Starte…")
-
                 if clear_first:
                     keep_id = progress_channel.id if progress_channel else None
                     await bump("Lösche Channels…")
@@ -360,9 +350,7 @@ class BackupAdminCog(commands.Cog):
                 else:
                     await bump("Erstelle Struktur (ohne Clear)…")
 
-                print("[Backup] rufe original_restore (clear_first=False)…")
                 await original_restore(guild, data, current_progress, False)
-                print("[Backup] original_restore fertig")
 
                 await bump("Announcement-Channels…")
                 try:
@@ -388,9 +376,7 @@ class BackupAdminCog(commands.Cog):
 
                 try:
                     mapping: dict[int, int] = {}
-                    for ch_data in list(data.get("channels", [])) + list(
-                        data.get("categories", [])
-                    ):
+                    for ch_data in list(data.get("channels", [])) + list(data.get("categories", [])):
                         old_id = ch_data.get("id")
                         ch_name = ch_data.get("name")
                         if not old_id or not ch_name:
@@ -401,13 +387,10 @@ class BackupAdminCog(commands.Cog):
                                 break
                     if mapping:
                         await save_channel_id_map(db_path, guild.id, mapping)
-                        print(f"[Backup] channel_id_map: {len(mapping)} Einträge")
                 except Exception as e:
                     print(f"[Backup] channel_id_map: {e}")
 
                 await bump("Alles erledigt.", done=True)
-                print("[Backup] restore_with_extras DONE")
-
             except Exception as e:
                 print(f"[Backup] restore_with_extras CRASH: {e}")
                 traceback.print_exc()
@@ -423,34 +406,23 @@ class BackupAdminCog(commands.Cog):
                     except Exception as e:
                         print(f"[Backup] cleanup progress: {e}")
 
-        async def fixed_snapshots(
-            _cog: Any, interaction: discord.Interaction
-        ) -> None:
+        async def fixed_snapshots(_cog: Any, interaction: discord.Interaction) -> None:
             await interaction.response.defer(ephemeral=True)
             try:
                 async with aiosqlite.connect(db_path) as db:
                     async with db.execute(
-                        """
-                        SELECT id, name, created_at, guild_id, data
-                        FROM snapshots ORDER BY created_at DESC LIMIT 25
-                        """
+                        "SELECT id, name, created_at, guild_id, data FROM snapshots ORDER BY created_at DESC LIMIT 25"
                     ) as cur:
                         rows = await cur.fetchall()
             except Exception as e:
                 await interaction.followup.send(f"❌ DB-Fehler: `{e}`", ephemeral=True)
                 return
-
             if not rows:
-                await interaction.followup.send(
-                    "Noch keine Snapshots. Nutze `/backup-snapshot`.", ephemeral=True
-                )
+                await interaction.followup.send("Noch keine Snapshots. Nutze `/backup-snapshot`.", ephemeral=True)
                 return
-
             lines = []
             for snap_id, snap_name, created_at, src, data_json in rows:
-                ts = datetime.fromtimestamp(created_at, tz=timezone.utc).strftime(
-                    "%Y-%m-%d %H:%M UTC"
-                )
+                ts = datetime.fromtimestamp(created_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
                 server_name = "?"
                 try:
                     g = json.loads(data_json).get("guild") or {}
@@ -461,13 +433,8 @@ class BackupAdminCog(commands.Cog):
                     f"**#{snap_id}** · {snap_name or 'Unbenannt'} · `{ts}`\n"
                     f"└ Server: **{server_name}** · guild `{src}`"
                 )
-
             await interaction.followup.send(
-                embed=discord.Embed(
-                    title="📦 Struktur-Snapshots",
-                    description="\n".join(lines),
-                    color=discord.Color.blurple(),
-                ),
+                embed=discord.Embed(title="📦 Struktur-Snapshots", description="\n".join(lines), color=discord.Color.blurple()),
                 ephemeral=True,
             )
 
@@ -480,17 +447,11 @@ class BackupAdminCog(commands.Cog):
             snapshot_id: Optional[int] = None,
         ) -> None:
             if not interaction.guild:
-                await interaction.response.send_message(
-                    "Nur auf einem Server nutzbar.", ephemeral=True
-                )
+                await interaction.response.send_message("Nur auf einem Server nutzbar.", ephemeral=True)
                 return
-
             if cog._msg_restore_task and not cog._msg_restore_task.done():
-                await interaction.response.send_message(
-                    "⚠️ Ein Nachrichten-Restore läuft bereits.", ephemeral=True
-                )
+                await interaction.response.send_message("⚠️ Ein Nachrichten-Restore läuft bereits.", ephemeral=True)
                 return
-
             snapshot_data: Optional[dict[str, Any]] = None
             as_of: Optional[int] = None
             try:
@@ -502,60 +463,38 @@ class BackupAdminCog(commands.Cog):
                 else:
                     snapshot_data = await load_latest_any()
                     as_of = None
-
-                total = await count_messages(
-                    db_path, None, as_of=as_of, include_deleted=(as_of is None)
-                )
+                total = await count_messages(db_path, None, as_of=as_of, include_deleted=(as_of is None))
             except Exception as e:
-                await interaction.response.send_message(
-                    f"❌ Fehler: `{e}`", ephemeral=True
-                )
+                await interaction.response.send_message(f"❌ Fehler: `{e}`", ephemeral=True)
                 return
-
             if total == 0:
-                await interaction.response.send_message(
-                    "Keine gespeicherten Nachrichten in der Backup-DB.",
-                    ephemeral=True,
-                )
+                await interaction.response.send_message("Keine gespeicherten Nachrichten in der Backup-DB.", ephemeral=True)
                 return
-
             scope = f"nur **#{channel.name}**" if channel else "**alle Channels**"
             limit_txt = f"max. **{limit}**/Channel" if limit else "**alle** Nachrichten"
             if as_of:
-                ts = datetime.fromtimestamp(as_of, tz=timezone.utc).strftime(
-                    "%Y-%m-%d %H:%M UTC"
-                )
+                ts = datetime.fromtimestamp(as_of, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
                 time_txt = f"Stand Snapshot **#{snapshot_id}** (`{ts}`) – auch später gelöschte"
             else:
                 time_txt = "**Disaster-Modus**: alle Messages inkl. gelöschte (kein Snapshot-Zeitpunkt)"
-
             embed = discord.Embed(
                 title="⚠️ Nachrichten-Restore bestätigen",
                 description=(
-                    f"Nachrichten: **{total:,}**\n"
-                    f"Ziel: {scope}\n"
-                    f"Limit: {limit_txt}\n"
-                    f"Name-Match: **{'an' if match_by_name else 'aus'}**\n"
-                    f"Zeitpunkt: {time_txt}\n\n"
+                    f"Nachrichten: **{total:,}**\nZiel: {scope}\nLimit: {limit_txt}\n"
+                    f"Name-Match: **{'an' if match_by_name else 'aus'}**\nZeitpunkt: {time_txt}\n\n"
                     "Webhook · Name • Timestamp · Avatar · Mentions aus."
                 ),
                 color=discord.Color.orange(),
             )
-
             view = MessageRestoreConfirmView()
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             await view.wait()
             if not view.confirmed:
                 return
-
             progress_msg = await interaction.followup.send(
-                embed=discord.Embed(
-                    title="🔄 Nachrichten-Restore startet...",
-                    color=discord.Color.orange(),
-                ),
+                embed=discord.Embed(title="🔄 Nachrichten-Restore startet...", color=discord.Color.orange()),
                 ephemeral=False,
             )
-
             cog._msg_restore_task = asyncio.create_task(
                 cog._run_message_restore_task(
                     guild=interaction.guild,
@@ -585,30 +524,24 @@ class BackupAdminCog(commands.Cog):
             elif cmd.name == "backup-restore-messages":
                 cmd._callback = fixed_restore_messages  # type: ignore[attr-defined]
                 patched.append("backup-restore-messages")
-
         for cmd in self.bot.tree.get_commands():
-            if cmd.name in ("backup-snapshots", "backup-restore-messages") and hasattr(
-                cmd, "_callback"
-            ):
+            if cmd.name in ("backup-snapshots", "backup-restore-messages") and hasattr(cmd, "_callback"):
                 cmd._callback = (  # type: ignore[attr-defined]
-                    fixed_snapshots
-                    if cmd.name == "backup-snapshots"
-                    else fixed_restore_messages
+                    fixed_snapshots if cmd.name == "backup-snapshots" else fixed_restore_messages
                 )
                 if cmd.name not in patched:
                     patched.append(cmd.name)
-
         print(f"[BackupAdmin] Patches OK: {patched}")
 
     # ---------- Purge / prune ----------
 
     @app_commands.command(
         name="backup-purge",
-        description="Löscht soft-deleted und/oder excluded-guild Nachrichten endgültig aus der DB",
+        description="Löscht soft-deleted und/oder excluded (Guilds+Channels) Nachrichten endgültig",
     )
     @app_commands.describe(
         soft_deleted="Alle is_deleted=1 Nachrichten hard-deleten (Default: an)",
-        excluded_guilds="Alle Nachrichten von excluded Guilds hard-deleten",
+        excluded="Nachrichten von excluded Guilds UND excluded Channels hard-deleten",
         confirm="Muss PURGE lauten zum Bestätigen",
     )
     @app_commands.default_permissions(administrator=True)
@@ -616,12 +549,12 @@ class BackupAdminCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         soft_deleted: bool = True,
-        excluded_guilds: bool = True,
+        excluded: bool = True,
         confirm: Optional[str] = None,
     ) -> None:
-        if not soft_deleted and not excluded_guilds:
+        if not soft_deleted and not excluded:
             await interaction.response.send_message(
-                "Mindestens eine Option muss aktiv sein (`soft_deleted` und/oder `excluded_guilds`).",
+                "Mindestens eine Option muss aktiv sein (`soft_deleted` und/oder `excluded`).",
                 ephemeral=True,
             )
             return
@@ -633,8 +566,8 @@ class BackupAdminCog(commands.Cog):
                 description=(
                     "**Hard-Delete** entfernt Zeilen aus der DB **und** Attachment-Ordner.\n"
                     "Das kann nicht rückgängig gemacht werden.\n\n"
-                    f"Zum Ausführen: `confirm` auf **PURGE** setzen.\n"
-                    f"Beispiel: `/backup-purge soft_deleted:True excluded_guilds:True confirm:PURGE`"
+                    "Zum Ausführen: `confirm` auf **PURGE** setzen.\n"
+                    "Beispiel: `/backup-purge soft_deleted:True excluded:True confirm:PURGE`"
                 ),
                 color=discord.Color.orange(),
             )
@@ -649,8 +582,13 @@ class BackupAdminCog(commands.Cog):
                 inline=True,
             )
             embed.add_field(
-                name="Excluded-Guild Messages",
+                name="Excluded (Guilds)",
                 value=f"**{stats['excluded_guild']:,}**",
+                inline=True,
+            )
+            embed.add_field(
+                name="Excluded (Channels)",
+                value=f"**{stats.get('excluded_channel', 0):,}**",
                 inline=True,
             )
             embed.add_field(
@@ -668,8 +606,13 @@ class BackupAdminCog(commands.Cog):
         parts = []
         if soft_deleted:
             parts.append(f"• **{stats_preview['soft_deleted']:,}** soft-deleted Messages")
-        if excluded_guilds:
-            parts.append(f"• **{stats_preview['excluded_guild']:,}** excluded-guild Messages")
+        if excluded:
+            parts.append(
+                f"• **{stats_preview.get('excluded', stats_preview['excluded_guild']):,}** "
+                f"excluded Messages "
+                f"(Guilds: {stats_preview['excluded_guild']:,} · "
+                f"Channels: {stats_preview.get('excluded_channel', 0):,})"
+            )
 
         embed = discord.Embed(
             title="⚠️ Purge bestätigen",
@@ -687,10 +630,7 @@ class BackupAdminCog(commands.Cog):
             return
 
         progress = await interaction.followup.send(
-            embed=discord.Embed(
-                title="🗑️ Purge läuft…",
-                color=discord.Color.orange(),
-            ),
+            embed=discord.Embed(title="🗑️ Purge läuft…", color=discord.Color.orange()),
             ephemeral=False,
         )
 
@@ -703,11 +643,11 @@ class BackupAdminCog(commands.Cog):
                 total_att += s["attachments"]
                 print(f"[Backup] Manual purge soft-deleted: {s}")
 
-            if excluded_guilds:
-                s = await purge_excluded_guild_messages(self.db_path, ATTACHMENTS_DIR)
+            if excluded:
+                s = await purge_excluded_messages(self.db_path, ATTACHMENTS_DIR)
                 total_rows += s["rows"]
                 total_att += s["attachments"]
-                print(f"[Backup] Manual purge excluded guilds: {s}")
+                print(f"[Backup] Manual purge excluded: {s}")
 
             await progress.edit(
                 embed=discord.Embed(
@@ -745,15 +685,10 @@ class BackupAdminCog(commands.Cog):
         if not interaction.guild:
             await interaction.response.send_message("Nur auf einem Server.", ephemeral=True)
             return
-        await add_excluded_guild(
-            self.db_path,
-            interaction.guild.id,
-            reason or "Restore-Server",
-        )
+        await add_excluded_guild(self.db_path, interaction.guild.id, reason or "Restore-Server")
         await interaction.response.send_message(
             f"✅ Server **{interaction.guild.name}** (`{interaction.guild.id}`) "
             f"wird nicht mehr geloggt/backfilled.\n"
-            f"Webhooks & normale Server bleiben unberührt.\n"
             f"Wieder aktivieren: `/backup-include-guild`",
             ephemeral=True,
         )
@@ -770,8 +705,7 @@ class BackupAdminCog(commands.Cog):
         ok = await remove_excluded_guild(self.db_path, interaction.guild.id)
         msg = (
             f"✅ **{interaction.guild.name}** ist wieder im Backup."
-            if ok
-            else f"ℹ️ **{interaction.guild.name}** war nicht excluded."
+            if ok else f"ℹ️ **{interaction.guild.name}** war nicht excluded."
         )
         await interaction.response.send_message(msg, ephemeral=True)
 
@@ -783,9 +717,7 @@ class BackupAdminCog(commands.Cog):
     async def backup_excluded_guilds(self, interaction: discord.Interaction) -> None:
         rows = await list_excluded_guilds(self.db_path)
         if not rows:
-            await interaction.response.send_message(
-                "Keine excluded Guilds.", ephemeral=True
-            )
+            await interaction.response.send_message("Keine excluded Guilds.", ephemeral=True)
             return
         lines = []
         for gid, reason in rows:
@@ -837,8 +769,7 @@ class BackupAdminCog(commands.Cog):
         ok = await remove_excluded_channel(self.db_path, channel.id)
         msg = (
             f"✅ **#{channel.name}** ist wieder im Backup."
-            if ok
-            else f"ℹ️ **#{channel.name}** war nicht excluded."
+            if ok else f"ℹ️ **#{channel.name}** war nicht excluded."
         )
         await interaction.response.send_message(msg, ephemeral=True)
 
@@ -881,14 +812,9 @@ class BackupAdminCog(commands.Cog):
         if self._dl_task and not self._dl_task.done():
             await interaction.response.send_message("⚠️ Download läuft bereits.", ephemeral=True)
             return
-
         await interaction.response.defer(ephemeral=False)
         progress = await interaction.followup.send(
-            embed=discord.Embed(
-                title="⬇️ Missing Attachments…",
-                description="Starte Download…",
-                color=discord.Color.orange(),
-            )
+            embed=discord.Embed(title="⬇️ Missing Attachments…", description="Starte Download…", color=discord.Color.orange())
         )
 
         async def run() -> None:
@@ -898,10 +824,7 @@ class BackupAdminCog(commands.Cog):
                         await progress.edit(
                             embed=discord.Embed(
                                 title="⬇️ Missing Attachments…",
-                                description=(
-                                    f"Geprüft: **{processed}**\n"
-                                    f"Neu: **{downloaded}** · Fehler: **{failed}**"
-                                ),
+                                description=f"Geprüft: **{processed}**\nNeu: **{downloaded}** · Fehler: **{failed}**",
                                 color=discord.Color.orange(),
                             )
                         )
@@ -909,16 +832,9 @@ class BackupAdminCog(commands.Cog):
                         pass
 
                 stats = await download_missing_attachments(
-                    self.db_path,
-                    ATTACHMENTS_DIR,
-                    guild_id=None,
-                    limit=int(limit),
-                    on_progress=on_progress,
+                    self.db_path, ATTACHMENTS_DIR, guild_id=None, limit=int(limit), on_progress=on_progress
                 )
-                embed = discord.Embed(
-                    title="✅ Missing Attachments fertig",
-                    color=discord.Color.green(),
-                )
+                embed = discord.Embed(title="✅ Missing Attachments fertig", color=discord.Color.green())
                 for k, label in [
                     ("checked", "Geprüft"),
                     ("downloaded", "Neu geladen"),
@@ -930,11 +846,7 @@ class BackupAdminCog(commands.Cog):
                 await progress.edit(embed=embed)
             except Exception as e:
                 await progress.edit(
-                    embed=discord.Embed(
-                        title="❌ Download fehlgeschlagen",
-                        description=f"`{e}`",
-                        color=discord.Color.red(),
-                    )
+                    embed=discord.Embed(title="❌ Download fehlgeschlagen", description=f"`{e}`", color=discord.Color.red())
                 )
             finally:
                 self._dl_task = None
