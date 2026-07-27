@@ -23,6 +23,11 @@ try:
         add_excluded_guild,
         remove_excluded_guild,
         list_excluded_guilds,
+        purge_soft_deleted,
+        purge_all_soft_deleted,
+        purge_excluded_guild_messages,
+        count_purge_candidates,
+        SOFT_DELETE_RETENTION_DAYS,
     )
     from utils.message_restore import count_messages
     from utils.structure_helpers import (
@@ -46,6 +51,11 @@ except ImportError:
         add_excluded_guild,
         remove_excluded_guild,
         list_excluded_guilds,
+        purge_soft_deleted,
+        purge_all_soft_deleted,
+        purge_excluded_guild_messages,
+        count_purge_candidates,
+        SOFT_DELETE_RETENTION_DAYS,
     )
     from ..utils.message_restore import count_messages
     from ..utils.structure_helpers import (
@@ -62,6 +72,8 @@ except ImportError:
 BACKUP_DB_PATH = os.getenv("BACKUP_DATA_PATH", "data/backup.db")
 ATTACHMENTS_DIR = os.getenv("BACKUP_ATTACHMENTS_PATH", "data/backups/attachments")
 PROGRESS_CHANNEL_NAME = "backup-restore-progress"
+# How often the automatic soft-delete retention job runs
+PURGE_INTERVAL_HOURS = float(os.getenv("BACKUP_PURGE_INTERVAL_HOURS", "24"))
 
 
 class MessageRestoreConfirmView(discord.ui.View):
@@ -88,6 +100,30 @@ class MessageRestoreConfirmView(discord.ui.View):
         self.stop()
 
 
+class PurgeConfirmView(discord.ui.View):
+    def __init__(self) -> None:
+        super().__init__(timeout=90)
+        self.confirmed = False
+
+    @discord.ui.button(label="🗑️ Endgültig löschen", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.confirmed = True
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+        await interaction.response.edit_message(view=self)
+        self.stop()
+
+    @discord.ui.button(label="❌ Abbrechen", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.confirmed = False
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+        await interaction.response.edit_message(
+            content="Purge abgebrochen.", embed=None, view=None
+        )
+        self.stop()
+
+
 class BackupAdminCog(commands.Cog):
     """Admin-Hilfen + gezielt erweiterte Restore-Logik für Disaster-Recovery."""
 
@@ -95,10 +131,53 @@ class BackupAdminCog(commands.Cog):
         self.bot = bot
         self.db_path = BACKUP_DB_PATH
         self._dl_task: Optional[asyncio.Task] = None
+        self._purge_task: Optional[asyncio.Task] = None
 
     async def cog_load(self) -> None:
         await ensure_extra_tables(self.db_path)
         self.bot.loop.create_task(self._patch_backup_cog())
+        self._purge_task = self.bot.loop.create_task(self._soft_delete_retention_loop())
+
+    async def cog_unload(self) -> None:
+        if self._purge_task and not self._purge_task.done():
+            self._purge_task.cancel()
+            try:
+                await self._purge_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _soft_delete_retention_loop(self) -> None:
+        """Once per interval: hard-delete soft-deleted rows older than retention days."""
+        await self.bot.wait_until_ready()
+        # Small delay so startup logging settles
+        await asyncio.sleep(30)
+        interval = max(1.0, PURGE_INTERVAL_HOURS) * 3600.0
+        print(
+            f"[Backup] Soft-delete retention: {SOFT_DELETE_RETENTION_DAYS} days, "
+            f"check every {PURGE_INTERVAL_HOURS:g}h"
+        )
+        while True:
+            try:
+                stats = await purge_soft_deleted(
+                    self.db_path,
+                    ATTACHMENTS_DIR,
+                    older_than_days=SOFT_DELETE_RETENTION_DAYS,
+                )
+                if stats["rows"] or stats.get("backfilled_deleted_at"):
+                    print(
+                        f"[Backup] Retention purge: {stats['rows']} rows, "
+                        f"{stats['attachments']} attachment dirs, "
+                        f"backfilled_deleted_at={stats.get('backfilled_deleted_at', 0)}"
+                    )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[Backup] Retention purge error: {e}")
+                traceback.print_exc()
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
@@ -177,9 +256,6 @@ class BackupAdminCog(commands.Cog):
                 )
                 await db.commit()
                 return cursor.lastrowid  # type: ignore[return-value]
-
-        # NOTE: store_message excludes + msg-restore skip are now in core BackupCog.
-        # We only enhance structure restore + a few command behaviours.
 
         original_restore = cog._restore_structure
 
@@ -424,7 +500,6 @@ class BackupAdminCog(commands.Cog):
                         snapshot_data = snap["data"]
                         as_of = snap.get("created_at")
                 else:
-                    # Nur Namens-Mapping vom neuesten Snapshot; Messages = alles inkl. gelöschte
                     snapshot_data = await load_latest_any()
                     as_of = None
 
@@ -502,8 +577,6 @@ class BackupAdminCog(commands.Cog):
         cog._save_snapshot = save_snapshot_with_icon  # type: ignore[method-assign]
         cog._restore_structure = restore_with_extras  # type: ignore[method-assign]
 
-        # Soft-patch only the two commands that need cross-guild / as_of behaviour.
-        # /backup-restore stays the core version (optional id + confirm_clear=DELETE).
         patched = ["restore_extras", "icon_snapshot", "as_of-deleted_at"]
         for cmd in getattr(cog, "__cog_app_commands__", []):
             if cmd.name == "backup-snapshots":
@@ -526,6 +599,135 @@ class BackupAdminCog(commands.Cog):
                     patched.append(cmd.name)
 
         print(f"[BackupAdmin] Patches OK: {patched}")
+
+    # ---------- Purge / prune ----------
+
+    @app_commands.command(
+        name="backup-purge",
+        description="Löscht soft-deleted und/oder excluded-guild Nachrichten endgültig aus der DB",
+    )
+    @app_commands.describe(
+        soft_deleted="Alle is_deleted=1 Nachrichten hard-deleten (Default: an)",
+        excluded_guilds="Alle Nachrichten von excluded Guilds hard-deleten",
+        confirm="Muss PURGE lauten zum Bestätigen",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def backup_purge(
+        self,
+        interaction: discord.Interaction,
+        soft_deleted: bool = True,
+        excluded_guilds: bool = True,
+        confirm: Optional[str] = None,
+    ) -> None:
+        if not soft_deleted and not excluded_guilds:
+            await interaction.response.send_message(
+                "Mindestens eine Option muss aktiv sein (`soft_deleted` und/oder `excluded_guilds`).",
+                ephemeral=True,
+            )
+            return
+
+        if (confirm or "").strip().upper() != "PURGE":
+            stats = await count_purge_candidates(self.db_path)
+            embed = discord.Embed(
+                title="🗑️ Backup Purge – Vorschau",
+                description=(
+                    "**Hard-Delete** entfernt Zeilen aus der DB **und** Attachment-Ordner.\n"
+                    "Das kann nicht rückgängig gemacht werden.\n\n"
+                    f"Zum Ausführen: `confirm` auf **PURGE** setzen.\n"
+                    f"Beispiel: `/backup-purge soft_deleted:True excluded_guilds:True confirm:PURGE`"
+                ),
+                color=discord.Color.orange(),
+            )
+            embed.add_field(
+                name="Soft-deleted (is_deleted=1)",
+                value=f"**{stats['soft_deleted']:,}**",
+                inline=True,
+            )
+            embed.add_field(
+                name=f"Davon >{stats['retention_days']} Tage alt",
+                value=f"**{stats['soft_deleted_expired']:,}** (Auto-Purge)",
+                inline=True,
+            )
+            embed.add_field(
+                name="Excluded-Guild Messages",
+                value=f"**{stats['excluded_guild']:,}**",
+                inline=True,
+            )
+            embed.add_field(
+                name="DB total",
+                value=f"**{stats['total']:,}**",
+                inline=True,
+            )
+            embed.set_footer(
+                text=f"Auto-Retention: {stats['retention_days']} Tage · alle {PURGE_INTERVAL_HOURS:g}h"
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        stats_preview = await count_purge_candidates(self.db_path)
+        parts = []
+        if soft_deleted:
+            parts.append(f"• **{stats_preview['soft_deleted']:,}** soft-deleted Messages")
+        if excluded_guilds:
+            parts.append(f"• **{stats_preview['excluded_guild']:,}** excluded-guild Messages")
+
+        embed = discord.Embed(
+            title="⚠️ Purge bestätigen",
+            description=(
+                "Folgendes wird **endgültig** gelöscht:\n"
+                + "\n".join(parts)
+                + "\n\nAttachment-Ordner und `restored_messages`-Einträge werden mitgelöscht."
+            ),
+            color=discord.Color.red(),
+        )
+        view = PurgeConfirmView()
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await view.wait()
+        if not view.confirmed:
+            return
+
+        progress = await interaction.followup.send(
+            embed=discord.Embed(
+                title="🗑️ Purge läuft…",
+                color=discord.Color.orange(),
+            ),
+            ephemeral=False,
+        )
+
+        total_rows = 0
+        total_att = 0
+        try:
+            if soft_deleted:
+                s = await purge_all_soft_deleted(self.db_path, ATTACHMENTS_DIR)
+                total_rows += s["rows"]
+                total_att += s["attachments"]
+                print(f"[Backup] Manual purge soft-deleted: {s}")
+
+            if excluded_guilds:
+                s = await purge_excluded_guild_messages(self.db_path, ATTACHMENTS_DIR)
+                total_rows += s["rows"]
+                total_att += s["attachments"]
+                print(f"[Backup] Manual purge excluded guilds: {s}")
+
+            await progress.edit(
+                embed=discord.Embed(
+                    title="✅ Purge fertig",
+                    description=(
+                        f"Zeilen gelöscht: **{total_rows:,}**\n"
+                        f"Attachment-Ordner: **{total_att:,}**"
+                    ),
+                    color=discord.Color.green(),
+                )
+            )
+        except Exception as e:
+            traceback.print_exc()
+            await progress.edit(
+                embed=discord.Embed(
+                    title="❌ Purge fehlgeschlagen",
+                    description=f"`{e}`",
+                    color=discord.Color.red(),
+                )
+            )
 
     # ---------- Exclude guild / channel / missing ----------
 
