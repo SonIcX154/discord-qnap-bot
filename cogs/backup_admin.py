@@ -27,6 +27,7 @@ try:
         purge_all_soft_deleted,
         purge_excluded_messages,
         count_purge_candidates,
+        prune_channel_progress,
         SOFT_DELETE_RETENTION_DAYS,
     )
     from utils.message_restore import count_messages
@@ -55,6 +56,7 @@ except ImportError:
         purge_all_soft_deleted,
         purge_excluded_messages,
         count_purge_candidates,
+        prune_channel_progress,
         SOFT_DELETE_RETENTION_DAYS,
     )
     from ..utils.message_restore import count_messages
@@ -136,6 +138,7 @@ class BackupAdminCog(commands.Cog):
         await ensure_extra_tables(self.db_path)
         self.bot.loop.create_task(self._patch_backup_cog())
         self._purge_task = self.bot.loop.create_task(self._soft_delete_retention_loop())
+        self.bot.loop.create_task(self._startup_prune_progress())
 
     async def cog_unload(self) -> None:
         if self._purge_task and not self._purge_task.done():
@@ -144,6 +147,23 @@ class BackupAdminCog(commands.Cog):
                 await self._purge_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+    async def _startup_prune_progress(self) -> None:
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(12)
+        try:
+            await self._prune_progress_now()
+        except Exception as e:
+            print(f"[Backup] channel_progress startup prune: {e}")
+
+    async def _prune_progress_now(self) -> dict[str, int]:
+        live_channels: list[int] = []
+        live_guilds: list[int] = []
+        for g in self.bot.guilds:
+            live_guilds.append(g.id)
+            for c in g.channels:
+                live_channels.append(c.id)
+        return await prune_channel_progress(self.db_path, live_channels, live_guilds)
 
     async def _soft_delete_retention_loop(self) -> None:
         await self.bot.wait_until_ready()
@@ -166,6 +186,8 @@ class BackupAdminCog(commands.Cog):
                         f"{stats['attachments']} attachment dirs, "
                         f"backfilled_deleted_at={stats.get('backfilled_deleted_at', 0)}"
                     )
+                # Keep channel_progress in sync with live Discord + exclusions
+                await self._prune_progress_now()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -200,6 +222,7 @@ class BackupAdminCog(commands.Cog):
             return
 
         db_path = self.db_path
+        admin = self
 
         async def load_snapshot_by_id(
             snapshot_id: int, guild_id: Optional[int] = None
@@ -254,6 +277,23 @@ class BackupAdminCog(commands.Cog):
                 return cursor.lastrowid  # type: ignore[return-value]
 
         original_restore = cog._restore_structure
+        original_status = None
+        for cmd in getattr(cog, "__cog_app_commands__", []):
+            if cmd.name == "backup-status":
+                original_status = cmd._callback
+                break
+
+        async def fixed_status(_cog: Any, interaction: discord.Interaction) -> None:
+            # Prune stale/excluded channel_progress before showing counts
+            try:
+                await admin._prune_progress_now()
+            except Exception as e:
+                print(f"[Backup] status prune: {e}")
+            if original_status is not None:
+                await original_status(_cog, interaction)
+            else:
+                # Fallback: shouldn't happen
+                await interaction.response.send_message("Status unavailable.", ephemeral=True)
 
         async def restore_with_extras(
             guild: discord.Guild,
@@ -524,11 +564,19 @@ class BackupAdminCog(commands.Cog):
             elif cmd.name == "backup-restore-messages":
                 cmd._callback = fixed_restore_messages  # type: ignore[attr-defined]
                 patched.append("backup-restore-messages")
+            elif cmd.name == "backup-status":
+                cmd._callback = fixed_status  # type: ignore[attr-defined]
+                patched.append("backup-status-prune")
         for cmd in self.bot.tree.get_commands():
-            if cmd.name in ("backup-snapshots", "backup-restore-messages") and hasattr(cmd, "_callback"):
-                cmd._callback = (  # type: ignore[attr-defined]
-                    fixed_snapshots if cmd.name == "backup-snapshots" else fixed_restore_messages
-                )
+            if cmd.name in ("backup-snapshots", "backup-restore-messages", "backup-status") and hasattr(
+                cmd, "_callback"
+            ):
+                if cmd.name == "backup-snapshots":
+                    cmd._callback = fixed_snapshots  # type: ignore[attr-defined]
+                elif cmd.name == "backup-restore-messages":
+                    cmd._callback = fixed_restore_messages  # type: ignore[attr-defined]
+                elif cmd.name == "backup-status":
+                    cmd._callback = fixed_status  # type: ignore[attr-defined]
                 if cmd.name not in patched:
                     patched.append(cmd.name)
         print(f"[BackupAdmin] Patches OK: {patched}")
@@ -689,6 +737,7 @@ class BackupAdminCog(commands.Cog):
         await interaction.response.send_message(
             f"✅ Server **{interaction.guild.name}** (`{interaction.guild.id}`) "
             f"wird nicht mehr geloggt/backfilled.\n"
+            f"channel_progress für diesen Server wurde bereinigt.\n"
             f"Wieder aktivieren: `/backup-include-guild`",
             ephemeral=True,
         )
@@ -751,7 +800,8 @@ class BackupAdminCog(commands.Cog):
             return
         await add_excluded_channel(self.db_path, channel.id, interaction.guild.id, reason)
         await interaction.response.send_message(
-            f"✅ **#{channel.name}** wird ab jetzt nicht mehr geloggt/backfilled.",
+            f"✅ **#{channel.name}** wird ab jetzt nicht mehr geloggt/backfilled.\n"
+            f"channel_progress-Eintrag (falls vorhanden) wurde entfernt.",
             ephemeral=True,
         )
 
