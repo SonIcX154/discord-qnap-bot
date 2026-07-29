@@ -30,7 +30,6 @@ TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "").strip()
 DISCORD_OWNER_ID = os.getenv("DISCORD_OWNER_ID", "").strip()
 TWITCH_OWNER_NAMES = os.getenv("TWITCH_OWNER_NAMES", "").strip()
 
-# Discord → Twitch (reverse mirror). Off with TWITCH_DISCORD_TO_TWITCH=0/false/no
 _RAW_D2T = os.getenv("TWITCH_DISCORD_TO_TWITCH", "1").strip().lower()
 DISCORD_TO_TWITCH = _RAW_D2T not in ("0", "false", "no", "off")
 
@@ -38,6 +37,7 @@ SEND_DELAY = float(os.getenv("TWITCH_MIRROR_DELAY", "0.35"))
 MSG_CACHE_MAX = int(os.getenv("TWITCH_MIRROR_MSG_CACHE", "3000"))
 
 WEBHOOK_NAME = "Twitch Mirror"
+REQUIRED_DELETE_SCOPE = "moderator:manage:chat_messages"
 
 _CLEARMSG_RE = re.compile(
     r"target-msg-id=([^;\s]+).*\sCLEARMSG\s",
@@ -334,19 +334,21 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         self._avatar_cache: dict[str, Optional[str]] = {}
         self._avatar_lock = asyncio.Lock()
 
-        # Twitch → Discord (inbound): twitch_id → discord_id
         self._msg_map: OrderedDict[str, int] = OrderedDict()
         self._login_msgs: dict[str, set[str]] = defaultdict(set)
-        # Reverse index for Discord-delete → Twitch-delete of original chat msgs
         self._discord_to_inbound: OrderedDict[int, str] = OrderedDict()
 
-        # Discord → Twitch (outbound)
         self._outbound_pending: Deque[int] = deque()
         self._discord_to_twitch: OrderedDict[int, str] = OrderedDict()
         self._send_lock = asyncio.Lock()
 
         self._webhook: Optional[discord.Webhook] = None
         self._text_channel: Optional[discord.TextChannel] = None
+
+        # Helix moderation.delete chat
+        self._broadcaster_id: Optional[str] = None
+        self._moderator_id: Optional[str] = None
+        self._has_delete_scope: bool = False
 
     def _remember(self, twitch_id: str, discord_id: int, login: str) -> None:
         self._msg_map[twitch_id] = discord_id
@@ -371,7 +373,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         return discord_id
 
     def _forget_inbound_by_discord(self, discord_id: int) -> Optional[str]:
-        """Remove inbound (Twitch→Discord) mapping; return twitch msg id if known."""
         twitch_id = self._discord_to_inbound.pop(discord_id, None)
         if twitch_id is not None:
             self._msg_map.pop(twitch_id, None)
@@ -388,6 +389,82 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
     def _forget_outbound(self, discord_id: int) -> Optional[str]:
         return self._discord_to_twitch.pop(discord_id, None)
 
+    async def _resolve_helix_ids(self) -> None:
+        """Look up broadcaster/moderator user ids + check delete scope."""
+        if not TWITCH_CLIENT_ID or aiohttp is None:
+            print(
+                "[TwitchMirror] Helix delete unavailable "
+                "(set TWITCH_CLIENT_ID + install aiohttp)"
+            )
+            return
+
+        bearer = _bearer_token(TWITCH_TOKEN)
+        timeout = aiohttp.ClientTimeout(total=10)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                # Validate token → user_id + scopes
+                async with session.get(
+                    "https://id.twitch.tv/oauth2/validate",
+                    headers={"Authorization": f"OAuth {bearer}"},
+                ) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        print(
+                            f"[TwitchMirror] Token validate HTTP {resp.status}: "
+                            f"{body[:200]}"
+                        )
+                        return
+                    info: dict[str, Any] = await resp.json()
+
+                self._moderator_id = str(info.get("user_id") or "") or None
+                scopes = list(info.get("scopes") or [])
+                self._has_delete_scope = REQUIRED_DELETE_SCOPE in scopes
+                login = info.get("login") or "?"
+                print(
+                    f"[TwitchMirror] Token user={login} id={self._moderator_id} "
+                    f"scopes={len(scopes)}"
+                )
+                if self._has_delete_scope:
+                    print(f"[TwitchMirror] Scope OK: {REQUIRED_DELETE_SCOPE}")
+                else:
+                    print(
+                        f"[TwitchMirror] WARNING: token missing scope "
+                        f"`{REQUIRED_DELETE_SCOPE}` — "
+                        f"Discord→Twitch message deletes will fail.\n"
+                        f"  Re-auth the bot account with that scope "
+                        f"(plus chat:read chat:edit)."
+                    )
+
+                # Broadcaster id from channel login
+                headers = {
+                    "Authorization": f"Bearer {bearer}",
+                    "Client-Id": TWITCH_CLIENT_ID,
+                }
+                async with session.get(
+                    f"https://api.twitch.tv/helix/users?login={TWITCH_CHANNEL}",
+                    headers=headers,
+                ) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        print(
+                            f"[TwitchMirror] Helix users (broadcaster) "
+                            f"HTTP {resp.status}: {body[:200]}"
+                        )
+                        return
+                    data = await resp.json()
+                users = data.get("data") or []
+                if not users:
+                    print(f"[TwitchMirror] Broadcaster login not found: {TWITCH_CHANNEL}")
+                    return
+                self._broadcaster_id = str(users[0]["id"])
+                print(
+                    f"[TwitchMirror] Helix delete ready: "
+                    f"broadcaster={self._broadcaster_id} "
+                    f"moderator={self._moderator_id}"
+                )
+        except Exception as e:
+            print(f"[TwitchMirror] Helix id resolve failed: {e}")
+
     async def event_ready(self) -> None:
         self.connected = True
         nick = getattr(self, "nick", None) or TWITCH_NICK or "?"
@@ -398,15 +475,9 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 + ", ".join(f"{k}→<@{v}>" for k, v in OWNER_PING_MAP.items())
             )
         print("[TwitchMirror] Moderation sync + reply @ strip (aggressive)")
-        print(
-            "[TwitchMirror] Discord delete of webhook mirror → Twitch /delete "
-            "(bot must be mod)"
-        )
+        await self._resolve_helix_ids()
         if DISCORD_TO_TWITCH:
-            print(
-                "[TwitchMirror] Discord → Twitch: ON "
-                "(messages + deletes; bot must be mod for deletes)"
-            )
+            print("[TwitchMirror] Discord → Twitch: ON")
         else:
             print("[TwitchMirror] Discord → Twitch: OFF")
         if self._worker_task is None or self._worker_task.done():
@@ -526,8 +597,56 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 return False
 
     async def delete_on_twitch(self, twitch_msg_id: str) -> bool:
-        """Delete a chat message via IRC /delete (bot must be a moderator)."""
-        if not self.connected or not twitch_msg_id:
+        """
+        Delete a Twitch chat message.
+
+        Preferred: Helix DELETE /moderation/chat
+          scope: moderator:manage:chat_messages
+          bot must be a moderator of the channel
+
+        Fallback: IRC /delete (often ignored by Twitch nowadays)
+        """
+        if not twitch_msg_id:
+            return False
+
+        # --- Helix (reliable) ---
+        if (
+            aiohttp is not None
+            and TWITCH_CLIENT_ID
+            and self._broadcaster_id
+            and self._moderator_id
+        ):
+            try:
+                url = "https://api.twitch.tv/helix/moderation/chat"
+                params = {
+                    "broadcaster_id": self._broadcaster_id,
+                    "moderator_id": self._moderator_id,
+                    "message_id": twitch_msg_id,
+                }
+                headers = {
+                    "Authorization": f"Bearer {_bearer_token(TWITCH_TOKEN)}",
+                    "Client-Id": TWITCH_CLIENT_ID,
+                }
+                timeout = aiohttp.ClientTimeout(total=10)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.delete(url, params=params, headers=headers) as resp:
+                        if resp.status in (200, 204):
+                            return True
+                        body = await resp.text()
+                        print(
+                            f"[TwitchMirror] Helix delete HTTP {resp.status} "
+                            f"msg={twitch_msg_id[:8]}…: {body[:250]}"
+                        )
+                        if resp.status == 401 and not self._has_delete_scope:
+                            print(
+                                f"[TwitchMirror] Hint: re-auth token with "
+                                f"`{REQUIRED_DELETE_SCOPE}`"
+                            )
+            except Exception as e:
+                print(f"[TwitchMirror] Helix delete error: {e}")
+
+        # --- IRC fallback ---
+        if not self.connected:
             return False
         async with self._send_lock:
             try:
@@ -538,9 +657,10 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                     return False
                 await channel.send(f"/delete {twitch_msg_id}")
                 await asyncio.sleep(0.3)
+                print("[TwitchMirror] Fell back to IRC /delete (may be ignored by Twitch)")
                 return True
             except Exception as e:
-                print(f"[TwitchMirror] Twitch /delete failed: {e}")
+                print(f"[TwitchMirror] IRC /delete failed: {e}")
                 return False
 
     async def _fetch_avatar(self, login: str) -> Optional[str]:
@@ -608,7 +728,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             return None
 
     async def _delete_discord_message(self, discord_msg_id: int) -> None:
-        # Drop reverse index if still present (Twitch-side delete of inbound)
         self._discord_to_inbound.pop(discord_msg_id, None)
 
         webhook = self._webhook
@@ -885,7 +1004,6 @@ class TwitchMirrorCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        """Discord → Twitch: human messages in the mirror channel."""
         if not DISCORD_TO_TWITCH:
             return
         if not self._is_mirror_channel(message.channel.id if message.channel else None):
@@ -919,24 +1037,14 @@ class TwitchMirrorCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
-        """
-        Discord delete → Twitch /delete:
-
-        1) Webhook mirror of a *Twitch-origin* message deleted on Discord
-           → delete the original Twitch chat message
-        2) Message we forwarded Discord→Twitch deleted on Discord
-           → delete our bot's Twitch message
-        """
         if not self._is_mirror_channel(payload.channel_id):
             return
         if self._twitch is None or not self._twitch.connected:
             return
 
-        # 1) Inbound: Twitch chatter → Discord webhook copy
         twitch_id = self._twitch._forget_inbound_by_discord(payload.message_id)
         source = "inbound (Twitch original)"
 
-        # 2) Outbound: Discord human → Twitch bot message
         if not twitch_id and DISCORD_TO_TWITCH:
             twitch_id = self._twitch._forget_outbound(payload.message_id)
             source = "outbound (Discord→Twitch)"
@@ -947,13 +1055,13 @@ class TwitchMirrorCog(commands.Cog):
         ok = await self._twitch.delete_on_twitch(twitch_id)
         if ok:
             print(
-                f"[TwitchMirror] Discord delete → Twitch /delete "
+                f"[TwitchMirror] Discord delete → Twitch delete "
                 f"{twitch_id[:8]}… ({source})"
             )
         else:
             print(
                 f"[TwitchMirror] Could not delete on Twitch ({twitch_id[:8]}…, {source}). "
-                f"Is the bot a mod in #{TWITCH_CHANNEL}?"
+                f"Check token scope `{REQUIRED_DELETE_SCOPE}` + mod status."
             )
 
     @app_commands.command(
@@ -972,6 +1080,12 @@ class TwitchMirrorCog(commands.Cog):
         connected = bool(self._twitch and self._twitch.connected)
         tracked = len(self._twitch._msg_map) if self._twitch else 0
         outbound = len(self._twitch._discord_to_twitch) if self._twitch else 0
+        has_scope = bool(self._twitch and self._twitch._has_delete_scope)
+        helix_ready = bool(
+            self._twitch
+            and self._twitch._broadcaster_id
+            and self._twitch._moderator_id
+        )
         embed = discord.Embed(
             title="Twitch Mirror Status",
             color=discord.Color.green() if connected else discord.Color.orange(),
@@ -1001,11 +1115,14 @@ class TwitchMirrorCog(commands.Cog):
             ),
             inline=True,
         )
-        embed.set_footer(
-            text=(
-                "Deleting a webhook mirror on Discord also /delete's the Twitch original "
-                "(bot must be mod)"
-            )
+        embed.add_field(
+            name="Helix delete",
+            value=(
+                f"{'🟢' if has_scope and helix_ready else '🔴'} "
+                f"scope=`{REQUIRED_DELETE_SCOPE}` "
+                f"({'yes' if has_scope else 'MISSING'})"
+            ),
+            inline=False,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
