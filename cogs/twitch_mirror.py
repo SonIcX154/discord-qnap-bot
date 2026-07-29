@@ -38,6 +38,7 @@ MSG_CACHE_MAX = int(os.getenv("TWITCH_MIRROR_MSG_CACHE", "3000"))
 
 WEBHOOK_NAME = "Twitch Mirror"
 REQUIRED_DELETE_SCOPE = "moderator:manage:chat_messages"
+REQUIRED_SEND_SCOPE = "user:write:chat"
 
 _CLEARMSG_RE = re.compile(
     r"target-msg-id=([^;\s]+).*\sCLEARMSG\s",
@@ -348,7 +349,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         self._broadcaster_id: Optional[str] = None
         self._moderator_id: Optional[str] = None
         self._has_delete_scope: bool = False
-        # Client-Id used for Helix (prefer the one bound to the token)
+        self._has_send_scope: bool = False
         self._helix_client_id: str = TWITCH_CLIENT_ID
 
     def _remember(self, twitch_id: str, discord_id: int, login: str) -> None:
@@ -394,11 +395,12 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         return {
             "Authorization": f"Bearer {_bearer_token(TWITCH_TOKEN)}",
             "Client-Id": self._helix_client_id or TWITCH_CLIENT_ID,
+            "Content-Type": "application/json",
         }
 
     async def _resolve_helix_ids(self) -> None:
         if aiohttp is None:
-            print("[TwitchMirror] Helix delete unavailable (aiohttp missing)")
+            print("[TwitchMirror] Helix unavailable (aiohttp missing)")
             return
 
         bearer = _bearer_token(TWITCH_TOKEN)
@@ -421,6 +423,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 self._moderator_id = str(info.get("user_id") or "") or None
                 scopes = list(info.get("scopes") or [])
                 self._has_delete_scope = REQUIRED_DELETE_SCOPE in scopes
+                self._has_send_scope = REQUIRED_SEND_SCOPE in scopes
                 login = info.get("login") or "?"
                 token_client_id = str(info.get("client_id") or "")
 
@@ -436,27 +439,25 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 elif TWITCH_CLIENT_ID:
                     self._helix_client_id = TWITCH_CLIENT_ID
                 else:
-                    print(
-                        "[TwitchMirror] No Client-Id available "
-                        "(set TWITCH_CLIENT_ID or use a token that reports one)"
-                    )
+                    print("[TwitchMirror] No Client-Id available")
                     return
 
                 print(
                     f"[TwitchMirror] Token user={login} id={self._moderator_id} "
                     f"client_id={self._helix_client_id[:8]}… scopes={len(scopes)}"
                 )
-                mod_scopes = [s for s in scopes if "moderator" in s or s == "channel:moderate"]
-                if mod_scopes:
-                    print(f"[TwitchMirror] Mod scopes: {', '.join(sorted(mod_scopes))}")
-
                 if self._has_delete_scope:
                     print(f"[TwitchMirror] Scope OK: {REQUIRED_DELETE_SCOPE}")
                 else:
                     print(
-                        f"[TwitchMirror] WARNING: token missing scope "
-                        f"`{REQUIRED_DELETE_SCOPE}` — deletes will fail.\n"
-                        f"  Re-auth the bot account with that scope."
+                        f"[TwitchMirror] WARNING: missing `{REQUIRED_DELETE_SCOPE}`"
+                    )
+                if self._has_send_scope:
+                    print(f"[TwitchMirror] Scope OK: {REQUIRED_SEND_SCOPE}")
+                else:
+                    print(
+                        f"[TwitchMirror] WARNING: missing `{REQUIRED_SEND_SCOPE}` "
+                        f"— Discord→Twitch will use IRC (no reliable msg id)"
                     )
 
                 headers = self._helix_headers()
@@ -478,10 +479,8 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                     return
                 self._broadcaster_id = str(users[0]["id"])
                 print(
-                    f"[TwitchMirror] Helix delete ready: "
-                    f"broadcaster={self._broadcaster_id} "
-                    f"moderator={self._moderator_id} "
-                    f"(must be mod of #{TWITCH_CHANNEL})"
+                    f"[TwitchMirror] Helix ready: broadcaster={self._broadcaster_id} "
+                    f"sender/mod={self._moderator_id}"
                 )
         except Exception as e:
             print(f"[TwitchMirror] Helix id resolve failed: {e}")
@@ -495,10 +494,10 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 f"[TwitchMirror] Owner ping map (@ or bare): "
                 + ", ".join(f"{k}→<@{v}>" for k, v in OWNER_PING_MAP.items())
             )
-        print("[TwitchMirror] Moderation sync + reply @ strip (aggressive)")
+        print("[TwitchMirror] Moderation sync + reply @ strip")
         await self._resolve_helix_ids()
         if DISCORD_TO_TWITCH:
-            print("[TwitchMirror] Discord → Twitch: ON")
+            print("[TwitchMirror] Discord → Twitch: ON (Helix preferred)")
         else:
             print("[TwitchMirror] Discord → Twitch: OFF")
         if self._worker_task is None or self._worker_task.done():
@@ -507,13 +506,14 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
     async def event_message(self, message) -> None:  # type: ignore[no-untyped-def]
         try:
             if getattr(message, "echo", False):
+                # IRC fallback path only — Helix send already stored the id
                 tid = _twitch_msg_id(message)
                 if tid and self._outbound_pending:
                     discord_id = self._outbound_pending.popleft()
                     self._remember_outbound(discord_id, tid)
                     print(
-                        f"[TwitchMirror] Outbound linked discord={discord_id} "
-                        f"→ twitch={tid[:8]}…"
+                        f"[TwitchMirror] Outbound (IRC echo) linked "
+                        f"discord={discord_id} → twitch={tid[:12]}…"
                     )
                 return
 
@@ -551,8 +551,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             tid = _twitch_msg_id(message)
             if not tid:
                 print(
-                    f"[TwitchMirror] WARNING: no msg id from IRC for @{login} "
-                    f"— Discord delete cannot target Twitch original"
+                    f"[TwitchMirror] WARNING: no msg id from IRC for @{login}"
                 )
 
             await self._queue.put(
@@ -595,25 +594,94 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             await self._delete_queue.put(("id", tid))
 
     async def send_to_twitch(self, text: str, discord_msg_id: int) -> bool:
-        if not self.connected:
-            print("[TwitchMirror] send_to_twitch: not connected")
-            return False
+        """
+        Prefer Helix Send Chat Message — response includes message_id so we can
+        delete later. IRC is fallback only (echo often never arrives).
+        """
         text = (text or "").strip()
         if not text:
             return False
 
         async with self._send_lock:
+            # --- Helix (reliable id) ---
+            if (
+                aiohttp is not None
+                and self._helix_client_id
+                and self._broadcaster_id
+                and self._moderator_id
+                and self._has_send_scope
+            ):
+                try:
+                    url = "https://api.twitch.tv/helix/chat/messages"
+                    payload = {
+                        "broadcaster_id": self._broadcaster_id,
+                        "sender_id": self._moderator_id,
+                        "message": text[:500],
+                    }
+                    timeout = aiohttp.ClientTimeout(total=10)
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        async with session.post(
+                            url, json=payload, headers=self._helix_headers()
+                        ) as resp:
+                            body_txt = await resp.text()
+                            if resp.status in (200, 201):
+                                try:
+                                    data = await resp.json(content_type=None)
+                                except Exception:
+                                    import json as _json
+
+                                    data = _json.loads(body_txt)
+                                rows = data.get("data") or []
+                                mid = None
+                                if rows:
+                                    mid = rows[0].get("message_id")
+                                    is_sent = rows[0].get("is_sent", True)
+                                    if not is_sent:
+                                        drop = rows[0].get("drop_reason")
+                                        print(
+                                            f"[TwitchMirror] Helix send dropped: {drop}"
+                                        )
+                                        return False
+                                if mid:
+                                    self._remember_outbound(discord_msg_id, str(mid))
+                                    print(
+                                        f"[TwitchMirror] Helix send OK "
+                                        f"discord={discord_msg_id} → "
+                                        f"twitch={str(mid)[:12]}…"
+                                    )
+                                else:
+                                    print(
+                                        "[TwitchMirror] Helix send OK but no message_id "
+                                        f"in response: {body_txt[:200]}"
+                                    )
+                                await asyncio.sleep(SEND_DELAY)
+                                return True
+                            print(
+                                f"[TwitchMirror] Helix send HTTP {resp.status}: "
+                                f"{body_txt[:250]}"
+                            )
+                except Exception as e:
+                    print(f"[TwitchMirror] Helix send error: {e}")
+
+            # --- IRC fallback (no reliable id unless echo arrives) ---
+            if not self.connected:
+                print("[TwitchMirror] send_to_twitch: not connected")
+                return False
             try:
                 channel = self.get_channel(TWITCH_CHANNEL)
                 if channel is None:
                     channel = self.get_channel(f"#{TWITCH_CHANNEL}")
                 if channel is None:
-                    print(f"[TwitchMirror] No IRC channel object for #{TWITCH_CHANNEL}")
+                    print(f"[TwitchMirror] No IRC channel for #{TWITCH_CHANNEL}")
                     return False
 
                 self._outbound_pending.append(discord_msg_id)
                 await channel.send(text[:480])
                 await asyncio.sleep(SEND_DELAY)
+                print(
+                    "[TwitchMirror] IRC send used (no Helix msg id — "
+                    "delete-from-Discord may not work for this message)"
+                )
                 return True
             except Exception as e:
                 try:
@@ -621,11 +689,10 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                         self._outbound_pending.pop()
                 except Exception:
                     pass
-                print(f"[TwitchMirror] send_to_twitch failed: {e}")
+                print(f"[TwitchMirror] IRC send failed: {e}")
                 return False
 
     async def delete_on_twitch(self, twitch_msg_id: str) -> bool:
-        """Delete via Helix only. IRC /delete is not reliable."""
         if not twitch_msg_id:
             return False
 
@@ -638,10 +705,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             return False
 
         if not self._broadcaster_id or not self._moderator_id:
-            print(
-                "[TwitchMirror] delete failed: broadcaster/moderator id unknown "
-                "(check startup Helix resolve logs)"
-            )
+            print("[TwitchMirror] delete failed: broadcaster/moderator id unknown")
             return False
 
         if not self._has_delete_scope:
@@ -676,21 +740,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                         f"moderator={self._moderator_id}\n"
                         f"  body={body[:300]}"
                     )
-                    if resp.status == 403:
-                        print(
-                            "[TwitchMirror] 403 = token user is not a mod of this "
-                            "channel, or cannot delete this message "
-                            "(e.g. broadcaster's own msg)."
-                        )
-                    elif resp.status == 401:
-                        print(
-                            "[TwitchMirror] 401 = bad token / wrong Client-Id / "
-                            f"missing `{REQUIRED_DELETE_SCOPE}`"
-                        )
-                    elif resp.status == 404:
-                        print(
-                            "[TwitchMirror] 404 = message already gone or bad msg id"
-                        )
                     return False
         except Exception as e:
             print(f"[TwitchMirror] Helix delete error: {e}")
@@ -1079,7 +1128,6 @@ class TwitchMirrorCog(commands.Cog):
             source = "outbound (Discord→Twitch)"
 
         if not twitch_id:
-            # Not in our map (old msg / restart / never got IRC id)
             print(
                 f"[TwitchMirror] Discord delete msg={payload.message_id} "
                 f"not in map (inbound={len(self._twitch._discord_to_inbound)} "
@@ -1115,7 +1163,8 @@ class TwitchMirrorCog(commands.Cog):
         connected = bool(self._twitch and self._twitch.connected)
         tracked = len(self._twitch._msg_map) if self._twitch else 0
         outbound = len(self._twitch._discord_to_twitch) if self._twitch else 0
-        has_scope = bool(self._twitch and self._twitch._has_delete_scope)
+        has_del = bool(self._twitch and self._twitch._has_delete_scope)
+        has_send = bool(self._twitch and self._twitch._has_send_scope)
         helix_ready = bool(
             self._twitch
             and self._twitch._broadcaster_id
@@ -1145,18 +1194,19 @@ class TwitchMirrorCog(commands.Cog):
         embed.add_field(
             name="Discord → Twitch",
             value=(
-                f"ON · outbound `{outbound}`"
+                f"ON · outbound `{outbound}` · "
+                f"send={'Helix' if has_send else 'IRC'}"
                 if DISCORD_TO_TWITCH
                 else "OFF"
             ),
             inline=True,
         )
         embed.add_field(
-            name="Helix delete",
+            name="Helix",
             value=(
-                f"{'🟢' if has_scope and helix_ready else '🔴'} "
-                f"scope={'yes' if has_scope else 'MISSING'} · "
-                f"ids={'yes' if helix_ready else 'no'}"
+                f"ids={'yes' if helix_ready else 'no'} · "
+                f"delete={'yes' if has_del else 'NO'} · "
+                f"send={'yes' if has_send else 'NO'}"
             ),
             inline=False,
         )
