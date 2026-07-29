@@ -53,7 +53,6 @@ _ACTION_FALLBACK_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 _LEADING_AT_RE = re.compile(r"^@\S+\s+")
-# Twitch chat is plain text; strip Discord mention markup for the forward path
 _DISCORD_MENTION_RE = re.compile(r"<@!?(\d+)>")
 _DISCORD_ROLE_RE = re.compile(r"<@&(\d+)>")
 _DISCORD_CHANNEL_RE = re.compile(r"<#(\d+)>")
@@ -269,7 +268,6 @@ def _reply_header_from_tags(tags: dict[str, Any]) -> Optional[str]:
 
 
 def _discord_content_for_twitch(message: discord.Message) -> str:
-    """Flatten Discord content into something readable on Twitch IRC."""
     text = message.content or ""
 
     def user_repl(m: re.Match[str]) -> str:
@@ -302,7 +300,6 @@ def _discord_content_for_twitch(message: discord.Message) -> str:
     text = _DISCORD_EMOJI_RE.sub(r":\1:", text)
     text = text.replace("\n", " ").strip()
 
-    # Attachments / stickers as placeholders
     extras: list[str] = []
     for att in message.attachments:
         extras.append(att.url or att.filename or "[attachment]")
@@ -313,7 +310,6 @@ def _discord_content_for_twitch(message: discord.Message) -> str:
         extra_txt = " ".join(extras)
         text = f"{text} {extra_txt}".strip() if text else extra_txt
 
-    # Twitch IRC soft limit ~500 chars
     return text[:480].strip()
 
 
@@ -338,9 +334,11 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         self._avatar_cache: dict[str, Optional[str]] = {}
         self._avatar_lock = asyncio.Lock()
 
-        # Twitch → Discord (inbound)
+        # Twitch → Discord (inbound): twitch_id → discord_id
         self._msg_map: OrderedDict[str, int] = OrderedDict()
         self._login_msgs: dict[str, set[str]] = defaultdict(set)
+        # Reverse index for Discord-delete → Twitch-delete of original chat msgs
+        self._discord_to_inbound: OrderedDict[int, str] = OrderedDict()
 
         # Discord → Twitch (outbound)
         self._outbound_pending: Deque[int] = deque()
@@ -354,16 +352,32 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         self._msg_map[twitch_id] = discord_id
         self._msg_map.move_to_end(twitch_id)
         self._login_msgs[login.lower()].add(twitch_id)
+        self._discord_to_inbound[discord_id] = twitch_id
+        self._discord_to_inbound.move_to_end(discord_id)
         while len(self._msg_map) > MSG_CACHE_MAX:
-            old_tid, _ = self._msg_map.popitem(last=False)
+            old_tid, old_did = self._msg_map.popitem(last=False)
             for s in self._login_msgs.values():
                 s.discard(old_tid)
+            self._discord_to_inbound.pop(old_did, None)
+        while len(self._discord_to_inbound) > MSG_CACHE_MAX:
+            self._discord_to_inbound.popitem(last=False)
 
     def _forget_twitch_id(self, twitch_id: str) -> Optional[int]:
         discord_id = self._msg_map.pop(twitch_id, None)
         for s in self._login_msgs.values():
             s.discard(twitch_id)
+        if discord_id is not None:
+            self._discord_to_inbound.pop(discord_id, None)
         return discord_id
+
+    def _forget_inbound_by_discord(self, discord_id: int) -> Optional[str]:
+        """Remove inbound (Twitch→Discord) mapping; return twitch msg id if known."""
+        twitch_id = self._discord_to_inbound.pop(discord_id, None)
+        if twitch_id is not None:
+            self._msg_map.pop(twitch_id, None)
+            for s in self._login_msgs.values():
+                s.discard(twitch_id)
+        return twitch_id
 
     def _remember_outbound(self, discord_id: int, twitch_id: str) -> None:
         self._discord_to_twitch[discord_id] = twitch_id
@@ -384,6 +398,10 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 + ", ".join(f"{k}→<@{v}>" for k, v in OWNER_PING_MAP.items())
             )
         print("[TwitchMirror] Moderation sync + reply @ strip (aggressive)")
+        print(
+            "[TwitchMirror] Discord delete of webhook mirror → Twitch /delete "
+            "(bot must be mod)"
+        )
         if DISCORD_TO_TWITCH:
             print(
                 "[TwitchMirror] Discord → Twitch: ON "
@@ -396,7 +414,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
     async def event_message(self, message) -> None:  # type: ignore[no-untyped-def]
         try:
-            # Our own IRC traffic (including Discord→Twitch forwards)
             if getattr(message, "echo", False):
                 tid = _twitch_msg_id(message)
                 if tid and self._outbound_pending:
@@ -479,7 +496,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             await self._delete_queue.put(("id", tid))
 
     async def send_to_twitch(self, text: str, discord_msg_id: int) -> bool:
-        """PRIVMSG into the mirrored Twitch channel. Links echo → discord id."""
         if not self.connected:
             print("[TwitchMirror] send_to_twitch: not connected")
             return False
@@ -491,7 +507,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             try:
                 channel = self.get_channel(TWITCH_CHANNEL)
                 if channel is None:
-                    # twitchio sometimes needs the # prefix lookup
                     channel = self.get_channel(f"#{TWITCH_CHANNEL}")
                 if channel is None:
                     print(f"[TwitchMirror] No IRC channel object for #{TWITCH_CHANNEL}")
@@ -502,7 +517,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 await asyncio.sleep(SEND_DELAY)
                 return True
             except Exception as e:
-                # Roll back pending if send failed
                 try:
                     if self._outbound_pending and self._outbound_pending[-1] == discord_msg_id:
                         self._outbound_pending.pop()
@@ -512,10 +526,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 return False
 
     async def delete_on_twitch(self, twitch_msg_id: str) -> bool:
-        """
-        Delete a chat message via IRC /delete (bot must be a moderator).
-        https://dev.twitch.tv/docs/irc/commands/#delete
-        """
+        """Delete a chat message via IRC /delete (bot must be a moderator)."""
         if not self.connected or not twitch_msg_id:
             return False
         async with self._send_lock:
@@ -597,6 +608,9 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             return None
 
     async def _delete_discord_message(self, discord_msg_id: int) -> None:
+        # Drop reverse index if still present (Twitch-side delete of inbound)
+        self._discord_to_inbound.pop(discord_msg_id, None)
+
         webhook = self._webhook
         if webhook is not None and webhook.token:
             try:
@@ -641,6 +655,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             items = list(self._msg_map.items())
             self._msg_map.clear()
             self._login_msgs.clear()
+            self._discord_to_inbound.clear()
             deleted = 0
             for _, discord_id in items:
                 await self._delete_discord_message(discord_id)
@@ -878,7 +893,6 @@ class TwitchMirrorCog(commands.Cog):
         if self._twitch is None or not self._twitch.connected:
             return
 
-        # Ignore bots, webhooks (Twitch→Discord mirrors), system messages
         if message.author.bot:
             return
         if message.webhook_id is not None:
@@ -893,7 +907,6 @@ class TwitchMirrorCog(commands.Cog):
         if not body:
             return
 
-        # Prefix with Discord display name so chat knows who spoke
         display = (message.author.display_name or message.author.name or "Discord").strip()
         display = display.replace("\n", " ")[:32]
         payload = f"[Discord] {display}: {body}"
@@ -906,27 +919,40 @@ class TwitchMirrorCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
-        """Discord delete → Twitch /delete (only for messages we forwarded)."""
-        if not DISCORD_TO_TWITCH:
-            return
+        """
+        Discord delete → Twitch /delete:
+
+        1) Webhook mirror of a *Twitch-origin* message deleted on Discord
+           → delete the original Twitch chat message
+        2) Message we forwarded Discord→Twitch deleted on Discord
+           → delete our bot's Twitch message
+        """
         if not self._is_mirror_channel(payload.channel_id):
             return
         if self._twitch is None or not self._twitch.connected:
             return
 
-        twitch_id = self._twitch._forget_outbound(payload.message_id)
+        # 1) Inbound: Twitch chatter → Discord webhook copy
+        twitch_id = self._twitch._forget_inbound_by_discord(payload.message_id)
+        source = "inbound (Twitch original)"
+
+        # 2) Outbound: Discord human → Twitch bot message
+        if not twitch_id and DISCORD_TO_TWITCH:
+            twitch_id = self._twitch._forget_outbound(payload.message_id)
+            source = "outbound (Discord→Twitch)"
+
         if not twitch_id:
-            # Not an outbound message we sent (e.g. webhook mirror from Twitch)
             return
 
         ok = await self._twitch.delete_on_twitch(twitch_id)
         if ok:
             print(
-                f"[TwitchMirror] Discord delete → Twitch /delete {twitch_id[:8]}…"
+                f"[TwitchMirror] Discord delete → Twitch /delete "
+                f"{twitch_id[:8]}… ({source})"
             )
         else:
             print(
-                f"[TwitchMirror] Could not delete on Twitch ({twitch_id[:8]}…). "
+                f"[TwitchMirror] Could not delete on Twitch ({twitch_id[:8]}…, {source}). "
                 f"Is the bot a mod in #{TWITCH_CHANNEL}?"
             )
 
@@ -976,7 +1002,10 @@ class TwitchMirrorCog(commands.Cog):
             inline=True,
         )
         embed.set_footer(
-            text="Deletes on Twitch need the bot account to be a channel mod"
+            text=(
+                "Deleting a webhook mirror on Discord also /delete's the Twitch original "
+                "(bot must be mod)"
+            )
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
