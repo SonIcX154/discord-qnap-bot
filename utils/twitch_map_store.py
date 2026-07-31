@@ -95,16 +95,33 @@ class TwitchMapStore:
             "direction": row[3],
         }
 
-    async def delete_by_discord(self, discord_id: int) -> Optional[dict[str, Any]]:
+    async def delete_by_discord(
+        self,
+        discord_id: int,
+        *,
+        direction: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
         async with aiosqlite.connect(self.path) as db:
-            async with db.execute(
-                "SELECT twitch_id, discord_id, login, direction FROM msg_map WHERE discord_id = ?",
-                (discord_id,),
-            ) as cur:
-                row = await cur.fetchone()
+            if direction:
+                async with db.execute(
+                    """
+                    SELECT twitch_id, discord_id, login, direction
+                    FROM msg_map WHERE discord_id = ? AND direction = ?
+                    """,
+                    (discord_id, direction),
+                ) as cur:
+                    row = await cur.fetchone()
+            else:
+                async with db.execute(
+                    "SELECT twitch_id, discord_id, login, direction FROM msg_map WHERE discord_id = ?",
+                    (discord_id,),
+                ) as cur:
+                    row = await cur.fetchone()
             if not row:
                 return None
-            await db.execute("DELETE FROM msg_map WHERE discord_id = ?", (discord_id,))
+            await db.execute(
+                "DELETE FROM msg_map WHERE twitch_id = ?", (row[0],)
+            )
             await db.commit()
         return {
             "twitch_id": row[0],
@@ -170,7 +187,6 @@ class TwitchMapStore:
                 (self.max_entries,),
             ) as cur:
                 rows = await cur.fetchall()
-        # reverse so oldest is first (OrderedDict LRU behaviour)
         rows = list(reversed(rows))
         return [
             {
@@ -204,7 +220,6 @@ class TwitchMapStore:
                 total = int((await cur.fetchone())[0])
             if total <= self.max_entries:
                 return 0
-            # Delete oldest excess
             excess = total - self.max_entries
             await db.execute(
                 """
