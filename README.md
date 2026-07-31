@@ -16,7 +16,7 @@ A Discord bot built for **QNAP Container Station** (Docker). It combines persist
 ## Repo layout
 
 ```text
-bot.py                 # launcher, intents, cog auto-load, slash sync
+bot.py                 # launcher, intents, cog auto-load, slash sync, global errors
 cogs/
   backup.py            # message logging, backfill, snapshots, restore
   backup_admin.py      # purge, excludes, retention, restore patches
@@ -73,6 +73,7 @@ python bot.py
 | `DISCORD_TOKEN` | yes | Discord bot token |
 | `VOICE_CHANNEL_ID` | yes* | Voice channel to stay in (`*` if you use voice stayer) |
 | `TZ` | no | Set in `docker-compose.yml` (default `Europe/Berlin`) for schedules & timestamps |
+| `LOG_LEVEL` | no | `DEBUG` / `INFO` / `WARNING` / `ERROR` (default `INFO`) |
 
 ### Birthdays
 
@@ -95,7 +96,7 @@ python bot.py
 |----------|---------|---------|
 | `BACKUP_DATA_PATH` | `data/backup.db` | Backup SQLite DB |
 | `BACKUP_ATTACHMENTS_PATH` | `data/backups/attachments` | Downloaded attachment files |
-| `BACKUP_SOFT_DELETE_DAYS` | `30` | Hard-delete soft-deleted rows after N days |
+| `BACKUP_SOFT_DELETE_RETENTION_DAYS` | `30` | Hard-delete soft-deleted rows after N days |
 | `BACKUP_PURGE_INTERVAL_HOURS` | `24` | How often the retention loop runs |
 
 ### Twitch mirror (optional)
@@ -219,10 +220,13 @@ No slash commands required once env is set. On startup the cog joins the Twitch 
 | Twitch not mirroring | Token, client id, channel name, Discord channel ID; bot mod for deletes |
 | Discord→Twitch delete fails | Need Helix send (`user:write:chat`) so message IDs are stored; map is in-memory |
 | Backup restore hierarchy odd | Bot role must be highest manageable; use `clear_first` carefully |
+| Unexpected command errors | Bot logs show full traceback; users get an ephemeral message |
 
 ## Extending
 
 Drop a new `cogs/*.py` with a `setup(bot)` and it loads automatically. Shared UI patterns: `BetAdjustableMixin`, `ReplayMixin`, `OWNER_ONLY_MSG`.
+
+Per-command `@command.error` handlers still override the global tree error handler when present (e.g. cooldowns on roulette/slots).
 
 ---
 
