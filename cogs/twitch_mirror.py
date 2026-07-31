@@ -120,7 +120,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
         self._outbound_pending: Deque[int] = deque()
         self._discord_to_twitch: OrderedDict[int, str] = OrderedDict()
-        # Twitch ids we sent as Discord→Twitch — never mirror those back
         self._outbound_twitch_ids: OrderedDict[str, None] = OrderedDict()
         self._bot_logins: set[str] = set()
         if TWITCH_NICK:
@@ -202,15 +201,32 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             print(f"[TwitchMirror] Map persist (inbound) failed: {e}")
 
     async def _forget_twitch_id(self, twitch_id: str) -> Optional[int]:
+        """Resolve + drop mapping for a Twitch msg id (inbound or outbound)."""
         discord_id = self._msg_map.pop(twitch_id, None)
         for s in self._login_msgs.values():
             s.discard(twitch_id)
         if discord_id is not None:
             self._discord_to_inbound.pop(discord_id, None)
+
+        # Outbound memory (Discord original → Twitch)
+        if discord_id is None:
+            for did, tid in list(self._discord_to_twitch.items()):
+                if tid == twitch_id:
+                    discord_id = did
+                    self._discord_to_twitch.pop(did, None)
+                    break
+        self._outbound_twitch_ids.pop(twitch_id, None)
+
         try:
             row = await self._store.delete_by_twitch(twitch_id)
-            if discord_id is None and row is not None:
-                discord_id = int(row["discord_id"])
+            if row is not None:
+                if discord_id is None:
+                    discord_id = int(row["discord_id"])
+                # Keep memory consistent with DB direction
+                if row.get("direction") == "outbound" and discord_id is not None:
+                    self._discord_to_twitch.pop(discord_id, None)
+                elif row.get("direction") == "inbound" and discord_id is not None:
+                    self._discord_to_inbound.pop(discord_id, None)
         except Exception as e:
             print(f"[TwitchMirror] Map DB delete (twitch) failed: {e}")
         return discord_id
@@ -402,12 +418,9 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
             tid = twitch_msg_id(message)
 
-            # Helix Discord→Twitch send — already tracked, do not mirror back
             if tid and tid in self._outbound_twitch_ids:
                 return
 
-            # Only skip Discord→Twitch echoes by content prefix.
-            # Normal messages from the bot account ARE mirrored.
             if content.startswith("[Discord]") or content.lower().startswith("[discord]"):
                 if tid and self._outbound_pending and login in self._bot_logins:
                     discord_id = self._outbound_pending.popleft()
@@ -675,23 +688,31 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             return None
 
     async def _delete_discord_message(self, discord_msg_id: int) -> None:
+        """Delete a mirrored Discord message (webhook OR normal user message)."""
         self._discord_to_inbound.pop(discord_msg_id, None)
 
+        deleted = False
         webhook = self._webhook
         if webhook is not None and webhook.token:
             try:
                 await webhook.delete_message(discord_msg_id)
-                return
+                deleted = True
             except discord.NotFound:
-                return
+                # Not a webhook message (e.g. Discord→Twitch original) — try channel
+                pass
             except Exception as e:
                 print(f"[TwitchMirror] Webhook delete failed: {e}")
+
+        if deleted:
+            return
 
         channel = self._text_channel
         if channel is not None:
             try:
                 msg = await channel.fetch_message(discord_msg_id)
                 await msg.delete()
+            except discord.NotFound:
+                pass
             except Exception as e:
                 print(f"[TwitchMirror] Channel delete failed: {e}")
 
@@ -700,7 +721,10 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             discord_id = await self._forget_twitch_id(value)
             if discord_id is not None:
                 await self._delete_discord_message(discord_id)
-                print(f"[TwitchMirror] Deleted mirrored msg (CLEARMSG {value[:8]}…)")
+                print(
+                    f"[TwitchMirror] Deleted Discord msg={discord_id} "
+                    f"(CLEARMSG {value[:8]}…)"
+                )
             return
 
         if kind == "user" and value:
@@ -729,6 +753,10 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             self._msg_map.clear()
             self._login_msgs.clear()
             self._discord_to_inbound.clear()
+            # Also wipe outbound so Discord originals of Discord→Twitch go away
+            outbound_items = list(self._discord_to_twitch.items())
+            self._discord_to_twitch.clear()
+            self._outbound_twitch_ids.clear()
             try:
                 db_rows = await self._store.clear_direction("inbound")
                 seen = {tid for tid, _ in items}
@@ -736,11 +764,21 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                     tid = str(row["twitch_id"])
                     if tid not in seen:
                         items.append((tid, int(row["discord_id"])))
+                out_rows = await self._store.clear_direction("outbound")
+                seen_out = {did for did, _ in outbound_items}
+                for row in out_rows:
+                    did = int(row["discord_id"])
+                    if did not in seen_out:
+                        outbound_items.append((did, str(row["twitch_id"])))
             except Exception as e:
-                print(f"[TwitchMirror] Map DB clear inbound failed: {e}")
+                print(f"[TwitchMirror] Map DB clear failed: {e}")
 
             deleted = 0
             for _, discord_id in items:
+                await self._delete_discord_message(discord_id)
+                deleted += 1
+                await asyncio.sleep(0.25)
+            for discord_id, _ in outbound_items:
                 await self._delete_discord_message(discord_id)
                 deleted += 1
                 await asyncio.sleep(0.25)
