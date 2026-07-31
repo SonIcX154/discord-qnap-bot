@@ -15,9 +15,9 @@ if TYPE_CHECKING:
     from utils.bet_mixin import BetAdjustableMixin
 
 try:
-    from utils.bet_mixin import BetAdjustableMixin
+    from utils.bet_mixin import BetAdjustableMixin, OWNER_ONLY_MSG
 except ImportError:
-    from ..utils.bet_mixin import BetAdjustableMixin
+    from ..utils.bet_mixin import BetAdjustableMixin, OWNER_ONLY_MSG
 
 
 # ====================== CONFIG ======================
@@ -236,6 +236,12 @@ class CoinflipView(BetAdjustableMixin, discord.ui.View):
         BetAdjustableMixin.__init__(self, economy_cog, interaction.user.id, bet, currency)
         discord.ui.View.__init__(self, timeout=120)
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(OWNER_ONLY_MSG, ephemeral=True)
+            return False
+        return True
+
     async def _get_updated_embed(self) -> discord.Embed:
         current_balance = await self.economy.get_balance(self.user_id)
         embed = discord.Embed(title="🪙 Coinflip", color=discord.Color.gold())
@@ -269,10 +275,6 @@ class CoinflipView(BetAdjustableMixin, discord.ui.View):
 
     @discord.ui.button(label="🪙 Kopf", style=discord.ButtonStyle.primary, row=1)
     async def choose_kopf(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Nur der Spieler darf wählen.", ephemeral=True)
-            return
-
         if not await self.economy.remove_coins(self.user_id, self.bet):
             await interaction.response.send_message(f"❌ Du hast nicht genug {self.currency} mehr.", ephemeral=True)
             return
@@ -281,10 +283,6 @@ class CoinflipView(BetAdjustableMixin, discord.ui.View):
 
     @discord.ui.button(label="🪙 Zahl", style=discord.ButtonStyle.primary, row=1)
     async def choose_zahl(self, interaction: discord.Interaction, button: discord.ui.Button[Any]) -> None:
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("Nur der Spieler darf wählen.", ephemeral=True)
-            return
-
         if not await self.economy.remove_coins(self.user_id, self.bet):
             await interaction.response.send_message(f"❌ Du hast nicht genug {self.currency} mehr.", ephemeral=True)
             return
