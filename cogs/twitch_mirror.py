@@ -120,7 +120,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
         self._outbound_pending: Deque[int] = deque()
         self._discord_to_twitch: OrderedDict[int, str] = OrderedDict()
-        # Twitch ids we sent (Discord→Twitch) — never mirror these back to Discord
+        # Twitch ids we sent as Discord→Twitch — never mirror those back
         self._outbound_twitch_ids: OrderedDict[str, None] = OrderedDict()
         self._bot_logins: set[str] = set()
         if TWITCH_NICK:
@@ -360,17 +360,12 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         if nick and nick != "?":
             self._bot_logins.add(str(nick).lower().lstrip("#"))
         print(f"[TwitchMirror] Connected as {nick} → #{TWITCH_CHANNEL}")
-        if self._bot_logins:
-            print(
-                f"[TwitchMirror] Self logins (no Discord echo): "
-                + ", ".join(sorted(self._bot_logins))
-            )
         if OWNER_PING_MAP:
             print(
                 f"[TwitchMirror] Owner ping map (@ or bare): "
                 + ", ".join(f"{k}→<@{v}>" for k, v in OWNER_PING_MAP.items())
             )
-        print("[TwitchMirror] Moderation sync + reply @ strip")
+        print("[TwitchMirror] Echo filter: only [Discord]-prefixed (bot self-chat mirrored)")
         await self._load_persisted_map()
         await self._resolve_helix_ids()
         if DISCORD_TO_TWITCH:
@@ -407,12 +402,12 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
             tid = twitch_msg_id(message)
 
-            # Already sent by us (Helix) — never post back to Discord
+            # Helix Discord→Twitch send — already tracked, do not mirror back
             if tid and tid in self._outbound_twitch_ids:
                 return
 
-            # Discord→Twitch payloads look like: [Discord] Name: …
-            # Helix sends are NOT marked echo by twitchio, so filter by prefix.
+            # Only skip Discord→Twitch echoes by content prefix.
+            # Normal messages from the bot account ARE mirrored.
             if content.startswith("[Discord]") or content.lower().startswith("[discord]"):
                 if tid and self._outbound_pending and login in self._bot_logins:
                     discord_id = self._outbound_pending.popleft()
@@ -421,10 +416,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                         f"[TwitchMirror] Outbound ([Discord] IRC) linked "
                         f"discord={discord_id} → twitch={tid[:12]}…"
                     )
-                return
-
-            # Skip other chat from our bot account (avoids self-echo)
-            if login in self._bot_logins:
                 return
 
             tags = message_tags(message)
