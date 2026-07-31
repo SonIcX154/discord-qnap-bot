@@ -1,5 +1,10 @@
 import discord
 
+try:
+    from utils.bet_mixin import OWNER_ONLY_MSG
+except ImportError:
+    from .bet_mixin import OWNER_ONLY_MSG
+
 
 class ReplayMixin:
     """
@@ -17,10 +22,7 @@ class ReplayMixin:
     @discord.ui.button(label="🔄 Nochmal spielen", style=discord.ButtonStyle.primary, row=1)
     async def play_again(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not self._can_replay(interaction):
-            await interaction.response.send_message(
-                "Nur der Spieler darf den Button benutzen.",
-                ephemeral=True
-            )
+            await interaction.response.send_message(OWNER_ONLY_MSG, ephemeral=True)
             return
 
         if getattr(self, "playing", False):
