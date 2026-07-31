@@ -11,9 +11,9 @@ if TYPE_CHECKING:
     from cogs.economy import EconomyCog
 
 try:
-    from utils.bet_mixin import BetAdjustableMixin
+    from utils.bet_mixin import BetAdjustableMixin, OWNER_ONLY_MSG
 except ImportError:
-    from ..utils.bet_mixin import BetAdjustableMixin
+    from ..utils.bet_mixin import BetAdjustableMixin, OWNER_ONLY_MSG
 
 
 ROULETTE_EMOTE = str(os.getenv("ROULETTE_EMOTE", "🎰"))
@@ -46,10 +46,7 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Only the user who started /roulette may press buttons."""
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "Um zu spielen führe den Command bitte selber aus.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(OWNER_ONLY_MSG, ephemeral=True)
             return False
         return True
 
