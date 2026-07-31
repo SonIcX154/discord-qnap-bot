@@ -52,7 +52,8 @@ class StatusCog(commands.Cog):
         description="Overview: latency, cogs, voice, backup, economy, Twitch mirror",
     )
     @app_commands.default_permissions(administrator=True)
-    async def bot_status(self, interaction: discord.Interaction) -> None:
+    async def status_overview(self, interaction: discord.Interaction) -> None:
+        # Method must NOT be named bot_* / cog_* (discord.py restriction)
         await interaction.response.defer(ephemeral=True)
 
         latency_ms = round(self.bot.latency * 1000)
@@ -75,7 +76,6 @@ class StatusCog(commands.Cog):
             inline=True,
         )
 
-        # Voice stayer
         voice_cog = self.bot.get_cog("VoiceStayer")
         voice_line = "not loaded"
         if voice_cog is not None:
@@ -100,15 +100,10 @@ class StatusCog(commands.Cog):
         loaded = sorted(self.bot.cogs.keys())
         embed.add_field(
             name="Loaded cogs",
-            value=(
-                "`" + "`, `".join(loaded) + "`"
-                if loaded
-                else "none"
-            ),
+            value=("`" + "`, `".join(loaded) + "`" if loaded else "none"),
             inline=False,
         )
 
-        # Backup DB
         backup_txt = "DB missing"
         if os.path.isfile(BACKUP_DB_PATH):
             try:
@@ -134,7 +129,6 @@ class StatusCog(commands.Cog):
                 backup_txt = f"error: `{e}`"
         embed.add_field(name="Backup", value=backup_txt, inline=True)
 
-        # Economy DB
         eco_txt = "DB missing"
         if os.path.isfile(ECONOMY_DB_PATH):
             try:
@@ -149,7 +143,6 @@ class StatusCog(commands.Cog):
                 eco_txt = f"error: `{e}`"
         embed.add_field(name="Economy", value=eco_txt, inline=True)
 
-        # Twitch mirror
         twitch_cog = self.bot.get_cog("TwitchMirrorCog")
         twitch_txt = "not loaded"
         if twitch_cog is not None:
