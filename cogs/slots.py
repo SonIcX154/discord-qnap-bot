@@ -12,19 +12,25 @@ if TYPE_CHECKING:
     from cogs.economy import EconomyCog
 
 try:
-    from utils.bet_mixin import BetAdjustableMixin
+    from utils.bet_mixin import BetAdjustableMixin, OWNER_ONLY_MSG
     from utils.replay_mixin import ReplayMixin
 except ImportError:
-    from ..utils.bet_mixin import BetAdjustableMixin
+    from ..utils.bet_mixin import BetAdjustableMixin, OWNER_ONLY_MSG
     from ..utils.replay_mixin import ReplayMixin
 
 class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
-    """Interactive Slots view with bet adjustment and replay."""
+    """InteractiveSlots view with bet adjustment and replay."""
 
     def __init__(self, economy_cog: "EconomyCog", user_id: int, bet: int, currency: str) -> None:
         BetAdjustableMixin.__init__(self, economy_cog, user_id, bet, currency)
         ReplayMixin.__init__(self, user_id)
         discord.ui.View.__init__(self, timeout=300)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(OWNER_ONLY_MSG, ephemeral=True)
+            return False
+        return True
 
     async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item) -> None: 
         traceback.print_exception(type(error), error, error.__traceback__)
@@ -34,7 +40,7 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         current_balance = await self.economy.get_balance(self.user_id)
 
         embed = discord.Embed(
-            title="🎰 Slots",
+            title="🎰Slots",
             color=discord.Color.gold()
         )
         embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
@@ -60,7 +66,7 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         player_name = interaction.user.display_name
 
         spinning_embed = discord.Embed(
-            title="🎰 Slots - Drehen...",
+            title="🎰Slots - Drehen...",
             color=discord.Color.gold()
         )
         spinning_embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
@@ -84,17 +90,17 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
             # Jackpot first so the special title is used
             new_balance = await self.economy.add_coins(self.user_id, winnings)
             color = discord.Color.blue()
-            title = "🎰 Slots - 🎉JACKPOT!🎉"
+            title = "🎰Slots - 🎉JACKPOT!🎉"
             gewinn_text = f"+{winnings:,} {self.currency} ({win_text})"
         elif multiplier > 0:
             new_balance = await self.economy.add_coins(self.user_id, winnings)
             color = discord.Color.green()
-            title = "🎰 Slots - GEWONNEN!"
+            title = "🎰Slots - GEWONNEN!"
             gewinn_text = f"+{winnings:,} {self.currency} ({win_text})"
         else:
             new_balance = await self.economy.get_balance(self.user_id)
             color = discord.Color.red()
-            title = "🎰 Slots - Verloren"
+            title = "🎰Slots - Verloren"
             gewinn_text = f"0 {self.currency}"
 
         final_embed = discord.Embed(title=title, color=color)
@@ -147,7 +153,7 @@ class SlotsCog(commands.Cog):
         player_name = interaction.user.display_name
 
         spinning_embed = discord.Embed(
-            title="🎰 Slots - Drehen...",
+            title="🎰Slots - Drehen...",
             color=discord.Color.gold()
         )
         spinning_embed.add_field(name="Einsatz", value=f"{bet:,} {currency}", inline=True)
@@ -171,17 +177,17 @@ class SlotsCog(commands.Cog):
             # Jackpot first so the special title is used
             new_balance = await economy.add_coins(user_id, winnings) # type: ignore[union-attr]
             color = discord.Color.blue()
-            title = "🎰 Slots - 🎉JACKPOT!🎉"
+            title = "🎰Slots - 🎉JACKPOT!🎉"
             gewinn_text = f"+{winnings:,} {currency} ({win_text})"
         elif multiplier > 0:
             new_balance = await economy.add_coins(user_id, winnings) # type: ignore[union-attr]
             color = discord.Color.green()
-            title = "🎰 Slots - GEWONNEN!"
+            title = "🎰Slots - GEWONNEN!"
             gewinn_text = f"+{winnings:,} {currency} ({win_text})"
         else:
             new_balance = await economy.get_balance(user_id) # type: ignore[union-attr]
             color = discord.Color.red()
-            title = "🎰 Slots - Verloren"
+            title = "🎰Slots - Verloren"
             gewinn_text = f"0 {currency}"
 
         final_embed = discord.Embed(title=title, color=color)
