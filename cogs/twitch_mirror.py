@@ -120,6 +120,11 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
         self._outbound_pending: Deque[int] = deque()
         self._discord_to_twitch: OrderedDict[int, str] = OrderedDict()
+        # Twitch ids we sent (Discord→Twitch) — never mirror these back to Discord
+        self._outbound_twitch_ids: OrderedDict[str, None] = OrderedDict()
+        self._bot_logins: set[str] = set()
+        if TWITCH_NICK:
+            self._bot_logins.add(TWITCH_NICK.lower().lstrip("#"))
         self._send_lock = asyncio.Lock()
 
         self._webhook: Optional[discord.Webhook] = None
@@ -130,6 +135,12 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         self._has_delete_scope: bool = False
         self._has_send_scope: bool = False
         self._helix_client_id: str = TWITCH_CLIENT_ID
+
+    def _track_outbound_tid(self, twitch_id: str) -> None:
+        self._outbound_twitch_ids[twitch_id] = None
+        self._outbound_twitch_ids.move_to_end(twitch_id)
+        while len(self._outbound_twitch_ids) > MSG_CACHE_MAX:
+            self._outbound_twitch_ids.popitem(last=False)
 
     async def _load_persisted_map(self) -> None:
         try:
@@ -150,6 +161,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             if direction == "outbound":
                 self._discord_to_twitch[did] = tid
                 self._discord_to_twitch.move_to_end(did)
+                self._track_outbound_tid(tid)
                 outbound += 1
             else:
                 self._msg_map[tid] = did
@@ -220,6 +232,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
     async def _remember_outbound(self, discord_id: int, twitch_id: str) -> None:
         self._discord_to_twitch[discord_id] = twitch_id
         self._discord_to_twitch.move_to_end(discord_id)
+        self._track_outbound_tid(twitch_id)
         while len(self._discord_to_twitch) > MSG_CACHE_MAX:
             self._discord_to_twitch.popitem(last=False)
         try:
@@ -234,10 +247,13 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
     async def _forget_outbound(self, discord_id: int) -> Optional[str]:
         twitch_id = self._discord_to_twitch.pop(discord_id, None)
+        if twitch_id is not None:
+            self._outbound_twitch_ids.pop(twitch_id, None)
         try:
             row = await self._store.delete_by_discord(discord_id, direction="outbound")
             if twitch_id is None and row is not None:
                 twitch_id = str(row["twitch_id"])
+                self._outbound_twitch_ids.pop(twitch_id, None)
         except Exception as e:
             print(f"[TwitchMirror] Map DB delete (outbound) failed: {e}")
         return twitch_id
@@ -276,6 +292,8 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 self._has_delete_scope = REQUIRED_DELETE_SCOPE in scopes
                 self._has_send_scope = REQUIRED_SEND_SCOPE in scopes
                 login = info.get("login") or "?"
+                if login and login != "?":
+                    self._bot_logins.add(str(login).lower())
                 token_client_id = str(info.get("client_id") or "")
 
                 if token_client_id:
@@ -339,7 +357,14 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
     async def event_ready(self) -> None:
         self.connected = True
         nick = getattr(self, "nick", None) or TWITCH_NICK or "?"
+        if nick and nick != "?":
+            self._bot_logins.add(str(nick).lower().lstrip("#"))
         print(f"[TwitchMirror] Connected as {nick} → #{TWITCH_CHANNEL}")
+        if self._bot_logins:
+            print(
+                f"[TwitchMirror] Self logins (no Discord echo): "
+                + ", ".join(sorted(self._bot_logins))
+            )
         if OWNER_PING_MAP:
             print(
                 f"[TwitchMirror] Owner ping map (@ or bare): "
@@ -380,6 +405,28 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             if not content:
                 return
 
+            tid = twitch_msg_id(message)
+
+            # Already sent by us (Helix) — never post back to Discord
+            if tid and tid in self._outbound_twitch_ids:
+                return
+
+            # Discord→Twitch payloads look like: [Discord] Name: …
+            # Helix sends are NOT marked echo by twitchio, so filter by prefix.
+            if content.startswith("[Discord]") or content.lower().startswith("[discord]"):
+                if tid and self._outbound_pending and login in self._bot_logins:
+                    discord_id = self._outbound_pending.popleft()
+                    await self._remember_outbound(discord_id, tid)
+                    print(
+                        f"[TwitchMirror] Outbound ([Discord] IRC) linked "
+                        f"discord={discord_id} → twitch={tid[:12]}…"
+                    )
+                return
+
+            # Skip other chat from our bot account (avoids self-echo)
+            if login in self._bot_logins:
+                return
+
             tags = message_tags(message)
             reply_header: Optional[str] = None
             try:
@@ -399,7 +446,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             if not content:
                 return
 
-            tid = twitch_msg_id(message)
             if not tid:
                 print(f"[TwitchMirror] WARNING: no msg id from IRC for @{login}")
 
