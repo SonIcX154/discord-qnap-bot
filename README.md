@@ -214,7 +214,7 @@ No slash commands required once env is set. On startup the cog joins the Twitch 
 | Bot won’t start | `DISCORD_TOKEN` in `.env` |
 | Slash commands missing | Restart; wait a minute for global sync |
 | Wrong times (birthdays / message restore stamps) | Container `TZ` |
-- Birthdays not saving | `./data` mount + permissions |
+| Birthdays not saving | `./data` mount + permissions |
 | Voice reconnect loop | Valid `VOICE_CHANNEL_ID`, bot can join |
 | Twitch not mirroring | Token, client id, channel name, Discord channel ID; bot mod for deletes |
 | Discord→Twitch delete fails | Need Helix send (`user:write:chat`) so message IDs are stored; map is in-memory |
