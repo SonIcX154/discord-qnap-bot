@@ -35,24 +35,22 @@ MOD_LOG_CHANNEL_ID = os.getenv("TWITCH_MOD_LOG_CHANNEL_ID", "").strip()
 EVENTSUB_WS = "wss://eventsub.wss.twitch.tv/ws"
 
 # (type, version, needs_moderator_id)
-# Ban/unban/mod lists require moderator_user_id when the token is a mod (not broadcaster).
 SUBSCRIPTIONS: list[tuple[str, str, bool]] = [
-    ("channel.moderate", "2", True),  # unified mod actions (preferred)
+    ("channel.moderate", "2", True),
     ("channel.ban", "1", True),
     ("channel.unban", "1", True),
     ("channel.moderator.add", "1", True),
     ("channel.moderator.remove", "1", True),
     ("channel.shoutout.create", "1", True),
-    ("channel.raid", "1", False),  # to_broadcaster_user_id only
+    ("channel.raid", "1", False),
 ]
 
-# Scopes we expect for the various subscriptions
 EXPECTED_SCOPES = (
     "moderator:read:banned_users",
     "moderator:read:moderators",
     "moderation:read",
     "moderator:read:shoutouts",
-    "moderator:read:chat_messages",  # channel.moderate delete etc.
+    "moderator:read:chat_messages",
     "moderator:read:chat_settings",
 )
 
@@ -68,14 +66,12 @@ def _enabled() -> bool:
 
 
 class TwitchModLogCog(commands.Cog):
-    """Posts Twitch mod / channel events into a Discord text channel."""
-
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self._task: Optional[asyncio.Task] = None
         self._session: Optional[Any] = None
         self._broadcaster_id: Optional[str] = None
-        self._user_id: Optional[str] = None  # token user (mod / bot)
+        self._user_id: Optional[str] = None
         self._client_id: str = TWITCH_CLIENT_ID
         self._scopes: list[str] = []
         self._discord_channel_id: int = 0
@@ -87,15 +83,10 @@ class TwitchModLogCog(commands.Cog):
 
     async def cog_load(self) -> None:
         if not _enabled():
-            if MOD_LOG_CHANNEL_ID and aiohttp is None:
-                print("[TwitchModLog] Disabled – aiohttp missing")
-            elif MOD_LOG_CHANNEL_ID:
-                print(
-                    "[TwitchModLog] Disabled – need TWITCH_TOKEN, TWITCH_CLIENT_ID, "
-                    "TWITCH_CHANNEL, TWITCH_MOD_LOG_CHANNEL_ID"
-                )
-            else:
+            if not MOD_LOG_CHANNEL_ID:
                 print("[TwitchModLog] Idle (set TWITCH_MOD_LOG_CHANNEL_ID to enable)")
+            else:
+                print("[TwitchModLog] Disabled – missing token/client/channel or aiohttp")
             return
         if not self._discord_channel_id:
             print(f"[TwitchModLog] Invalid TWITCH_MOD_LOG_CHANNEL_ID: {MOD_LOG_CHANNEL_ID!r}")
@@ -195,27 +186,29 @@ class TwitchModLogCog(commands.Cog):
                     body = await resp.text()
                     if resp.status in (200, 202):
                         print(f"[TwitchModLog] Subscribed: {event_type} v{version}")
-                    else:
-                        # Fall back: channel.moderate v1 if v2 rejected
-                        if event_type == "channel.moderate" and version == "2":
-                            payload["version"] = "1"
-                            async with session.post(
-                                "https://api.twitch.tv/helix/eventsub/subscriptions",
-                                headers=self._headers(),
-                                json=payload,
-                            ) as resp2:
-                                body2 = await resp2.text()
-                                if resp2.status in (200, 202):
-                                    print("[TwitchModLog] Subscribed: channel.moderate v1")
-                                    continue
-                                print(
-                                    f"[TwitchModLog] Subscribe channel.moderate "
-                                    f"HTTP {resp2.status}: {body2[:250]}"
-                                )
-                        print(
-                            f"[TwitchModLog] Subscribe {event_type} "
-                            f"HTTP {resp.status}: {body[:250]}"
-                        )
+                        continue
+
+                    if event_type == "channel.moderate" and version == "2":
+                        payload["version"] = "1"
+                        async with session.post(
+                            "https://api.twitch.tv/helix/eventsub/subscriptions",
+                            headers=self._headers(),
+                            json=payload,
+                        ) as resp2:
+                            body2 = await resp2.text()
+                            if resp2.status in (200, 202):
+                                print("[TwitchModLog] Subscribed: channel.moderate v1")
+                                continue
+                            print(
+                                f"[TwitchModLog] Subscribe channel.moderate "
+                                f"HTTP {resp2.status}: {body2[:250]}"
+                            )
+                        continue
+
+                    print(
+                        f"[TwitchModLog] Subscribe {event_type} "
+                        f"HTTP {resp.status}: {body[:250]}"
+                    )
             except Exception as e:
                 print(f"[TwitchModLog] Subscribe {event_type} error: {e}")
 
@@ -250,8 +243,11 @@ class TwitchModLogCog(commands.Cog):
                 description=f"**{user}** by **{mod}**",
             )
             if action == "timeout":
-                ends = meta.get("expires_at") or "?"
-                emb.add_field(name="Until", value=str(ends), inline=True)
+                emb.add_field(
+                    name="Until",
+                    value=str(meta.get("expires_at") or "?"),
+                    inline=True,
+                )
             emb.add_field(name="Reason", value=reason[:500], inline=False)
             return emb
 
@@ -277,8 +273,7 @@ class TwitchModLogCog(commands.Cog):
                 emb.add_field(name="Message", value=body, inline=False)
             return emb
 
-        if action in ("mod", "unmod", "moderator_add", "moderator_remove", "add_moderator", "remove_moderator"):
-            # shapes vary by version
+        if action in ("mod", "unmod", "add_moderator", "remove_moderator"):
             meta = event.get("mod") or event.get("unmod") or event.get("moderator") or {}
             user = (
                 meta.get("user_name")
@@ -287,20 +282,18 @@ class TwitchModLogCog(commands.Cog):
                 or event.get("user_login")
                 or "?"
             )
-            adding = action in ("mod", "moderator_add", "add_moderator")
+            adding = action in ("mod", "add_moderator")
             return discord.Embed(
                 title="🛡️ Moderator added" if adding else "🛡️ Moderator removed",
                 color=discord.Color.blue() if adding else discord.Color.dark_grey(),
                 description=f"**{user}** by **{mod}**",
             )
 
-        # Generic fallback for other moderate actions (slow mode, followers-only, …)
-        emb = discord.Embed(
+        return discord.Embed(
             title=f"⚙️ Mod action: `{action}`",
             color=discord.Color.blurple(),
             description=f"By **{mod}**",
         )
-        return emb
 
     def _embed_for(self, event_type: str, event: dict[str, Any]) -> Optional[discord.Embed]:
         if event_type == "channel.moderate":
@@ -311,10 +304,7 @@ class TwitchModLogCog(commands.Cog):
             mod = event.get("moderator_user_name") or event.get("moderator_user_login") or "?"
             reason = (event.get("reason") or "").strip() or "—"
             ends = event.get("ends_at")
-            if event.get("is_permanent") or not ends:
-                dur = "permanent"
-            else:
-                dur = f"until {ends}"
+            dur = "permanent" if event.get("is_permanent") or not ends else f"until {ends}"
             emb = discord.Embed(
                 title="🔨 Ban / Timeout",
                 color=discord.Color.red(),
@@ -476,8 +466,7 @@ class TwitchModLogCog(commands.Cog):
     async def modlog_status(self, interaction: discord.Interaction) -> None:
         if not _enabled() or not self._discord_channel_id:
             await interaction.response.send_message(
-                "Mod log is **not configured**. Set `TWITCH_MOD_LOG_CHANNEL_ID` "
-                "(+ Twitch token / client id / channel).",
+                "Mod log is **not configured**. Set `TWITCH_MOD_LOG_CHANNEL_ID`.",
                 ephemeral=True,
             )
             return
@@ -508,7 +497,23 @@ class TwitchModLogCog(commands.Cog):
             inline=False,
         )
         if self._scopes:
+            scope_txt = ", ".join(f"`{s}`" for s in self._scopes)
+            if len(scope_txt) > 1000:
+                scope_txt = scope_txt[:997] + "…"
+            embed.add_field(name="Token scopes", value=scope_txt, inline=False)
+        if missing:
             embed.add_field(
-                name="Token scopes",
-                value="`" + "`, `".join(self._scopes[:20]) + "`"
-                + ("…
+                name="Missing (recommended)",
+                value=", ".join(f"`{s}`" for s in missing),
+                inline=False,
+            )
+        embed.add_field(
+            name="Events",
+            value=", ".join(t for t, _, _ in SUBSCRIPTIONS),
+            inline=False,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(TwitchModLogCog(bot))
