@@ -21,7 +21,6 @@ try:
         TWITCH_CHANNEL,
         TWITCH_CLIENT_ID,
         bearer_token,
-        normalize_token,
     )
 except ImportError:
     from ..utils.twitch_helpers import (
@@ -29,7 +28,6 @@ except ImportError:
         TWITCH_CHANNEL,
         TWITCH_CLIENT_ID,
         bearer_token,
-        normalize_token,
     )
 
 
@@ -37,14 +35,26 @@ MOD_LOG_CHANNEL_ID = os.getenv("TWITCH_MOD_LOG_CHANNEL_ID", "").strip()
 EVENTSUB_WS = "wss://eventsub.wss.twitch.tv/ws"
 
 # (type, version, needs_moderator_id)
+# Ban/unban/mod lists require moderator_user_id when the token is a mod (not broadcaster).
 SUBSCRIPTIONS: list[tuple[str, str, bool]] = [
-    ("channel.ban", "1", False),
-    ("channel.unban", "1", False),
-    ("channel.moderator.add", "1", False),
-    ("channel.moderator.remove", "1", False),
+    ("channel.moderate", "2", True),  # unified mod actions (preferred)
+    ("channel.ban", "1", True),
+    ("channel.unban", "1", True),
+    ("channel.moderator.add", "1", True),
+    ("channel.moderator.remove", "1", True),
     ("channel.shoutout.create", "1", True),
-    ("channel.raid", "1", False),  # to_broadcaster condition
+    ("channel.raid", "1", False),  # to_broadcaster_user_id only
 ]
+
+# Scopes we expect for the various subscriptions
+EXPECTED_SCOPES = (
+    "moderator:read:banned_users",
+    "moderator:read:moderators",
+    "moderation:read",
+    "moderator:read:shoutouts",
+    "moderator:read:chat_messages",  # channel.moderate delete etc.
+    "moderator:read:chat_settings",
+)
 
 
 def _enabled() -> bool:
@@ -67,6 +77,7 @@ class TwitchModLogCog(commands.Cog):
         self._broadcaster_id: Optional[str] = None
         self._user_id: Optional[str] = None  # token user (mod / bot)
         self._client_id: str = TWITCH_CLIENT_ID
+        self._scopes: list[str] = []
         self._discord_channel_id: int = 0
         try:
             if MOD_LOG_CHANNEL_ID:
@@ -125,11 +136,18 @@ class TwitchModLogCog(commands.Cog):
         token_cid = str(info.get("client_id") or "")
         if token_cid:
             self._client_id = token_cid
-        scopes = list(info.get("scopes") or [])
+        self._scopes = list(info.get("scopes") or [])
         print(
             f"[TwitchModLog] Token user_id={self._user_id} "
-            f"scopes={len(scopes)} client={self._client_id[:8]}…"
+            f"scopes={len(self._scopes)} client={self._client_id[:8]}…"
         )
+        print(f"[TwitchModLog] Scopes: {', '.join(self._scopes)}")
+        missing = [s for s in EXPECTED_SCOPES if s not in self._scopes]
+        if missing:
+            print(
+                f"[TwitchModLog] WARNING missing scopes for full mod log: "
+                f"{', '.join(missing)}"
+            )
 
         async with session.get(
             f"https://api.twitch.tv/helix/users?login={TWITCH_CHANNEL}",
@@ -176,8 +194,24 @@ class TwitchModLogCog(commands.Cog):
                 ) as resp:
                     body = await resp.text()
                     if resp.status in (200, 202):
-                        print(f"[TwitchModLog] Subscribed: {event_type}")
+                        print(f"[TwitchModLog] Subscribed: {event_type} v{version}")
                     else:
+                        # Fall back: channel.moderate v1 if v2 rejected
+                        if event_type == "channel.moderate" and version == "2":
+                            payload["version"] = "1"
+                            async with session.post(
+                                "https://api.twitch.tv/helix/eventsub/subscriptions",
+                                headers=self._headers(),
+                                json=payload,
+                            ) as resp2:
+                                body2 = await resp2.text()
+                                if resp2.status in (200, 202):
+                                    print("[TwitchModLog] Subscribed: channel.moderate v1")
+                                    continue
+                                print(
+                                    f"[TwitchModLog] Subscribe channel.moderate "
+                                    f"HTTP {resp2.status}: {body2[:250]}"
+                                )
                         print(
                             f"[TwitchModLog] Subscribe {event_type} "
                             f"HTTP {resp.status}: {body[:250]}"
@@ -202,7 +236,76 @@ class TwitchModLogCog(commands.Cog):
         except Exception as e:
             print(f"[TwitchModLog] Discord send failed: {e}")
 
+    def _embed_moderate(self, event: dict[str, Any]) -> Optional[discord.Embed]:
+        action = (event.get("action") or "?").lower()
+        mod = event.get("moderator_user_name") or event.get("moderator_user_login") or "?"
+
+        if action in ("ban", "timeout"):
+            meta = event.get("ban") or event.get("timeout") or {}
+            user = meta.get("user_name") or meta.get("user_login") or "?"
+            reason = (meta.get("reason") or "").strip() or "—"
+            emb = discord.Embed(
+                title="🔨 Ban" if action == "ban" else "⏳ Timeout",
+                color=discord.Color.red(),
+                description=f"**{user}** by **{mod}**",
+            )
+            if action == "timeout":
+                ends = meta.get("expires_at") or "?"
+                emb.add_field(name="Until", value=str(ends), inline=True)
+            emb.add_field(name="Reason", value=reason[:500], inline=False)
+            return emb
+
+        if action == "unban":
+            meta = event.get("unban") or {}
+            user = meta.get("user_name") or meta.get("user_login") or "?"
+            return discord.Embed(
+                title="✅ Unban",
+                color=discord.Color.green(),
+                description=f"**{user}** by **{mod}**",
+            )
+
+        if action == "delete":
+            meta = event.get("delete") or {}
+            user = meta.get("user_name") or meta.get("user_login") or "?"
+            body = (meta.get("message_body") or "")[:300]
+            emb = discord.Embed(
+                title="🗑️ Message deleted",
+                color=discord.Color.orange(),
+                description=f"**{user}** by **{mod}**",
+            )
+            if body:
+                emb.add_field(name="Message", value=body, inline=False)
+            return emb
+
+        if action in ("mod", "unmod", "moderator_add", "moderator_remove", "add_moderator", "remove_moderator"):
+            # shapes vary by version
+            meta = event.get("mod") or event.get("unmod") or event.get("moderator") or {}
+            user = (
+                meta.get("user_name")
+                or meta.get("user_login")
+                or event.get("user_name")
+                or event.get("user_login")
+                or "?"
+            )
+            adding = action in ("mod", "moderator_add", "add_moderator")
+            return discord.Embed(
+                title="🛡️ Moderator added" if adding else "🛡️ Moderator removed",
+                color=discord.Color.blue() if adding else discord.Color.dark_grey(),
+                description=f"**{user}** by **{mod}**",
+            )
+
+        # Generic fallback for other moderate actions (slow mode, followers-only, …)
+        emb = discord.Embed(
+            title=f"⚙️ Mod action: `{action}`",
+            color=discord.Color.blurple(),
+            description=f"By **{mod}**",
+        )
+        return emb
+
     def _embed_for(self, event_type: str, event: dict[str, Any]) -> Optional[discord.Embed]:
+        if event_type == "channel.moderate":
+            return self._embed_moderate(event)
+
         if event_type == "channel.ban":
             user = event.get("user_name") or event.get("user_login") or "?"
             mod = event.get("moderator_user_name") or event.get("moderator_user_login") or "?"
@@ -305,7 +408,7 @@ class TwitchModLogCog(commands.Cog):
                     payload = data.get("payload") or {}
 
                     if mtype == "session_welcome":
-                        sess = (payload.get("session") or {})
+                        sess = payload.get("session") or {}
                         session_id = sess.get("id")
                         print(f"[TwitchModLog] EventSub session {session_id}")
                         if session_id:
@@ -380,6 +483,7 @@ class TwitchModLogCog(commands.Cog):
             return
 
         running = bool(self._task and not self._task.done())
+        missing = [s for s in EXPECTED_SCOPES if s not in self._scopes]
         embed = discord.Embed(
             title="Twitch Mod Log",
             color=discord.Color.green() if running else discord.Color.orange(),
@@ -389,11 +493,7 @@ class TwitchModLogCog(commands.Cog):
             value=f"<#{self._discord_channel_id}>",
             inline=True,
         )
-        embed.add_field(
-            name="Twitch",
-            value=f"`#{TWITCH_CHANNEL}`",
-            inline=True,
-        )
+        embed.add_field(name="Twitch", value=f"`#{TWITCH_CHANNEL}`", inline=True)
         embed.add_field(
             name="Worker",
             value="🟢 running" if running else "🔴 stopped",
@@ -407,17 +507,8 @@ class TwitchModLogCog(commands.Cog):
             ),
             inline=False,
         )
-        embed.add_field(
-            name="Events",
-            value=", ".join(t for t, _, _ in SUBSCRIPTIONS),
-            inline=False,
-        )
-        embed.set_footer(
-            text="Scopes: moderator:read:banned_users, moderation:read, "
-            "moderator:read:shoutouts"
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(TwitchModLogCog(bot))
+        if self._scopes:
+            embed.add_field(
+                name="Token scopes",
+                value="`" + "`, `".join(self._scopes[:20]) + "`"
+                + ("…
