@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 import asyncio
 import discord
@@ -8,7 +7,6 @@ from discord.ext import commands
 from discord import app_commands
 from typing import Optional, Any, Deque
 from collections import OrderedDict, defaultdict, deque
-from urllib.parse import unquote
 
 try:
     from twitchio.ext import commands as twitch_commands
@@ -21,303 +19,71 @@ except ImportError:
     aiohttp = None  # type: ignore
 
 try:
-    from utils.twitch_map_store import TwitchMapStore, DEFAULT_PATH as TWITCH_MAP_DEFAULT_PATH
+    from utils.twitch_map_store import TwitchMapStore
+    from utils.twitch_helpers import (
+        TWITCH_TOKEN,
+        TWITCH_CHANNEL,
+        TWITCH_DISCORD_CHANNEL_ID,
+        TWITCH_NICK,
+        TWITCH_CLIENT_ID,
+        DISCORD_TO_TWITCH,
+        SEND_DELAY,
+        MSG_CACHE_MAX,
+        TWITCH_MIRROR_DB_PATH,
+        WEBHOOK_NAME,
+        REQUIRED_DELETE_SCOPE,
+        REQUIRED_SEND_SCOPE,
+        CLEARMSG_RE,
+        CLEARCHAT_USER_RE,
+        LEADING_AT_RE,
+        OWNER_PING_MAP,
+        is_configured,
+        normalize_token,
+        bearer_token,
+        safe_webhook_username,
+        apply_owner_pings,
+        allowed_mentions_for,
+        twitch_msg_id,
+        message_tags,
+        normalize_content,
+        strip_leading_reply_mention,
+        reply_header_from_tags,
+        discord_content_for_twitch,
+        compose_mirror_content,
+    )
 except ImportError:
-    from ..utils.twitch_map_store import TwitchMapStore, DEFAULT_PATH as TWITCH_MAP_DEFAULT_PATH
-
-
-TWITCH_TOKEN = os.getenv("TWITCH_TOKEN", "").strip()
-TWITCH_CHANNEL = os.getenv("TWITCH_CHANNEL", "").strip().lstrip("#").lower()
-TWITCH_DISCORD_CHANNEL_ID = os.getenv("TWITCH_DISCORD_CHANNEL_ID", "").strip()
-TWITCH_NICK = os.getenv("TWITCH_NICK", "").strip()
-TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "").strip()
-
-DISCORD_OWNER_ID = os.getenv("DISCORD_OWNER_ID", "").strip()
-TWITCH_OWNER_NAMES = os.getenv("TWITCH_OWNER_NAMES", "").strip()
-
-_RAW_D2T = os.getenv("TWITCH_DISCORD_TO_TWITCH", "1").strip().lower()
-DISCORD_TO_TWITCH = _RAW_D2T not in ("0", "false", "no", "off")
-
-SEND_DELAY = float(os.getenv("TWITCH_MIRROR_DELAY", "0.35"))
-MSG_CACHE_MAX = int(os.getenv("TWITCH_MIRROR_MSG_CACHE", "3000"))
-TWITCH_MIRROR_DB_PATH = os.getenv("TWITCH_MIRROR_DB_PATH", TWITCH_MAP_DEFAULT_PATH)
-
-WEBHOOK_NAME = "Twitch Mirror"
-REQUIRED_DELETE_SCOPE = "moderator:manage:chat_messages"
-REQUIRED_SEND_SCOPE = "user:write:chat"
-
-_CLEARMSG_RE = re.compile(
-    r"target-msg-id=([^;\s]+).*\sCLEARMSG\s",
-    re.IGNORECASE,
-)
-_CLEARCHAT_USER_RE = re.compile(
-    r"CLEARCHAT\s+#\S+\s+:(\S+)",
-    re.IGNORECASE,
-)
-_ACTION_RE = re.compile(r"^\x01ACTION[ ]?(.*)\x01$", re.DOTALL | re.IGNORECASE)
-_ACTION_FALLBACK_RE = re.compile(
-    r"^(?:\x01|\u0001)ACTION[ ]?(.*?)(?:\x01|\u0001)$",
-    re.DOTALL | re.IGNORECASE,
-)
-_LEADING_AT_RE = re.compile(r"^@\S+\s+")
-_DISCORD_MENTION_RE = re.compile(r"<@!?(\d+)>")
-_DISCORD_ROLE_RE = re.compile(r"<@&(\d+)>")
-_DISCORD_CHANNEL_RE = re.compile(r"<#(\d+)>")
-_DISCORD_EMOJI_RE = re.compile(r"<a?:(\w+):\d+>")
-
-
-def _configured() -> bool:
-    return bool(TWITCH_TOKEN and TWITCH_CHANNEL and TWITCH_DISCORD_CHANNEL_ID)
-
-
-def _normalize_token(token: str) -> str:
-    t = token.strip()
-    if t.lower().startswith("oauth:"):
-        return t
-    return f"oauth:{t}"
-
-
-def _bearer_token(token: str) -> str:
-    t = token.strip()
-    if t.lower().startswith("oauth:"):
-        return t[6:]
-    return t
-
-
-def _safe_webhook_username(name: str) -> str:
-    base = (name or "Twitch User").strip() or "Twitch User"
-    if base.lower() == "clyde":
-        base = "Clyde_"
-    return base[:80]
-
-
-def _build_owner_ping_map() -> dict[str, int]:
-    mapping: dict[str, int] = {}
-    if not DISCORD_OWNER_ID:
-        return mapping
-    try:
-        owner_id = int(DISCORD_OWNER_ID)
-    except ValueError:
-        print(f"[TwitchMirror] Invalid DISCORD_OWNER_ID: {DISCORD_OWNER_ID!r}")
-        return mapping
-
-    raw = TWITCH_OWNER_NAMES or TWITCH_CHANNEL
-    for part in raw.split(","):
-        name = part.strip().lstrip("@").lower()
-        if name:
-            mapping[name] = owner_id
-    return mapping
-
-
-OWNER_PING_MAP = _build_owner_ping_map()
-
-_OWNER_MENTION_RE: Optional[re.Pattern[str]] = None
-if OWNER_PING_MAP:
-    names = sorted(OWNER_PING_MAP.keys(), key=len, reverse=True)
-    alternation = "|".join(re.escape(n) for n in names)
-    _OWNER_MENTION_RE = re.compile(rf"(?i)(?<!\w)@?({alternation})(?!\w)")
-
-
-def _apply_owner_pings(content: str) -> tuple[str, list[int]]:
-    if not _OWNER_MENTION_RE or not OWNER_PING_MAP:
-        return content, []
-
-    mentioned: list[int] = []
-
-    def repl(match: re.Match[str]) -> str:
-        key = match.group(1).lower()
-        uid = OWNER_PING_MAP.get(key)
-        if uid is None:
-            return match.group(0)
-        if uid not in mentioned:
-            mentioned.append(uid)
-        return f"<@{uid}>"
-
-    return _OWNER_MENTION_RE.sub(repl, content), mentioned
-
-
-def _allowed_mentions_for(user_ids: list[int]) -> discord.AllowedMentions:
-    if not user_ids:
-        return discord.AllowedMentions.none()
-    return discord.AllowedMentions(
-        everyone=False,
-        roles=False,
-        users=[discord.Object(id=uid) for uid in user_ids],
+    from ..utils.twitch_map_store import TwitchMapStore
+    from ..utils.twitch_helpers import (
+        TWITCH_TOKEN,
+        TWITCH_CHANNEL,
+        TWITCH_DISCORD_CHANNEL_ID,
+        TWITCH_NICK,
+        TWITCH_CLIENT_ID,
+        DISCORD_TO_TWITCH,
+        SEND_DELAY,
+        MSG_CACHE_MAX,
+        TWITCH_MIRROR_DB_PATH,
+        WEBHOOK_NAME,
+        REQUIRED_DELETE_SCOPE,
+        REQUIRED_SEND_SCOPE,
+        CLEARMSG_RE,
+        CLEARCHAT_USER_RE,
+        LEADING_AT_RE,
+        OWNER_PING_MAP,
+        is_configured,
+        normalize_token,
+        bearer_token,
+        safe_webhook_username,
+        apply_owner_pings,
+        allowed_mentions_for,
+        twitch_msg_id,
+        message_tags,
+        normalize_content,
+        strip_leading_reply_mention,
+        reply_header_from_tags,
+        discord_content_for_twitch,
+        compose_mirror_content,
     )
-
-
-def _twitch_msg_id(message: Any) -> Optional[str]:
-    mid = getattr(message, "id", None)
-    if mid:
-        return str(mid)
-    tags = getattr(message, "tags", None) or {}
-    if isinstance(tags, dict):
-        for key in ("id", "msg-id"):
-            if tags.get(key):
-                return str(tags[key])
-    return None
-
-
-def _message_tags(message: Any) -> dict[str, Any]:
-    tags = getattr(message, "tags", None)
-    if isinstance(tags, dict):
-        return tags
-    if tags is not None and hasattr(tags, "items"):
-        try:
-            return dict(tags.items())  # type: ignore[arg-type]
-        except Exception:
-            pass
-    return {}
-
-
-def _tag_get(tags: dict[str, Any], *keys: str) -> Optional[str]:
-    for key in keys:
-        if key in tags and tags[key] not in (None, ""):
-            return str(tags[key])
-        alt = key.replace("-", "_")
-        if alt in tags and tags[alt] not in (None, ""):
-            return str(tags[alt])
-    return None
-
-
-def _unescape_twitch_tag(value: str) -> str:
-    if not value:
-        return ""
-    text = unquote(value)
-    return (
-        text.replace(r"\s", " ")
-        .replace(r"\n", "\n")
-        .replace(r"\r", "\r")
-        .replace(r"\:", ";")
-        .replace(r"\\", "\\")
-    )
-
-
-def _normalize_content(raw: str) -> tuple[str, bool]:
-    text = (raw or "").strip()
-    if not text:
-        return "", False
-
-    m = _ACTION_RE.match(text)
-    if m:
-        body = (m.group(1) or "").strip()
-        body = body.replace("\x01", "").replace("\u0001", "").strip()
-        return body, True
-
-    m = _ACTION_FALLBACK_RE.match(text)
-    if m:
-        body = (m.group(1) or "").strip()
-        body = body.replace("\x01", "").replace("\u0001", "").strip()
-        return body, True
-
-    if "\x01" in text or "\u0001" in text:
-        cleaned = text.replace("\x01", "").replace("\u0001", "")
-        if cleaned.upper().startswith("ACTION "):
-            return cleaned[7:].strip(), True
-        return cleaned.strip(), False
-
-    return text, False
-
-
-def _strip_leading_reply_mention(content: str, tags: dict[str, Any]) -> str:
-    original = (content or "").strip()
-    if not original:
-        return original
-
-    parent_login = _tag_get(tags, "reply-parent-user-login")
-    parent_display = _tag_get(tags, "reply-parent-display-name")
-    names: list[str] = []
-    for raw in (parent_login, parent_display):
-        if not raw:
-            continue
-        name = _unescape_twitch_tag(raw).lstrip("@").strip()
-        if name and name.lower() not in {n.lower() for n in names}:
-            names.append(name)
-
-    for name in sorted(names, key=len, reverse=True):
-        pat = re.compile(rf"^@{re.escape(name)}\b[:,]?\s+", re.IGNORECASE)
-        cleaned = pat.sub("", original, count=1).strip()
-        if cleaned and cleaned != original:
-            return cleaned
-
-    is_reply = bool(_tag_get(tags, "reply-parent-msg-id"))
-    if is_reply and original.startswith("@"):
-        cleaned = _LEADING_AT_RE.sub("", original, count=1).strip()
-        if cleaned:
-            return cleaned
-
-    return original
-
-
-def _reply_header_from_tags(tags: dict[str, Any]) -> Optional[str]:
-    parent_id = _tag_get(tags, "reply-parent-msg-id")
-    if not parent_id:
-        return None
-
-    display = (
-        _tag_get(tags, "reply-parent-display-name")
-        or _tag_get(tags, "reply-parent-user-login")
-        or "someone"
-    )
-    display = _unescape_twitch_tag(display).lstrip("@")
-    display = display.replace("*", "").replace("`", "").replace("_", "\u02cd")[:64]
-
-    body = _tag_get(tags, "reply-parent-msg-body") or ""
-    body = _unescape_twitch_tag(body).replace("\n", " ").strip()
-    body, _ = _normalize_content(body)
-    body = body.replace("*", "\u2217").replace("`", "'")
-    if len(body) > 120:
-        body = body[:117] + "…"
-
-    if body:
-        return f"-# ↩️ Replying to **{display}**: {body}"
-    return f"-# ↩️ Replying to **{display}**"
-
-
-def _discord_content_for_twitch(message: discord.Message) -> str:
-    text = message.content or ""
-
-    def user_repl(m: re.Match[str]) -> str:
-        uid = int(m.group(1))
-        if message.guild:
-            member = message.guild.get_member(uid)
-            if member:
-                return f"@{member.display_name}"
-        return "@user"
-
-    def role_repl(m: re.Match[str]) -> str:
-        rid = int(m.group(1))
-        if message.guild:
-            role = message.guild.get_role(rid)
-            if role:
-                return f"@{role.name}"
-        return "@role"
-
-    def channel_repl(m: re.Match[str]) -> str:
-        cid = int(m.group(1))
-        if message.guild:
-            ch = message.guild.get_channel(cid)
-            if ch is not None and hasattr(ch, "name"):
-                return f"#{ch.name}"  # type: ignore[union-attr]
-        return "#channel"
-
-    text = _DISCORD_MENTION_RE.sub(user_repl, text)
-    text = _DISCORD_ROLE_RE.sub(role_repl, text)
-    text = _DISCORD_CHANNEL_RE.sub(channel_repl, text)
-    text = _DISCORD_EMOJI_RE.sub(r":\1:", text)
-    text = text.replace("\n", " ").strip()
-
-    extras: list[str] = []
-    for att in message.attachments:
-        extras.append(att.url or att.filename or "[attachment]")
-    for sticker in getattr(message, "stickers", []) or []:
-        extras.append(f"[sticker:{getattr(sticker, 'name', 'sticker')}]")
-
-    if extras:
-        extra_txt = " ".join(extras)
-        text = f"{text} {extra_txt}".strip() if text else extra_txt
-
-    return text[:480].strip()
 
 
 class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # type: ignore[misc]
@@ -331,7 +97,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             raise RuntimeError("twitchio is not installed")
 
         super().__init__(
-            token=_normalize_token(TWITCH_TOKEN),
+            token=normalize_token(TWITCH_TOKEN),
             prefix="!",
             initial_channels=[TWITCH_CHANNEL],
         )
@@ -348,13 +114,12 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
         self._store = store or TwitchMapStore(TWITCH_MIRROR_DB_PATH, MSG_CACHE_MAX)
 
-        # In-memory cache (also persisted to SQLite)
-        self._msg_map: OrderedDict[str, int] = OrderedDict()  # twitch → discord (inbound)
+        self._msg_map: OrderedDict[str, int] = OrderedDict()
         self._login_msgs: dict[str, set[str]] = defaultdict(set)
         self._discord_to_inbound: OrderedDict[int, str] = OrderedDict()
 
         self._outbound_pending: Deque[int] = deque()
-        self._discord_to_twitch: OrderedDict[int, str] = OrderedDict()  # discord → twitch (outbound)
+        self._discord_to_twitch: OrderedDict[int, str] = OrderedDict()
         self._send_lock = asyncio.Lock()
 
         self._webhook: Optional[discord.Webhook] = None
@@ -479,7 +244,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
     def _helix_headers(self) -> dict[str, str]:
         return {
-            "Authorization": f"Bearer {_bearer_token(TWITCH_TOKEN)}",
+            "Authorization": f"Bearer {bearer_token(TWITCH_TOKEN)}",
             "Client-Id": self._helix_client_id or TWITCH_CLIENT_ID,
             "Content-Type": "application/json",
         }
@@ -489,7 +254,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             print("[TwitchMirror] Helix unavailable (aiohttp missing)")
             return
 
-        bearer = _bearer_token(TWITCH_TOKEN)
+        bearer = bearer_token(TWITCH_TOKEN)
         timeout = aiohttp.ClientTimeout(total=10)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -593,7 +358,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
     async def event_message(self, message) -> None:  # type: ignore[no-untyped-def]
         try:
             if getattr(message, "echo", False):
-                tid = _twitch_msg_id(message)
+                tid = twitch_msg_id(message)
                 if tid and self._outbound_pending:
                     discord_id = self._outbound_pending.popleft()
                     await self._remember_outbound(discord_id, tid)
@@ -611,17 +376,17 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 or "unknown"
             )
             raw = message.content or ""
-            content, is_action = _normalize_content(raw)
+            content, is_action = normalize_content(raw)
             if not content:
                 return
 
-            tags = _message_tags(message)
+            tags = message_tags(message)
             reply_header: Optional[str] = None
             try:
-                reply_header = _reply_header_from_tags(tags)
+                reply_header = reply_header_from_tags(tags)
                 if reply_header:
                     before = content
-                    content = _strip_leading_reply_mention(content, tags)
+                    content = strip_leading_reply_mention(content, tags)
                     if content != before:
                         print(
                             f"[TwitchMirror] stripped reply @mention: "
@@ -634,21 +399,12 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             if not content:
                 return
 
-            tid = _twitch_msg_id(message)
+            tid = twitch_msg_id(message)
             if not tid:
-                print(
-                    f"[TwitchMirror] WARNING: no msg id from IRC for @{login}"
-                )
+                print(f"[TwitchMirror] WARNING: no msg id from IRC for @{login}")
 
             await self._queue.put(
-                (
-                    login,
-                    display,
-                    content[:1900],
-                    tid,
-                    reply_header,
-                    is_action,
-                )
+                (login, display, content[:1900], tid, reply_header, is_action)
             )
         except Exception as e:
             print(f"[TwitchMirror] event_message error: {e}")
@@ -658,7 +414,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             return
 
         if "CLEARMSG" in data:
-            m = _CLEARMSG_RE.search(data)
+            m = CLEARMSG_RE.search(data)
             if m:
                 tid = m.group(1).strip()
                 if tid:
@@ -666,7 +422,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             return
 
         if "CLEARCHAT" in data:
-            m = _CLEARCHAT_USER_RE.search(data)
+            m = CLEARCHAT_USER_RE.search(data)
             if m:
                 login = m.group(1).strip().lower()
                 await self._delete_queue.put(("user", login))
@@ -675,7 +431,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 await self._delete_queue.put(("all", None))
 
     async def event_message_delete(self, message) -> None:  # type: ignore[no-untyped-def]
-        tid = _twitch_msg_id(message)
+        tid = twitch_msg_id(message)
         if tid:
             await self._delete_queue.put(("id", tid))
 
@@ -775,19 +531,15 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
     async def delete_on_twitch(self, twitch_msg_id: str) -> bool:
         if not twitch_msg_id:
             return False
-
         if aiohttp is None:
             print("[TwitchMirror] delete failed: aiohttp missing")
             return False
-
         if not self._helix_client_id:
             print("[TwitchMirror] delete failed: no Client-Id")
             return False
-
         if not self._broadcaster_id or not self._moderator_id:
             print("[TwitchMirror] delete failed: broadcaster/moderator id unknown")
             return False
-
         if not self._has_delete_scope:
             print(
                 f"[TwitchMirror] delete failed: missing scope `{REQUIRED_DELETE_SCOPE}`"
@@ -958,21 +710,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             if deleted:
                 print(f"[TwitchMirror] Full CLEARCHAT: removed {deleted} Discord msg(s)")
 
-    def _compose_content(
-        self,
-        content: str,
-        reply_header: Optional[str],
-        is_action: bool,
-    ) -> str:
-        body = content
-        if reply_header and body.startswith("@"):
-            stripped = _LEADING_AT_RE.sub("", body, count=1).strip()
-            if stripped:
-                body = stripped
-        if reply_header:
-            return f"{reply_header}\n{body}"
-        return body
-
     async def _discord_worker(self) -> None:
         await self.discord_bot.wait_until_ready()
         channel = self.discord_bot.get_channel(self.discord_channel_id)
@@ -980,7 +717,10 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             try:
                 channel = await self.discord_bot.fetch_channel(self.discord_channel_id)
             except Exception as e:
-                print(f"[TwitchMirror] Cannot resolve Discord channel {self.discord_channel_id}: {e}")
+                print(
+                    f"[TwitchMirror] Cannot resolve Discord channel "
+                    f"{self.discord_channel_id}: {e}"
+                )
                 return
 
         if not isinstance(channel, discord.TextChannel):
@@ -1030,19 +770,19 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                     item = result
 
                 login, display, content, twitch_id, reply_header, is_action = item
-                username = _safe_webhook_username(display)
+                username = safe_webhook_username(display)
                 avatar_url = await self._fetch_avatar(login)
 
                 if reply_header and content.startswith("@"):
-                    stripped = _LEADING_AT_RE.sub("", content, count=1).strip()
+                    stripped = LEADING_AT_RE.sub("", content, count=1).strip()
                     if stripped:
                         content = stripped
 
-                content, ping_ids = _apply_owner_pings(content)
-                final = self._compose_content(content, reply_header, is_action)
+                content, ping_ids = apply_owner_pings(content)
+                final = compose_mirror_content(content, reply_header, is_action)
                 if not final.strip():
                     continue
-                mentions = _allowed_mentions_for(ping_ids)
+                mentions = allowed_mentions_for(ping_ids)
 
                 discord_msg_id: Optional[int] = None
 
@@ -1117,7 +857,9 @@ class TwitchMirrorCog(commands.Cog):
         self._task: Optional[asyncio.Task] = None
         self._store = TwitchMapStore(TWITCH_MIRROR_DB_PATH, MSG_CACHE_MAX)
         try:
-            self._discord_channel_id = int(TWITCH_DISCORD_CHANNEL_ID) if TWITCH_DISCORD_CHANNEL_ID else 0
+            self._discord_channel_id = (
+                int(TWITCH_DISCORD_CHANNEL_ID) if TWITCH_DISCORD_CHANNEL_ID else 0
+            )
         except ValueError:
             self._discord_channel_id = 0
 
@@ -1125,7 +867,7 @@ class TwitchMirrorCog(commands.Cog):
         if twitch_commands is None:
             print("[TwitchMirror] twitchio not installed – cog idle")
             return
-        if not _configured():
+        if not is_configured():
             print(
                 "[TwitchMirror] Disabled – set TWITCH_TOKEN, TWITCH_CHANNEL, "
                 "TWITCH_DISCORD_CHANNEL_ID in .env"
@@ -1135,7 +877,10 @@ class TwitchMirrorCog(commands.Cog):
         try:
             channel_id = int(TWITCH_DISCORD_CHANNEL_ID)
         except ValueError:
-            print(f"[TwitchMirror] Invalid TWITCH_DISCORD_CHANNEL_ID: {TWITCH_DISCORD_CHANNEL_ID!r}")
+            print(
+                f"[TwitchMirror] Invalid TWITCH_DISCORD_CHANNEL_ID: "
+                f"{TWITCH_DISCORD_CHANNEL_ID!r}"
+            )
             return
 
         try:
@@ -1203,7 +948,7 @@ class TwitchMirrorCog(commands.Cog):
         ):
             return
 
-        body = _discord_content_for_twitch(message)
+        body = discord_content_for_twitch(message)
         if not body:
             return
 
@@ -1257,7 +1002,7 @@ class TwitchMirrorCog(commands.Cog):
     )
     @app_commands.default_permissions(administrator=True)
     async def twitch_mirror_status(self, interaction: discord.Interaction) -> None:
-        if not _configured():
+        if not is_configured():
             await interaction.response.send_message(
                 "Twitch mirror is **not configured**.",
                 ephemeral=True,
