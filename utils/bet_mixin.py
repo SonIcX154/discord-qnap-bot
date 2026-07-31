@@ -4,12 +4,15 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from cogs.economy import EconomyCog
 
+# Shared ephemeral reply when someone else clicks game buttons
+OWNER_ONLY_MSG = "Um zu spielen führe den Command bitte selber aus."
+
 
 class BetAdjustableMixin:
     """
     Mixin for Views that allow adjusting the bet amount.
     Provides +10, -10, x2 and ÷2 buttons.
-    
+
     Subclasses should override _get_updated_embed() to enable live embed updates
     when the bet is changed.
     """
@@ -39,40 +42,28 @@ class BetAdjustableMixin:
     @discord.ui.button(label="➖ 10", style=discord.ButtonStyle.danger, row=0)
     async def decrease_10(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "Nur der Spieler darf die Buttons benutzen.",
-                ephemeral=True
-            )
+            await interaction.response.send_message(OWNER_ONLY_MSG, ephemeral=True)
             return
         await self._update_bet(interaction, self.bet - 10)
 
     @discord.ui.button(label="➕ 10", style=discord.ButtonStyle.success, row=0)
     async def increase_10(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "Nur der Spieler darf die Buttons benutzen.",
-                ephemeral=True
-            )
+            await interaction.response.send_message(OWNER_ONLY_MSG, ephemeral=True)
             return
         await self._update_bet(interaction, self.bet + 10)
 
     @discord.ui.button(label="x2", style=discord.ButtonStyle.secondary, row=0)
     async def double_bet(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "Nur der Spieler darf die Buttons benutzen.",
-                ephemeral=True
-            )
+            await interaction.response.send_message(OWNER_ONLY_MSG, ephemeral=True)
             return
         await self._update_bet(interaction, self.bet * 2)
 
     @discord.ui.button(label="÷2", style=discord.ButtonStyle.secondary, row=0)
     async def halve_bet(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message(
-                "Nur der Spieler darf die Buttons benutzen.",
-                ephemeral=True
-            )
+            await interaction.response.send_message(OWNER_ONLY_MSG, ephemeral=True)
             return
         new_bet = max(10, self.bet // 2)
         await self._update_bet(interaction, new_bet)
