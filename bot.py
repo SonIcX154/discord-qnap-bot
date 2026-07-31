@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import logging
 import datetime
 import traceback
@@ -45,6 +46,7 @@ class QNAPBot(commands.Bot):
             help_command=None,
         )
         self.synced: bool = False
+        self.start_time: float = time.time()
 
     async def setup_hook(self) -> None:
         """Load all cogs automatically on startup."""
@@ -72,7 +74,6 @@ class QNAPBot(commands.Bot):
         error: app_commands.AppCommandError,
     ) -> None:
         """User-facing ephemeral errors + full traceback in logs."""
-        # Unwrap CommandInvokeError to the underlying exception when useful
         original = getattr(error, "original", None)
 
         if isinstance(error, app_commands.CommandOnCooldown):
@@ -86,7 +87,7 @@ class QNAPBot(commands.Bot):
         elif isinstance(error, app_commands.CheckFailure):
             msg = "❌ Du darfst diesen Command nicht nutzen."
         elif isinstance(error, app_commands.CommandNotFound):
-            return  # ignore
+            return
         else:
             cmd = interaction.command.name if interaction.command else "?"
             log.error(
@@ -123,6 +124,9 @@ class QNAPBot(commands.Bot):
     async def on_ready(self) -> None:
         if self.user is None:
             return
+
+        # Reset uptime baseline on (re)connect so it stays meaningful
+        self.start_time = time.time()
 
         log.info("🤖 Logged in as %s (ID: %s)", self.user, self.user.id)
         log.info("Connected to %s guild(s).", len(self.guilds))
