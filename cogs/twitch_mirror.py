@@ -20,6 +20,11 @@ try:
 except ImportError:
     aiohttp = None  # type: ignore
 
+try:
+    from utils.twitch_map_store import TwitchMapStore, DEFAULT_PATH as TWITCH_MAP_DEFAULT_PATH
+except ImportError:
+    from ..utils.twitch_map_store import TwitchMapStore, DEFAULT_PATH as TWITCH_MAP_DEFAULT_PATH
+
 
 TWITCH_TOKEN = os.getenv("TWITCH_TOKEN", "").strip()
 TWITCH_CHANNEL = os.getenv("TWITCH_CHANNEL", "").strip().lstrip("#").lower()
@@ -35,6 +40,7 @@ DISCORD_TO_TWITCH = _RAW_D2T not in ("0", "false", "no", "off")
 
 SEND_DELAY = float(os.getenv("TWITCH_MIRROR_DELAY", "0.35"))
 MSG_CACHE_MAX = int(os.getenv("TWITCH_MIRROR_MSG_CACHE", "3000"))
+TWITCH_MIRROR_DB_PATH = os.getenv("TWITCH_MIRROR_DB_PATH", TWITCH_MAP_DEFAULT_PATH)
 
 WEBHOOK_NAME = "Twitch Mirror"
 REQUIRED_DELETE_SCOPE = "moderator:manage:chat_messages"
@@ -315,7 +321,12 @@ def _discord_content_for_twitch(message: discord.Message) -> str:
 
 
 class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # type: ignore[misc]
-    def __init__(self, discord_bot: commands.Bot, discord_channel_id: int) -> None:
+    def __init__(
+        self,
+        discord_bot: commands.Bot,
+        discord_channel_id: int,
+        store: Optional[TwitchMapStore] = None,
+    ) -> None:
         if twitch_commands is None:
             raise RuntimeError("twitchio is not installed")
 
@@ -335,12 +346,15 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         self._avatar_cache: dict[str, Optional[str]] = {}
         self._avatar_lock = asyncio.Lock()
 
-        self._msg_map: OrderedDict[str, int] = OrderedDict()
+        self._store = store or TwitchMapStore(TWITCH_MIRROR_DB_PATH, MSG_CACHE_MAX)
+
+        # In-memory cache (also persisted to SQLite)
+        self._msg_map: OrderedDict[str, int] = OrderedDict()  # twitch → discord (inbound)
         self._login_msgs: dict[str, set[str]] = defaultdict(set)
         self._discord_to_inbound: OrderedDict[int, str] = OrderedDict()
 
         self._outbound_pending: Deque[int] = deque()
-        self._discord_to_twitch: OrderedDict[int, str] = OrderedDict()
+        self._discord_to_twitch: OrderedDict[int, str] = OrderedDict()  # discord → twitch (outbound)
         self._send_lock = asyncio.Lock()
 
         self._webhook: Optional[discord.Webhook] = None
@@ -352,7 +366,42 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         self._has_send_scope: bool = False
         self._helix_client_id: str = TWITCH_CLIENT_ID
 
-    def _remember(self, twitch_id: str, discord_id: int, login: str) -> None:
+    async def _load_persisted_map(self) -> None:
+        try:
+            await self._store.init()
+            rows = await self._store.load_recent()
+        except Exception as e:
+            print(f"[TwitchMirror] Map DB load failed: {e}")
+            return
+
+        inbound = 0
+        outbound = 0
+        for row in rows:
+            tid = str(row["twitch_id"])
+            did = int(row["discord_id"])
+            login = (row.get("login") or "").lower()
+            direction = row.get("direction") or "inbound"
+
+            if direction == "outbound":
+                self._discord_to_twitch[did] = tid
+                self._discord_to_twitch.move_to_end(did)
+                outbound += 1
+            else:
+                self._msg_map[tid] = did
+                self._msg_map.move_to_end(tid)
+                self._discord_to_inbound[did] = tid
+                self._discord_to_inbound.move_to_end(did)
+                if login:
+                    self._login_msgs[login].add(tid)
+                inbound += 1
+
+        if inbound or outbound:
+            print(
+                f"[TwitchMirror] Restored message map from DB: "
+                f"inbound={inbound} outbound={outbound} path={self._store.path}"
+            )
+
+    async def _remember(self, twitch_id: str, discord_id: int, login: str) -> None:
         self._msg_map[twitch_id] = discord_id
         self._msg_map.move_to_end(twitch_id)
         self._login_msgs[login.lower()].add(twitch_id)
@@ -365,31 +414,76 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             self._discord_to_inbound.pop(old_did, None)
         while len(self._discord_to_inbound) > MSG_CACHE_MAX:
             self._discord_to_inbound.popitem(last=False)
+        try:
+            await self._store.upsert(
+                twitch_id=twitch_id,
+                discord_id=discord_id,
+                login=login,
+                direction="inbound",
+            )
+        except Exception as e:
+            print(f"[TwitchMirror] Map persist (inbound) failed: {e}")
 
-    def _forget_twitch_id(self, twitch_id: str) -> Optional[int]:
+    async def _forget_twitch_id(self, twitch_id: str) -> Optional[int]:
         discord_id = self._msg_map.pop(twitch_id, None)
         for s in self._login_msgs.values():
             s.discard(twitch_id)
         if discord_id is not None:
             self._discord_to_inbound.pop(discord_id, None)
+        try:
+            row = await self._store.delete_by_twitch(twitch_id)
+            if discord_id is None and row is not None:
+                discord_id = int(row["discord_id"])
+        except Exception as e:
+            print(f"[TwitchMirror] Map DB delete (twitch) failed: {e}")
         return discord_id
 
-    def _forget_inbound_by_discord(self, discord_id: int) -> Optional[str]:
+    async def _forget_inbound_by_discord(self, discord_id: int) -> Optional[str]:
         twitch_id = self._discord_to_inbound.pop(discord_id, None)
         if twitch_id is not None:
             self._msg_map.pop(twitch_id, None)
             for s in self._login_msgs.values():
                 s.discard(twitch_id)
+        try:
+            row = await self._store.delete_by_discord(discord_id)
+            if row is not None and row.get("direction") == "inbound":
+                if twitch_id is None:
+                    twitch_id = str(row["twitch_id"])
+            elif row is not None and row.get("direction") == "outbound":
+                # Was outbound — re-handle below by caller
+                pass
+            elif row is not None and twitch_id is None:
+                twitch_id = str(row["twitch_id"])
+        except Exception as e:
+            print(f"[TwitchMirror] Map DB delete (discord inbound) failed: {e}")
         return twitch_id
 
-    def _remember_outbound(self, discord_id: int, twitch_id: str) -> None:
+    async def _remember_outbound(self, discord_id: int, twitch_id: str) -> None:
         self._discord_to_twitch[discord_id] = twitch_id
         self._discord_to_twitch.move_to_end(discord_id)
         while len(self._discord_to_twitch) > MSG_CACHE_MAX:
             self._discord_to_twitch.popitem(last=False)
+        try:
+            await self._store.upsert(
+                twitch_id=twitch_id,
+                discord_id=discord_id,
+                login=None,
+                direction="outbound",
+            )
+        except Exception as e:
+            print(f"[TwitchMirror] Map persist (outbound) failed: {e}")
 
-    def _forget_outbound(self, discord_id: int) -> Optional[str]:
-        return self._discord_to_twitch.pop(discord_id, None)
+    async def _forget_outbound(self, discord_id: int) -> Optional[str]:
+        twitch_id = self._discord_to_twitch.pop(discord_id, None)
+        try:
+            row = await self._store.delete_by_discord(discord_id)
+            if twitch_id is None and row is not None and row.get("direction") == "outbound":
+                twitch_id = str(row["twitch_id"])
+            elif twitch_id is None and row is not None:
+                twitch_id = str(row["twitch_id"])
+        except Exception as e:
+            print(f"[TwitchMirror] Map DB delete (outbound) failed: {e}")
+        return twitch_id
 
     def _helix_headers(self) -> dict[str, str]:
         return {
@@ -495,6 +589,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 + ", ".join(f"{k}→<@{v}>" for k, v in OWNER_PING_MAP.items())
             )
         print("[TwitchMirror] Moderation sync + reply @ strip")
+        await self._load_persisted_map()
         await self._resolve_helix_ids()
         if DISCORD_TO_TWITCH:
             print("[TwitchMirror] Discord → Twitch: ON (Helix preferred)")
@@ -506,11 +601,10 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
     async def event_message(self, message) -> None:  # type: ignore[no-untyped-def]
         try:
             if getattr(message, "echo", False):
-                # IRC fallback path only — Helix send already stored the id
                 tid = _twitch_msg_id(message)
                 if tid and self._outbound_pending:
                     discord_id = self._outbound_pending.popleft()
-                    self._remember_outbound(discord_id, tid)
+                    await self._remember_outbound(discord_id, tid)
                     print(
                         f"[TwitchMirror] Outbound (IRC echo) linked "
                         f"discord={discord_id} → twitch={tid[:12]}…"
@@ -594,16 +688,11 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             await self._delete_queue.put(("id", tid))
 
     async def send_to_twitch(self, text: str, discord_msg_id: int) -> bool:
-        """
-        Prefer Helix Send Chat Message — response includes message_id so we can
-        delete later. IRC is fallback only (echo often never arrives).
-        """
         text = (text or "").strip()
         if not text:
             return False
 
         async with self._send_lock:
-            # --- Helix (reliable id) ---
             if (
                 aiohttp is not None
                 and self._helix_client_id
@@ -643,7 +732,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                                         )
                                         return False
                                 if mid:
-                                    self._remember_outbound(discord_msg_id, str(mid))
+                                    await self._remember_outbound(discord_msg_id, str(mid))
                                     print(
                                         f"[TwitchMirror] Helix send OK "
                                         f"discord={discord_msg_id} → "
@@ -663,7 +752,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 except Exception as e:
                     print(f"[TwitchMirror] Helix send error: {e}")
 
-            # --- IRC fallback (no reliable id unless echo arrives) ---
             if not self.connected:
                 print("[TwitchMirror] send_to_twitch: not connected")
                 return False
@@ -828,7 +916,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
     async def _process_delete(self, kind: str, value: Optional[str]) -> None:
         if kind == "id" and value:
-            discord_id = self._forget_twitch_id(value)
+            discord_id = await self._forget_twitch_id(value)
             if discord_id is not None:
                 await self._delete_discord_message(discord_id)
                 print(f"[TwitchMirror] Deleted mirrored msg (CLEARMSG {value[:8]}…)")
@@ -836,10 +924,18 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
         if kind == "user" and value:
             login = value.lower()
-            tids = list(self._login_msgs.get(login, set()))
+            # Memory set + DB rows
+            tids = set(self._login_msgs.get(login, set()))
+            try:
+                db_rows = await self._store.delete_by_login(login)
+                for row in db_rows:
+                    tids.add(str(row["twitch_id"]))
+            except Exception as e:
+                print(f"[TwitchMirror] Map DB delete_by_login failed: {e}")
+
             deleted = 0
-            for tid in tids:
-                discord_id = self._forget_twitch_id(tid)
+            for tid in list(tids):
+                discord_id = await self._forget_twitch_id(tid)
                 if discord_id is not None:
                     await self._delete_discord_message(discord_id)
                     deleted += 1
@@ -853,6 +949,16 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             self._msg_map.clear()
             self._login_msgs.clear()
             self._discord_to_inbound.clear()
+            try:
+                db_rows = await self._store.clear_direction("inbound")
+                seen = {tid for tid, _ in items}
+                for row in db_rows:
+                    tid = str(row["twitch_id"])
+                    if tid not in seen:
+                        items.append((tid, int(row["discord_id"])))
+            except Exception as e:
+                print(f"[TwitchMirror] Map DB clear inbound failed: {e}")
+
             deleted = 0
             for _, discord_id in items:
                 await self._delete_discord_message(discord_id)
@@ -1003,7 +1109,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                     discord_msg_id = sent.id
 
                 if twitch_id and discord_msg_id is not None:
-                    self._remember(twitch_id, discord_msg_id, login)
+                    await self._remember(twitch_id, discord_msg_id, login)
 
                 await asyncio.sleep(SEND_DELAY)
             except asyncio.CancelledError:
@@ -1018,6 +1124,7 @@ class TwitchMirrorCog(commands.Cog):
         self.bot = bot
         self._twitch: Optional[TwitchMirrorBot] = None
         self._task: Optional[asyncio.Task] = None
+        self._store = TwitchMapStore(TWITCH_MIRROR_DB_PATH, MSG_CACHE_MAX)
         try:
             self._discord_channel_id = int(TWITCH_DISCORD_CHANNEL_ID) if TWITCH_DISCORD_CHANNEL_ID else 0
         except ValueError:
@@ -1040,8 +1147,14 @@ class TwitchMirrorCog(commands.Cog):
             print(f"[TwitchMirror] Invalid TWITCH_DISCORD_CHANNEL_ID: {TWITCH_DISCORD_CHANNEL_ID!r}")
             return
 
+        try:
+            await self._store.init()
+            print(f"[TwitchMirror] Map DB: {self._store.path}")
+        except Exception as e:
+            print(f"[TwitchMirror] Map DB init failed: {e}")
+
         self._discord_channel_id = channel_id
-        self._twitch = TwitchMirrorBot(self.bot, channel_id)
+        self._twitch = TwitchMirrorBot(self.bot, channel_id, store=self._store)
         self._task = asyncio.create_task(self._run_twitch())
         print(f"[TwitchMirror] Starting client for #{TWITCH_CHANNEL}…")
 
@@ -1120,11 +1233,11 @@ class TwitchMirrorCog(commands.Cog):
         if self._twitch is None or not self._twitch.connected:
             return
 
-        twitch_id = self._twitch._forget_inbound_by_discord(payload.message_id)
+        twitch_id = await self._twitch._forget_inbound_by_discord(payload.message_id)
         source = "inbound (Twitch original)"
 
         if not twitch_id and DISCORD_TO_TWITCH:
-            twitch_id = self._twitch._forget_outbound(payload.message_id)
+            twitch_id = await self._twitch._forget_outbound(payload.message_id)
             source = "outbound (Discord→Twitch)"
 
         if not twitch_id:
@@ -1171,6 +1284,13 @@ class TwitchMirrorCog(commands.Cog):
             and self._twitch._moderator_id
             and self._twitch._helix_client_id
         )
+
+        db_counts = {"total": 0, "inbound": 0, "outbound": 0}
+        try:
+            db_counts = await self._store.count()
+        except Exception:
+            pass
+
         embed = discord.Embed(
             title="Twitch Mirror Status",
             color=discord.Color.green() if connected else discord.Color.orange(),
@@ -1187,15 +1307,22 @@ class TwitchMirrorCog(commands.Cog):
             inline=True,
         )
         embed.add_field(
-            name="Twitch → Discord",
-            value=f"tracked `{tracked}`",
+            name="In memory",
+            value=f"inbound `{tracked}` · outbound `{outbound}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Persisted (DB)",
+            value=(
+                f"total `{db_counts['total']}` · "
+                f"in `{db_counts['inbound']}` · out `{db_counts['outbound']}`"
+            ),
             inline=True,
         )
         embed.add_field(
             name="Discord → Twitch",
             value=(
-                f"ON · outbound `{outbound}` · "
-                f"send={'Helix' if has_send else 'IRC'}"
+                f"ON · send={'Helix' if has_send else 'IRC'}"
                 if DISCORD_TO_TWITCH
                 else "OFF"
             ),
@@ -1210,6 +1337,7 @@ class TwitchMirrorCog(commands.Cog):
             ),
             inline=False,
         )
+        embed.set_footer(text=f"Map DB: {self._store.path} · max {MSG_CACHE_MAX}")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
