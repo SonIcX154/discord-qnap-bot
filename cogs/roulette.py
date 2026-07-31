@@ -43,6 +43,16 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
         discord.ui.View.__init__(self, timeout=180)
         self.interaction = interaction
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Only the user who started /roulette may press buttons."""
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Um zu spielen führe den Command bitte selber aus.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
     async def _get_updated_embed(self) -> discord.Embed:
         """Live update embed when adjusting bet - stable layout."""
         current_balance = await self.economy.get_balance(self.user_id)
