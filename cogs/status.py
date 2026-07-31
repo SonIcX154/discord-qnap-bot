@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
 import aiosqlite
 import discord
@@ -97,23 +97,14 @@ class StatusCog(commands.Cog):
             )
         embed.add_field(name="Voice stayer", value=voice_line, inline=True)
 
-        # Loaded feature cogs
-        interesting = [
-            "BackupCog",
-            "BackupAdminCog",
-            "Economy",
-            "Roulette",
-            "Slots",
-            "TwitchMirrorCog",
-            "Birthdays",
-            "VoiceStayer",
-        ]
-        # Actual cog names may vary — list what is loaded
         loaded = sorted(self.bot.cogs.keys())
         embed.add_field(
             name="Loaded cogs",
-            value="`" + "`, `".join(loaded[:20]) + ("`" if loaded else "none")
-            + ("…" if len(loaded) > 20 else ""),
+            value=(
+                "`" + "`, `".join(loaded) + "`"
+                if loaded
+                else "none"
+            ),
             inline=False,
         )
 
@@ -148,17 +139,9 @@ class StatusCog(commands.Cog):
         if os.path.isfile(ECONOMY_DB_PATH):
             try:
                 async with aiosqlite.connect(ECONOMY_DB_PATH) as db:
-                    # table name may be users / balances — try common shapes
-                    try:
-                        async with db.execute("SELECT COUNT(*) FROM users") as cur:
-                            n = int((await cur.fetchone())[0])
-                        eco_txt = f"Users: **{n:,}**"
-                    except Exception:
-                        async with db.execute(
-                            "SELECT name FROM sqlite_master WHERE type='table'"
-                        ) as cur:
-                            tables = [r[0] for r in await cur.fetchall()]
-                        eco_txt = f"tables: {', '.join(tables[:6]) or 'none'}"
+                    async with db.execute("SELECT COUNT(*) FROM users") as cur:
+                        n = int((await cur.fetchone())[0])
+                eco_txt = f"Users: **{n:,}**"
                 size = _file_size_mb(ECONOMY_DB_PATH)
                 if size is not None:
                     eco_txt += f" · {size:.1f} MB"
@@ -175,26 +158,25 @@ class StatusCog(commands.Cog):
             inbound = len(getattr(client, "_msg_map", {}) or {}) if client else 0
             outbound = len(getattr(client, "_discord_to_twitch", {}) or {}) if client else 0
             db_part = ""
-            if os.path.isfile(TWITCH_MAP_DB_PATH):
-                try:
-                    store = getattr(twitch_cog, "_store", None)
-                    if store is not None:
-                        counts = await store.count()
-                        db_part = (
-                            f"\nDB: total **{counts.get('total', 0)}** "
-                            f"(in {counts.get('inbound', 0)} / out {counts.get('outbound', 0)})"
-                        )
-                except Exception:
-                    pass
+            try:
+                store = getattr(twitch_cog, "_store", None)
+                if store is not None:
+                    counts = await store.count()
+                    db_part = (
+                        f"\nDB: total **{counts.get('total', 0)}** "
+                        f"(in {counts.get('inbound', 0)} / out {counts.get('outbound', 0)})"
+                    )
+            except Exception:
+                if os.path.isfile(TWITCH_MAP_DB_PATH):
+                    size = _file_size_mb(TWITCH_MAP_DB_PATH)
+                    if size is not None:
+                        db_part = f"\nMap DB: {size:.1f} MB"
             twitch_txt = (
                 f"{'🟢 connected' if connected else '🔴 down'}\n"
                 f"Memory: in **{inbound}** · out **{outbound}**"
                 f"{db_part}"
             )
         embed.add_field(name="Twitch mirror", value=twitch_txt, inline=True)
-
-        # Silence unused var warning style
-        _ = interesting
 
         container_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         embed.set_footer(text=f"Container local time: {container_now}")
