@@ -4,6 +4,7 @@ import os
 import time
 import random
 import asyncio
+import logging
 import aiosqlite
 import discord
 from datetime import datetime, timedelta
@@ -19,6 +20,7 @@ try:
 except ImportError:
     from ..utils.bet_mixin import BetAdjustableMixin, OWNER_ONLY_MSG
 
+log = logging.getLogger("qnapbot.economy")
 
 # ====================== CONFIG ======================
 ECONOMY_DB_PATH = os.getenv("ECONOMY_DATA_PATH", "data/economy.db")
@@ -306,7 +308,7 @@ class EconomyCog(commands.Cog):
         os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         await self._init_db()
         self._voice_task = asyncio.create_task(self._voice_earnings_loop())
-        print(f"[Economy] Core Economy Cog loaded. DB: {self.db_path}")
+        log.info("Core Economy cog loaded (DB: %s)", self.db_path)
 
     async def cog_unload(self) -> None:
         if self._voice_task and not self._voice_task.done():
@@ -503,7 +505,7 @@ class EconomyCog(commands.Cog):
 
     async def _voice_earnings_loop(self) -> None:
         await self.bot.wait_until_ready()
-        print("[Economy] Voice earnings task started (2 Coins/Min bei ≥2 aktiven Personen).")
+        log.info("Voice earnings task started (2 Coins/Min bei ≥2 aktiven Personen)")
 
         while True:
             try:
@@ -522,7 +524,7 @@ class EconomyCog(commands.Cog):
                                 await self.add_coins(member.id, VOICE_COINS_PER_MINUTE)
 
             except Exception as e:
-                print(f"[Economy] Voice earnings error: {e}")
+                log.exception("Voice earnings error: %s", e)
 
             await asyncio.sleep(60)
 
