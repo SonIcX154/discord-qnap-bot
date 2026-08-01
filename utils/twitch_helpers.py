@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import os
 import re
+import logging
 from typing import Any, Optional
 from urllib.parse import unquote
 
 import discord
+
+log = logging.getLogger("qnapbot.twitch_helpers")
 
 try:
     from utils.twitch_map_store import DEFAULT_PATH as TWITCH_MAP_DEFAULT_PATH
@@ -91,7 +94,7 @@ def build_owner_ping_map() -> dict[str, int]:
     try:
         owner_id = int(DISCORD_OWNER_ID)
     except ValueError:
-        print(f"[TwitchMirror] Invalid DISCORD_OWNER_ID: {DISCORD_OWNER_ID!r}")
+        log.warning("Invalid DISCORD_OWNER_ID: %r", DISCORD_OWNER_ID)
         return mapping
 
     raw = TWITCH_OWNER_NAMES or TWITCH_CHANNEL
