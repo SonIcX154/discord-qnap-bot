@@ -5,6 +5,7 @@ import json
 import time
 import traceback
 import asyncio
+import logging
 import aiosqlite
 import discord
 from discord.ext import commands
@@ -70,6 +71,8 @@ except ImportError:
         dedupe_roles_by_name,
         convert_to_news_channels,
     )
+
+log = logging.getLogger("qnapbot.backup.admin")
 
 BACKUP_DB_PATH = os.getenv("BACKUP_DATA_PATH", "data/backup.db")
 ATTACHMENTS_DIR = os.getenv("BACKUP_ATTACHMENTS_PATH", "data/backups/attachments")
@@ -154,7 +157,7 @@ class BackupAdminCog(commands.Cog):
         try:
             await self._prune_progress_now()
         except Exception as e:
-            print(f"[Backup] channel_progress startup prune: {e}")
+            log.warning("channel_progress startup prune: %s", e)
 
     async def _prune_progress_now(self) -> dict[str, int]:
         live_channels: list[int] = []
@@ -169,9 +172,9 @@ class BackupAdminCog(commands.Cog):
         await self.bot.wait_until_ready()
         await asyncio.sleep(30)
         interval = max(1.0, PURGE_INTERVAL_HOURS) * 3600.0
-        print(
-            f"[Backup] Soft-delete retention: {SOFT_DELETE_RETENTION_DAYS} days, "
-            f"check every {PURGE_INTERVAL_HOURS:g}h"
+        log.info(
+            "Soft-delete retention: %s days, check every %gh",
+            SOFT_DELETE_RETENTION_DAYS, PURGE_INTERVAL_HOURS,
         )
         while True:
             try:
@@ -181,18 +184,17 @@ class BackupAdminCog(commands.Cog):
                     older_than_days=SOFT_DELETE_RETENTION_DAYS,
                 )
                 if stats["rows"] or stats.get("backfilled_deleted_at"):
-                    print(
-                        f"[Backup] Retention purge: {stats['rows']} rows, "
-                        f"{stats['attachments']} attachment dirs, "
-                        f"backfilled_deleted_at={stats.get('backfilled_deleted_at', 0)}"
+                    log.info(
+                        "Retention purge: %s rows, %s attachment dirs, backfilled_deleted_at=%s",
+                        stats["rows"], stats["attachments"],
+                        stats.get("backfilled_deleted_at", 0),
                     )
                 # Keep channel_progress in sync with live Discord + exclusions
                 await self._prune_progress_now()
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"[Backup] Retention purge error: {e}")
-                traceback.print_exc()
+                log.exception("Retention purge error: %s", e)
             try:
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
@@ -212,13 +214,13 @@ class BackupAdminCog(commands.Cog):
                 )
                 await db.commit()
         except Exception as e:
-            print(f"[Backup] deleted_at update: {e}")
+            log.warning("deleted_at update: %s", e)
 
     async def _patch_backup_cog(self) -> None:
         await asyncio.sleep(2)
         cog = self.bot.get_cog("BackupCog")
         if cog is None:
-            print("[BackupAdmin] BackupCog nicht gefunden – Patch übersprungen")
+            log.warning("BackupCog nicht gefunden – Patch übersprungen")
             return
 
         db_path = self.db_path
@@ -288,7 +290,7 @@ class BackupAdminCog(commands.Cog):
             try:
                 await admin._prune_progress_now()
             except Exception as e:
-                print(f"[Backup] status prune: {e}")
+                log.warning("status prune: %s", e)
             if original_status is not None:
                 await original_status(_cog, interaction)
             else:
@@ -301,12 +303,12 @@ class BackupAdminCog(commands.Cog):
             progress_msg: discord.WebhookMessage | discord.Message,
             clear_first: bool,
         ) -> None:
-            print(f"[Backup] restore_with_extras START clear_first={clear_first} guild={guild.id}")
+            log.info("restore_with_extras START clear_first=%s guild=%s", clear_first, guild.id)
             progress_channel: Optional[discord.TextChannel] = None
             current_progress = progress_msg
 
             async def bump(text: str, *, done: bool = False, error: bool = False) -> None:
-                print(f"[Backup] progress: {text}")
+                log.debug("progress: %s", text)
                 color = discord.Color.green() if done else (
                     discord.Color.red() if error else discord.Color.orange()
                 )
@@ -320,7 +322,7 @@ class BackupAdminCog(commands.Cog):
                         view=None,
                     )
                 except Exception as e:
-                    print(f"[Backup] progress edit fail: {e}")
+                    log.warning("progress edit fail: %s", e)
 
             async def cleanup_progress_channel() -> None:
                 if progress_channel is None:
@@ -335,9 +337,9 @@ class BackupAdminCog(commands.Cog):
                 await asyncio.sleep(10)
                 try:
                     await progress_channel.delete(reason="Backup Restore progress cleanup")
-                    print("[Backup] Progress-Channel gelöscht")
+                    log.info("Progress-Channel gelöscht")
                 except Exception as e:
-                    print(f"[Backup] Progress-Channel löschen: {e}")
+                    log.warning("Progress-Channel löschen: %s", e)
 
             try:
                 if clear_first:
@@ -375,7 +377,7 @@ class BackupAdminCog(commands.Cog):
                         except Exception:
                             pass
                     except Exception as e:
-                        print(f"[Backup] Progress-Channel anlegen fehlgeschlagen: {e}")
+                        log.warning("Progress-Channel anlegen fehlgeschlagen: %s", e)
                         progress_channel = None
                         current_progress = progress_msg
 
@@ -396,23 +398,22 @@ class BackupAdminCog(commands.Cog):
                 try:
                     n = await convert_to_news_channels(guild, data.get("channels") or [])
                     if n:
-                        print(f"[Backup] {n} Channel(s) → News/Announcement")
+                        log.info("%s Channel(s) → News/Announcement", n)
                 except Exception as e:
-                    print(f"[Backup] News-Channel convert: {e}")
+                    log.warning("News-Channel convert: %s", e)
 
                 await bump("Setze Rollen-Hierarchie…")
                 try:
                     await dedupe_roles_by_name(guild)
                     await apply_role_hierarchy(guild, data.get("roles") or [])
                 except Exception as e:
-                    print(f"[Backup] Hierarchie: {e}")
-                    traceback.print_exc()
+                    log.exception("Hierarchie: %s", e)
 
                 await bump("Server-Name/Icon…")
                 try:
                     await apply_guild_branding(guild, data.get("guild") or {})
                 except Exception as e:
-                    print(f"[Backup] Branding: {e}")
+                    log.warning("Branding: %s", e)
 
                 try:
                     mapping: dict[int, int] = {}
@@ -428,12 +429,11 @@ class BackupAdminCog(commands.Cog):
                     if mapping:
                         await save_channel_id_map(db_path, guild.id, mapping)
                 except Exception as e:
-                    print(f"[Backup] channel_id_map: {e}")
+                    log.warning("channel_id_map: %s", e)
 
                 await bump("Alles erledigt.", done=True)
             except Exception as e:
-                print(f"[Backup] restore_with_extras CRASH: {e}")
-                traceback.print_exc()
+                log.exception("restore_with_extras CRASH: %s", e)
                 try:
                     await bump(f"`{e}`", error=True)
                 except Exception:
@@ -444,7 +444,7 @@ class BackupAdminCog(commands.Cog):
                     try:
                         await cleanup_progress_channel()
                     except Exception as e:
-                        print(f"[Backup] cleanup progress: {e}")
+                        log.warning("cleanup progress: %s", e)
 
         async def fixed_snapshots(_cog: Any, interaction: discord.Interaction) -> None:
             await interaction.response.defer(ephemeral=True)
@@ -579,7 +579,7 @@ class BackupAdminCog(commands.Cog):
                     cmd._callback = fixed_status  # type: ignore[attr-defined]
                 if cmd.name not in patched:
                     patched.append(cmd.name)
-        print(f"[BackupAdmin] Patches OK: {patched}")
+        log.info("Patches OK: %s", patched)
 
     # ---------- Purge / prune ----------
 
@@ -689,13 +689,13 @@ class BackupAdminCog(commands.Cog):
                 s = await purge_all_soft_deleted(self.db_path, ATTACHMENTS_DIR)
                 total_rows += s["rows"]
                 total_att += s["attachments"]
-                print(f"[Backup] Manual purge soft-deleted: {s}")
+                log.info("Manual purge soft-deleted: %s", s)
 
             if excluded:
                 s = await purge_excluded_messages(self.db_path, ATTACHMENTS_DIR)
                 total_rows += s["rows"]
                 total_att += s["attachments"]
-                print(f"[Backup] Manual purge excluded: {s}")
+                log.info("Manual purge excluded: %s", s)
 
             await progress.edit(
                 embed=discord.Embed(
@@ -708,7 +708,7 @@ class BackupAdminCog(commands.Cog):
                 )
             )
         except Exception as e:
-            traceback.print_exc()
+            log.exception("Purge failed: %s", e)
             await progress.edit(
                 embed=discord.Embed(
                     title="❌ Purge fehlgeschlagen",
@@ -895,6 +895,7 @@ class BackupAdminCog(commands.Cog):
                     embed.add_field(name=label, value=str(stats[k]), inline=True)
                 await progress.edit(embed=embed)
             except Exception as e:
+                log.exception("Download missing attachments failed: %s", e)
                 await progress.edit(
                     embed=discord.Embed(title="❌ Download fehlgeschlagen", description=f"`{e}`", color=discord.Color.red())
                 )
