@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import asyncio
+import logging
 import discord
 import traceback
 from discord.ext import commands
@@ -18,6 +19,9 @@ except ImportError:
     from ..utils.bet_mixin import BetAdjustableMixin, OWNER_ONLY_MSG
     from ..utils.replay_mixin import ReplayMixin
 
+log = logging.getLogger("qnapbot.slots")
+
+
 class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
     """InteractiveSlots view with bet adjustment and replay."""
 
@@ -32,7 +36,8 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
             return False
         return True
 
-    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item) -> None: 
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item) -> None:
+        log.exception("Slots view error")
         traceback.print_exception(type(error), error, error.__traceback__)
 
     async def _get_updated_embed(self) -> discord.Embed:
@@ -46,8 +51,8 @@ class SlotsView(BetAdjustableMixin, ReplayMixin, discord.ui.View):
         embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
         embed.add_field(name="Gewinn", value="...", inline=True)
         embed.add_field(
-            name="Dein Kontostand", 
-            value=f"**{current_balance:,}** {self.currency}", 
+            name="Dein Kontostand",
+            value=f"**{current_balance:,}** {self.currency}",
             inline=False
         )
         embed.set_footer(text="Passe deinen Einsatz an und drücke dann Spin")
@@ -127,7 +132,7 @@ class SlotsCog(commands.Cog):
         self.bot = bot
 
     async def cog_load(self) -> None:
-        print("[Slots] Slots Cog loaded.")
+        log.info("Slots cog loaded")
 
     @app_commands.command(name="slots", description="Spiele Slots mit animierten Walzen + Bet Buttons")
     @app_commands.describe(bet="Einsatz (Min. 10)")
