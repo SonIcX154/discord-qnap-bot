@@ -34,6 +34,8 @@ DISCORD_TO_TWITCH = _RAW_D2T not in ("0", "false", "no", "off")
 SEND_DELAY = float(os.getenv("TWITCH_MIRROR_DELAY", "0.35"))
 MSG_CACHE_MAX = int(os.getenv("TWITCH_MIRROR_MSG_CACHE", "3000"))
 TWITCH_MIRROR_DB_PATH = os.getenv("TWITCH_MIRROR_DB_PATH", TWITCH_MAP_DEFAULT_PATH)
+# Full /clear on Twitch only wipes Discord messages mirrored within this window
+CLEAR_WINDOW_SECONDS = int(os.getenv("TWITCH_CLEAR_WINDOW_SECONDS", "600"))
 
 WEBHOOK_NAME = "Twitch Mirror"
 REQUIRED_DELETE_SCOPE = "moderator:manage:chat_messages"
