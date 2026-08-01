@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 import asyncio
 import logging
 import discord
@@ -32,6 +33,7 @@ try:
         DISCORD_TO_TWITCH,
         SEND_DELAY,
         MSG_CACHE_MAX,
+        CLEAR_WINDOW_SECONDS,
         TWITCH_MIRROR_DB_PATH,
         WEBHOOK_NAME,
         REQUIRED_DELETE_SCOPE,
@@ -65,6 +67,7 @@ except ImportError:
         DISCORD_TO_TWITCH,
         SEND_DELAY,
         MSG_CACHE_MAX,
+        CLEAR_WINDOW_SECONDS,
         TWITCH_MIRROR_DB_PATH,
         WEBHOOK_NAME,
         REQUIRED_DELETE_SCOPE,
@@ -225,7 +228,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             if row is not None:
                 if discord_id is None:
                     discord_id = int(row["discord_id"])
-                # Keep memory consistent with DB direction
                 if row.get("direction") == "outbound" and discord_id is not None:
                     self._discord_to_twitch.pop(discord_id, None)
                 elif row.get("direction") == "inbound" and discord_id is not None:
@@ -384,6 +386,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 ", ".join(f"{k}→<@{v}>" for k, v in OWNER_PING_MAP.items()),
             )
         log.info("Echo filter: only [Discord]-prefixed (bot self-chat mirrored)")
+        log.info("CLEARCHAT window: last %ss", CLEAR_WINDOW_SECONDS)
         await self._load_persisted_map()
         await self._resolve_helix_ids()
         if DISCORD_TO_TWITCH:
@@ -698,7 +701,6 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 await webhook.delete_message(discord_msg_id)
                 deleted = True
             except discord.NotFound:
-                # Not a webhook message (e.g. Discord→Twitch original) — try channel
                 pass
             except Exception as e:
                 log.warning("Webhook delete failed: %s", e)
@@ -749,41 +751,35 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             return
 
         if kind == "all":
-            items = list(self._msg_map.items())
-            self._msg_map.clear()
-            self._login_msgs.clear()
-            self._discord_to_inbound.clear()
-            # Also wipe outbound so Discord originals of Discord→Twitch go away
-            outbound_items = list(self._discord_to_twitch.items())
-            self._discord_to_twitch.clear()
-            self._outbound_twitch_ids.clear()
+            # Only wipe messages mirrored within CLEAR_WINDOW_SECONDS (default 10 min)
+            window = max(0, CLEAR_WINDOW_SECONDS)
+            since = int(time.time()) - window
             try:
-                db_rows = await self._store.clear_direction("inbound")
-                seen = {tid for tid, _ in items}
-                for row in db_rows:
-                    tid = str(row["twitch_id"])
-                    if tid not in seen:
-                        items.append((tid, int(row["discord_id"])))
-                out_rows = await self._store.clear_direction("outbound")
-                seen_out = {did for did, _ in outbound_items}
-                for row in out_rows:
-                    did = int(row["discord_id"])
-                    if did not in seen_out:
-                        outbound_items.append((did, str(row["twitch_id"])))
+                rows = await self._store.delete_since(since)
             except Exception as e:
-                log.warning("Map DB clear failed: %s", e)
+                log.warning("Map DB delete_since failed: %s", e)
+                rows = []
 
             deleted = 0
-            for _, discord_id in items:
-                await self._delete_discord_message(discord_id)
-                deleted += 1
-                await asyncio.sleep(0.25)
-            for discord_id, _ in outbound_items:
+            for row in rows:
+                tid = str(row["twitch_id"])
+                discord_id = int(row["discord_id"])
+                self._msg_map.pop(tid, None)
+                self._discord_to_inbound.pop(discord_id, None)
+                self._discord_to_twitch.pop(discord_id, None)
+                self._outbound_twitch_ids.pop(tid, None)
+                for s in self._login_msgs.values():
+                    s.discard(tid)
                 await self._delete_discord_message(discord_id)
                 deleted += 1
                 await asyncio.sleep(0.25)
             if deleted:
-                log.info("Full CLEARCHAT: removed %s Discord msg(s)", deleted)
+                log.info(
+                    "CLEARCHAT (last %ss): removed %s Discord msg(s)",
+                    window, deleted,
+                )
+            else:
+                log.info("CLEARCHAT (last %ss): nothing in window", window)
 
     async def _discord_worker(self) -> None:
         await self.discord_bot.wait_until_ready()
@@ -1138,6 +1134,11 @@ class TwitchMirrorCog(commands.Cog):
                 if DISCORD_TO_TWITCH
                 else "OFF"
             ),
+            inline=True,
+        )
+        embed.add_field(
+            name="/clear window",
+            value=f"`{CLEAR_WINDOW_SECONDS}s` ({CLEAR_WINDOW_SECONDS // 60} min)",
             inline=True,
         )
         embed.add_field(
