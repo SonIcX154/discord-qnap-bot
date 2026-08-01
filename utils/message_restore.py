@@ -4,6 +4,7 @@ import os
 import json
 import time
 import asyncio
+import logging
 import aiosqlite
 import discord
 from datetime import datetime, timezone
@@ -13,6 +14,8 @@ try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover
     ZoneInfo = None  # type: ignore
+
+log = logging.getLogger("qnapbot.backup.restore")
 
 MESSAGE_RESTORE_DELAY = 0.75
 MAX_RETRIES = 5
@@ -58,7 +61,10 @@ async def with_retry(coro_factory: Callable[[], Awaitable[Any]], *,
                     except Exception:
                         retry_after = 2.0 * (attempt + 1)
                 wait = max(float(retry_after), 0.5)
-                print(f"[Backup] 429 bei {label} – warte {wait:.1f}s (Versuch {attempt + 1}/{MAX_RETRIES})")
+                log.warning(
+                    "429 bei %s – warte %.1fs (Versuch %s/%s)",
+                    label, wait, attempt + 1, MAX_RETRIES,
+                )
                 await asyncio.sleep(wait)
                 continue
             raise
@@ -105,7 +111,7 @@ async def ensure_deleted_at_column(db_path: str) -> None:
                 "ALTER TABLE messages ADD COLUMN deleted_at INTEGER"
             )
             await db.commit()
-            print("[Backup] messages.deleted_at Spalte hinzugefügt")
+            log.info("messages.deleted_at Spalte hinzugefügt")
         except aiosqlite.OperationalError:
             pass
 
@@ -411,7 +417,7 @@ async def restore_messages_to_channel(
             label=f"create_webhook #{channel.name}",
         )
     except Exception as e:
-        print(f"[Backup] Webhook erstellen fehlgeschlagen in #{channel.name}: {e}")
+        log.error("Webhook erstellen fehlgeschlagen in #%s: %s", channel.name, e)
         return 0, 0, 1
 
     sent = 0
@@ -451,7 +457,10 @@ async def restore_messages_to_channel(
                 await mark_restored(db_path, int(msg["message_id"]), channel.id)
             except Exception as e:
                 errors += 1
-                print(f"[Backup] Webhook-Send fehlgeschlagen (msg {msg.get('message_id')}): {e}")
+                log.warning(
+                    "Webhook-Send fehlgeschlagen (msg %s): %s",
+                    msg.get("message_id"), e,
+                )
 
             await asyncio.sleep(MESSAGE_RESTORE_DELAY)
     finally:
@@ -487,11 +496,12 @@ async def run_message_restore(
     guild_channel_ids = {c.id for c in guild.channels}
 
     mode = f"as_of={as_of}" if as_of else f"include_deleted={include_deleted}"
-    print(
-        f"[Backup] Message-Restore start: guild={guild.id} "
-        f"id_map={len(id_map)} name_lookup={len(name_lookup)} "
-        f"source_guild_id={source_guild_id} force={force} {mode} "
-        f"display_tz={os.getenv('BACKUP_DISPLAY_TZ') or os.getenv('TZ') or 'Europe/Berlin'}"
+    log.info(
+        "Message-Restore start: guild=%s id_map=%s name_lookup=%s "
+        "source_guild_id=%s force=%s %s display_tz=%s",
+        guild.id, len(id_map), len(name_lookup),
+        source_guild_id, force, mode,
+        os.getenv("BACKUP_DISPLAY_TZ") or os.getenv("TZ") or "Europe/Berlin",
     )
 
     if channel_filter is not None:
@@ -514,7 +524,7 @@ async def run_message_restore(
             db_path, source_guild_id, as_of=as_of, include_deleted=include_deleted
         )
 
-    print(f"[Backup] Channels mit Nachrichten in DB: {len(old_ids)}")
+    log.info("Channels mit Nachrichten in DB: %s", len(old_ids))
 
     total_sent = 0
     total_errors = 0
@@ -556,15 +566,15 @@ async def run_message_restore(
             )
             if target is None:
                 channels_skipped += 1
-                print(
-                    f"[Backup] Kein Ziel-Channel für old_id={oid} "
-                    f"(name={name_lookup.get(oid)!r})"
+                log.debug(
+                    "Kein Ziel-Channel für old_id=%s (name=%r)",
+                    oid, name_lookup.get(oid),
                 )
                 continue
 
             if not target.permissions_for(guild.me).manage_webhooks:
                 channels_skipped += 1
-                print(f"[Backup] Keine Manage Webhooks Permission in #{target.name}")
+                log.warning("Keine Manage Webhooks Permission in #%s", target.name)
                 continue
 
             await update(f"Channel **#{target.name}** …")
@@ -633,9 +643,9 @@ async def run_message_restore(
             total_errors += channel_errors
             total_skipped += channel_skipped
             channels_done += 1
-            print(
-                f"[Backup] #{target.name}: {channel_sent} sent, {channel_empty} empty, "
-                f"{channel_errors} err, {channel_skipped} already-restored"
+            log.info(
+                "#%s: %s sent, %s empty, %s err, %s already-restored",
+                target.name, channel_sent, channel_empty, channel_errors, channel_skipped,
             )
 
         as_of_txt = (
@@ -674,7 +684,7 @@ async def run_message_restore(
             pass
 
     except Exception as e:
-        print(f"[Backup] Nachrichten-Restore abgebrochen: {e}")
+        log.exception("Nachrichten-Restore abgebrochen: %s", e)
         try:
             await progress_msg.edit(
                 embed=discord.Embed(
