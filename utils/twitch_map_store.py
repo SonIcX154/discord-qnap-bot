@@ -174,6 +174,34 @@ class TwitchMapStore:
             for r in rows
         ]
 
+    async def delete_since(self, since_ts: int) -> list[dict[str, Any]]:
+        """Delete all map rows with created_at >= since_ts. Returns deleted rows."""
+        async with aiosqlite.connect(self.path) as db:
+            async with db.execute(
+                """
+                SELECT twitch_id, discord_id, login, direction, created_at
+                FROM msg_map
+                WHERE created_at >= ?
+                """,
+                (int(since_ts),),
+            ) as cur:
+                rows = await cur.fetchall()
+            if rows:
+                await db.execute(
+                    "DELETE FROM msg_map WHERE created_at >= ?", (int(since_ts),)
+                )
+                await db.commit()
+        return [
+            {
+                "twitch_id": r[0],
+                "discord_id": int(r[1]),
+                "login": r[2],
+                "direction": r[3],
+                "created_at": int(r[4]),
+            }
+            for r in rows
+        ]
+
     async def load_recent(self) -> list[dict[str, Any]]:
         """Oldest-first list of the most recent max_entries rows."""
         async with aiosqlite.connect(self.path) as db:
