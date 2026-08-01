@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 import random
 import asyncio
+import logging
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -15,6 +16,7 @@ try:
 except ImportError:
     from ..utils.bet_mixin import BetAdjustableMixin, OWNER_ONLY_MSG
 
+log = logging.getLogger("qnapbot.roulette")
 
 ROULETTE_EMOTE = str(os.getenv("ROULETTE_EMOTE", "🎰"))
 
@@ -53,7 +55,7 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
     async def _get_updated_embed(self) -> discord.Embed:
         """Live update embed when adjusting bet - stable layout."""
         current_balance = await self.economy.get_balance(self.user_id)
-        
+
         embed = discord.Embed(
             title=ROULETTE_EMOTE + " Roulette",
             color=discord.Color.gold()
@@ -61,7 +63,7 @@ class RouletteView(BetAdjustableMixin, discord.ui.View):
         embed.add_field(name="Einsatz", value=f"{self.bet:,} {self.currency}", inline=True)
         embed.add_field(name="Gewinn", value="...", inline=True)
         embed.add_field(
-            name="Kontostand", 
+            name="Kontostand",
             value=f"**{current_balance:,}** {self.currency}",
             inline=False
         )
@@ -249,7 +251,7 @@ class RouletteCog(commands.Cog):
         self.bot = bot
 
     async def cog_load(self) -> None:
-        print("[Roulette] Roulette Cog loaded.")
+        log.info("Roulette cog loaded")
 
     @app_commands.command(name="roulette", description="Spiele Roulette mit interaktiven Buttons + Bet Anpassung")
     @app_commands.describe(bet="Dein Einsatz (Min. 10)")
