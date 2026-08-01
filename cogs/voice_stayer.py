@@ -1,10 +1,12 @@
 import os
 import asyncio
+import logging
 import discord
 from discord.ext import commands
 from discord import app_commands
 from typing import Optional
 
+log = logging.getLogger("qnapbot.voice_stayer")
 
 # ====================== ADMIN CONFIG ======================
 # Hardcode YOUR Discord user ID here
@@ -23,7 +25,7 @@ def is_admin_or_manage_guild(interaction: discord.Interaction) -> bool:
 
 class VoiceStayer(commands.Cog):
     """Cog that keeps the bot permanently connected to a specific voice channel.
-    
+
     This makes the voice channel 'long-running' / always active.
     The bot will automatically rejoin if disconnected.
     Use /voice-stayer to toggle this behavior on or off.
@@ -39,10 +41,10 @@ class VoiceStayer(commands.Cog):
     async def cog_load(self) -> None:
         """Start the background task when the cog is loaded."""
         if self.voice_channel_id == 0:
-            print("WARNING: VOICE_CHANNEL_ID is not set in .env - voice stayer disabled.")
+            log.warning("VOICE_CHANNEL_ID is not set in .env – voice stayer disabled")
             return
         self._voice_task = asyncio.create_task(self._stay_in_voice_channel())
-        print(f"VoiceStayer initialized. Target channel ID: {self.voice_channel_id}")
+        log.info("VoiceStayer initialized (target channel ID: %s)", self.voice_channel_id)
 
     async def cog_unload(self) -> None:
         """Clean up the task when the cog is unloaded."""
@@ -75,7 +77,7 @@ class VoiceStayer(commands.Cog):
             if voice_client and voice_client.is_connected():  # type: ignore[attr-defined]
                 try:
                     await voice_client.disconnect(force=True)
-                    print(f"[VoiceStayer] Disconnected from voice channel (stayer disabled by {interaction.user})")
+                    log.info("Disconnected from voice channel (stayer disabled by %s)", interaction.user)
                 except Exception:
                     pass
 
@@ -97,7 +99,7 @@ class VoiceStayer(commands.Cog):
     async def _stay_in_voice_channel(self) -> None:
         """Background loop that ensures the bot stays connected to the target VC."""
         await self.bot.wait_until_ready()
-        print("Voice stayer task started.")
+        log.info("Voice stayer task started")
 
         while self._running and not self.bot.is_closed():
             if not self.enabled:
@@ -108,7 +110,7 @@ class VoiceStayer(commands.Cog):
                 channel = self.bot.get_channel(self.voice_channel_id)
 
                 if not channel or not isinstance(channel, discord.VoiceChannel):
-                    print(f"[VoiceStayer] Channel {self.voice_channel_id} not found or not a VoiceChannel.")
+                    log.warning("Channel %s not found or not a VoiceChannel", self.voice_channel_id)
                     await asyncio.sleep(60)
                     continue
 
@@ -136,14 +138,14 @@ class VoiceStayer(commands.Cog):
                         if voice_client and voice_client.is_connected():  # type: ignore[attr-defined]
                             await voice_client.disconnect(force=True)
                         await channel.connect(reconnect=True)
-                        print(f"✅ [VoiceStayer] Connected to voice channel: {channel.name} ({channel.id})")
+                        log.info("Connected to voice channel: %s (%s)", channel.name, channel.id)
                     except discord.ClientException as e:
-                        print(f"[VoiceStayer] ClientException while connecting: {e}")
+                        log.warning("ClientException while connecting: %s", e)
                     except Exception as e:
-                        print(f"[VoiceStayer] Error connecting to voice: {e}")
+                        log.error("Error connecting to voice: %s", e)
 
             except Exception as e:
-                print(f"[VoiceStayer] Unexpected error: {e}")
+                log.exception("Unexpected error in voice stayer: %s", e)
 
             # Check / heal connection every ~1 second when enabled
             await asyncio.sleep(1)
