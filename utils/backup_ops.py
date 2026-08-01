@@ -6,6 +6,7 @@ import json
 import time
 import shutil
 import asyncio
+import logging
 import aiosqlite
 from typing import Any, Optional, Callable, Awaitable, Iterable, Collection
 
@@ -13,6 +14,8 @@ try:
     import aiohttp
 except ImportError:
     aiohttp = None  # type: ignore
+
+log = logging.getLogger("qnapbot.backup.ops")
 
 # Soft-deleted rows older than this are hard-deleted by the auto task
 SOFT_DELETE_RETENTION_DAYS = int(os.getenv("BACKUP_SOFT_DELETE_RETENTION_DAYS", "30"))
@@ -57,7 +60,7 @@ async def ensure_extra_tables(db_path: str) -> None:
         """)
         try:
             await db.execute("ALTER TABLE messages ADD COLUMN deleted_at INTEGER")
-            print("[Backup] messages.deleted_at Spalte hinzugefügt")
+            log.info("messages.deleted_at Spalte hinzugefügt")
         except aiosqlite.OperationalError:
             pass
         await db.commit()
@@ -155,7 +158,7 @@ async def add_excluded_guild(
     # Stop tracking this guild in channel_progress
     n = await _delete_channel_progress(db_path, guild_ids=[guild_id])
     if n:
-        print(f"[Backup] channel_progress: removed {n} rows for excluded guild {guild_id}")
+        log.info("channel_progress: removed %s rows for excluded guild %s", n, guild_id)
 
 
 async def remove_excluded_guild(db_path: str, guild_id: int) -> bool:
@@ -195,7 +198,7 @@ async def add_excluded_channel(
         await db.commit()
     n = await _delete_channel_progress(db_path, channel_ids=[channel_id])
     if n:
-        print(f"[Backup] channel_progress: removed {n} rows for excluded channel {channel_id}")
+        log.info("channel_progress: removed %s rows for excluded channel %s", n, channel_id)
 
 
 async def remove_excluded_channel(db_path: str, channel_id: int) -> bool:
@@ -279,10 +282,9 @@ async def prune_channel_progress(
         "remaining": max(0, len(rows) - removed),
     }
     if removed:
-        print(
-            f"[Backup] channel_progress prune: removed={removed} "
-            f"(stale={stats['stale']}, excluded={stats['excluded']}, "
-            f"remaining≈{stats['remaining']})"
+        log.info(
+            "channel_progress prune: removed=%s (stale=%s, excluded=%s, remaining≈%s)",
+            removed, stats["stale"], stats["excluded"], stats["remaining"],
         )
     return stats
 
@@ -295,7 +297,7 @@ def _remove_attachment_dir(attachments_dir: str, message_id: int) -> bool:
         shutil.rmtree(path, ignore_errors=False)
         return True
     except Exception as e:
-        print(f"[Backup] Attachment-Dir löschen fehlgeschlagen ({message_id}): {e}")
+        log.warning("Attachment-Dir löschen fehlgeschlagen (%s): %s", message_id, e)
         return False
 
 
@@ -562,7 +564,7 @@ async def _download_url(url: str, path: str) -> bool:
             f.write(data)
         return os.path.isfile(path) and os.path.getsize(path) > 0
     except Exception as e:
-        print(f"[Backup] URL-Download fehlgeschlagen: {e}")
+        log.warning("URL-Download fehlgeschlagen: %s", e)
         return False
 
 
