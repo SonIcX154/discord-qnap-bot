@@ -1,15 +1,19 @@
+from __future__ import annotations
+
 import json
 import os
 import datetime
 import random
 import asyncio
 import re
+import logging
 from datetime import date
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 from typing import Any, Dict, Tuple, Optional, List
 
+log = logging.getLogger("qnapbot.birthdays")
 
 DATA_FILE = os.getenv("BIRTHDAY_DATA_PATH", "data/birthdays.json")
 ANNOUNCE_HOUR = int(os.getenv("BIRTHDAY_ANNOUNCE_HOUR", "0"))
@@ -44,7 +48,7 @@ class BirthdayCog(commands.Cog):
             with open(DATA_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            print(f"[Birthday] Failed to save data: {e}")
+            log.error("Failed to save data: %s", e)
 
     def _get_guild_data(self, guild_id: int) -> Dict[str, Any]:
         gid = str(guild_id)
@@ -86,7 +90,7 @@ class BirthdayCog(commands.Cog):
                         member = guild.get_member(int(uid_str))
                         if member:
                             next_name = member.display_name
-            except:
+            except Exception:
                 continue
 
         return {
@@ -173,7 +177,10 @@ class BirthdayCog(commands.Cog):
                 continue
             channel = guild.get_channel(channel_id)
             if not isinstance(channel, discord.TextChannel):
-                print(f"[Birthday] Configured announce channel {channel_id} is not a TextChannel in guild {guild.id}")
+                log.warning(
+                    "Configured announce channel %s is not a TextChannel in guild %s",
+                    channel_id, guild.id,
+                )
                 continue
 
             celebrants: List[str] = []
@@ -188,7 +195,7 @@ class BirthdayCog(commands.Cog):
                                 age = check_date.year - int(b["year"])
                                 if age > 0:
                                     age_str = f" (wird {age}!)\u2728"
-                            except:
+                            except Exception:
                                 pass
                         celebrants.append(f"<@{uid_str}>{age_str}")
                 except Exception:
@@ -203,11 +210,17 @@ class BirthdayCog(commands.Cog):
                     msg = f"## \ud83c\udf89Alles Gute zum Geburtstag {', '.join(celebrants[:-1])} und {celebrants[-1]}!"
                 try:
                     await channel.send(msg)
-                    print(f"[Birthday] \u2705 Sent announcement to #{channel.name} ({channel.id}) in guild {guild.id} for {len(celebrants)} celebrant(s)")
+                    log.info(
+                        "Sent announcement to #%s (%s) in guild %s for %s celebrant(s)",
+                        channel.name, channel.id, guild.id, len(celebrants),
+                    )
                 except Exception as e:
-                    print(f"[Birthday] \u274c Failed to send announcement in guild {guild.id}: {e}")
+                    log.error("Failed to send announcement in guild %s: %s", guild.id, e)
             else:
-                print(f"[Birthday] No birthdays today in guild {guild.id} (channel #{channel.name} is configured)")
+                log.debug(
+                    "No birthdays today in guild %s (channel #%s is configured)",
+                    guild.id, channel.name,
+                )
 
     # ==================== SLASH COMMANDS (German parameters) ====================
 
@@ -279,7 +292,7 @@ class BirthdayCog(commands.Cog):
                 name = await self._get_member_name(interaction.guild, int(uid_str))
                 days_until, next_date = self._get_days_until(b["month"], b["day"], today)
                 upcoming.append((days_until, f"**{name}** — {next_date.strftime('%d.%m.')}"))
-            except:
+            except Exception:
                 continue
         if not upcoming:
             await interaction.response.send_message("Noch keine Geburtstage eingetragen.")
@@ -307,10 +320,10 @@ class BirthdayCog(commands.Cog):
                             age = today.year - int(b["year"])
                             if age > 0:
                                 age_str = f" (turns {age}!)\u2728"
-                        except:
+                        except Exception:
                             pass
                     celebrants.append(f"@{name}{age_str}")
-            except:
+            except Exception:
                 continue
         if not celebrants:
             await interaction.response.send_message("Heute hat niemand Geburtstag")
@@ -333,7 +346,10 @@ class BirthdayCog(commands.Cog):
             gdata["config"] = {}
         gdata["config"]["announce_channel_id"] = channel.id
         self._save_data()
-        print(f"[Birthday] Announcement channel set to #{channel.name} ({channel.id}) for guild {interaction.guild.id} by {interaction.user}")
+        log.info(
+            "Announcement channel set to #%s (%s) for guild %s by %s",
+            channel.name, channel.id, interaction.guild.id, interaction.user,
+        )
         await interaction.response.send_message(f"✅ Ankündigungen werden jetzt in {channel.mention} gesendet.", ephemeral=True)
 
     @app_commands.command(name="test-birthday-messages", description="Testet die automatischen Geburtstagsnachrichten mit echten Pings (Admin only)")
@@ -380,12 +396,15 @@ class BirthdayCog(commands.Cog):
     @app_commands.default_permissions(manage_guild=True)
     async def force_birthday_check(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        print(f"[Birthday] ⚙️ Manual force check triggered by {interaction.user} in guild {interaction.guild.id if interaction.guild else 'DM'}")
+        log.info(
+            "Manual force check triggered by %s in guild %s",
+            interaction.user, interaction.guild.id if interaction.guild else "DM",
+        )
         try:
             await self._announce_birthdays(date.today())
             await interaction.followup.send("✅ Force birthday check completed. Check the logs above for details (sent / not sent / errors).", ephemeral=True)
         except Exception as e:
-            print(f"[Birthday] Error during force check: {e}")
+            log.exception("Error during force check: %s", e)
             await interaction.followup.send(f"❌ Error during force check: {e}", ephemeral=True)
 
     # ==================== RELIABLE DAILY SCHEDULER ====================
@@ -400,26 +419,27 @@ class BirthdayCog(commands.Cog):
         if (now.hour == ANNOUNCE_HOUR and now.minute == ANNOUNCE_MINUTE and
                 self._last_announce_date != current_date):
 
-            print(f"[Birthday] Running daily birthday check for {current_date} (configured time {ANNOUNCE_HOUR:02d}:{ANNOUNCE_MINUTE:02d})")
+            log.info(
+                "Running daily birthday check for %s (configured time %02d:%02d)",
+                current_date, ANNOUNCE_HOUR, ANNOUNCE_MINUTE,
+            )
             self._last_announce_date = current_date
 
             try:
                 await self._announce_birthdays(current_date)
             except Exception as e:
-                print(f"[Birthday] Error in daily check: {e}")
+                log.exception("Error in daily check: %s", e)
 
     @daily_check.before_loop
     async def before_daily_check(self):
         await self.bot.wait_until_ready()
 
     async def cog_load(self):
-        print(f"[Birthday] Cog loaded. Daily announcements configured for {ANNOUNCE_HOUR:02d}:{ANNOUNCE_MINUTE:02d} every day.")
+        log.info(
+            "Birthday cog loaded. Daily announcements at %02d:%02d",
+            ANNOUNCE_HOUR, ANNOUNCE_MINUTE,
+        )
 
-        # Debug logs
-        print(f"[DEBUG] Guilds bot sees: {[(g.id, g.name) for g in self.bot.guilds]}")
-        print(f"[DEBUG] self.data keys: {list(self.data.keys())}")
-
-        # Log configured announcement channels per guild
         for guild in self.bot.guilds:
             gdata = self.data.get(str(guild.id), {})
             config = gdata.get("config", {})
@@ -427,9 +447,15 @@ class BirthdayCog(commands.Cog):
             if channel_id:
                 channel = guild.get_channel(channel_id)
                 if channel:
-                    print(f"[Birthday] Announcement channel for {guild.name}: #{channel.name} ({channel.id})")
+                    log.info(
+                        "Announcement channel for %s: #%s (%s)",
+                        guild.name, channel.name, channel.id,
+                    )
                 else:
-                    print(f"[Birthday] Announcement channel set for {guild.name} but channel {channel_id} not found")
+                    log.warning(
+                        "Announcement channel set for %s but channel %s not found",
+                        guild.name, channel_id,
+                    )
 
         self.daily_check.start()
 
