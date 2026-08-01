@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import re
 import asyncio
+import logging
 import discord
 from discord.ext import commands
 from discord import app_commands
 from typing import Optional, Any, Deque
 from collections import OrderedDict, defaultdict, deque
+
+log = logging.getLogger("qnapbot.twitch_mirror")
 
 try:
     from twitchio.ext import commands as twitch_commands
@@ -146,7 +149,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             await self._store.init()
             rows = await self._store.load_recent()
         except Exception as e:
-            print(f"[TwitchMirror] Map DB load failed: {e}")
+            log.warning("Map DB load failed: %s", e)
             return
 
         inbound = 0
@@ -172,9 +175,9 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 inbound += 1
 
         if inbound or outbound:
-            print(
-                f"[TwitchMirror] Restored message map from DB: "
-                f"inbound={inbound} outbound={outbound} path={self._store.path}"
+            log.info(
+                "Restored message map from DB: inbound=%s outbound=%s path=%s",
+                inbound, outbound, self._store.path,
             )
 
     async def _remember(self, twitch_id: str, discord_id: int, login: str) -> None:
@@ -198,7 +201,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 direction="inbound",
             )
         except Exception as e:
-            print(f"[TwitchMirror] Map persist (inbound) failed: {e}")
+            log.warning("Map persist (inbound) failed: %s", e)
 
     async def _forget_twitch_id(self, twitch_id: str) -> Optional[int]:
         """Resolve + drop mapping for a Twitch msg id (inbound or outbound)."""
@@ -228,7 +231,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 elif row.get("direction") == "inbound" and discord_id is not None:
                     self._discord_to_inbound.pop(discord_id, None)
         except Exception as e:
-            print(f"[TwitchMirror] Map DB delete (twitch) failed: {e}")
+            log.warning("Map DB delete (twitch) failed: %s", e)
         return discord_id
 
     async def _forget_inbound_by_discord(self, discord_id: int) -> Optional[str]:
@@ -242,7 +245,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             if twitch_id is None and row is not None:
                 twitch_id = str(row["twitch_id"])
         except Exception as e:
-            print(f"[TwitchMirror] Map DB delete (discord inbound) failed: {e}")
+            log.warning("Map DB delete (discord inbound) failed: %s", e)
         return twitch_id
 
     async def _remember_outbound(self, discord_id: int, twitch_id: str) -> None:
@@ -259,7 +262,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 direction="outbound",
             )
         except Exception as e:
-            print(f"[TwitchMirror] Map persist (outbound) failed: {e}")
+            log.warning("Map persist (outbound) failed: %s", e)
 
     async def _forget_outbound(self, discord_id: int) -> Optional[str]:
         twitch_id = self._discord_to_twitch.pop(discord_id, None)
@@ -271,7 +274,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 twitch_id = str(row["twitch_id"])
                 self._outbound_twitch_ids.pop(twitch_id, None)
         except Exception as e:
-            print(f"[TwitchMirror] Map DB delete (outbound) failed: {e}")
+            log.warning("Map DB delete (outbound) failed: %s", e)
         return twitch_id
 
     def _helix_headers(self) -> dict[str, str]:
@@ -283,7 +286,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
     async def _resolve_helix_ids(self) -> None:
         if aiohttp is None:
-            print("[TwitchMirror] Helix unavailable (aiohttp missing)")
+            log.warning("Helix unavailable (aiohttp missing)")
             return
 
         bearer = bearer_token(TWITCH_TOKEN)
@@ -296,9 +299,9 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 ) as resp:
                     if resp.status != 200:
                         body = await resp.text()
-                        print(
-                            f"[TwitchMirror] Token validate HTTP {resp.status}: "
-                            f"{body[:200]}"
+                        log.warning(
+                            "Token validate HTTP %s: %s",
+                            resp.status, body[:200],
                         )
                         return
                     info: dict[str, Any] = await resp.json()
@@ -314,35 +317,34 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
                 if token_client_id:
                     if TWITCH_CLIENT_ID and TWITCH_CLIENT_ID != token_client_id:
-                        print(
-                            f"[TwitchMirror] WARNING: TWITCH_CLIENT_ID mismatch!\n"
-                            f"  .env TWITCH_CLIENT_ID = {TWITCH_CLIENT_ID}\n"
-                            f"  token client_id       = {token_client_id}\n"
-                            f"  → using token's client_id for Helix calls"
+                        log.warning(
+                            "TWITCH_CLIENT_ID mismatch!\n"
+                            "  .env TWITCH_CLIENT_ID = %s\n"
+                            "  token client_id       = %s\n"
+                            "  → using token's client_id for Helix calls",
+                            TWITCH_CLIENT_ID, token_client_id,
                         )
                     self._helix_client_id = token_client_id
                 elif TWITCH_CLIENT_ID:
                     self._helix_client_id = TWITCH_CLIENT_ID
                 else:
-                    print("[TwitchMirror] No Client-Id available")
+                    log.warning("No Client-Id available")
                     return
 
-                print(
-                    f"[TwitchMirror] Token user={login} id={self._moderator_id} "
-                    f"client_id={self._helix_client_id[:8]}… scopes={len(scopes)}"
+                log.info(
+                    "Token user=%s id=%s client_id=%s… scopes=%s",
+                    login, self._moderator_id, self._helix_client_id[:8], len(scopes),
                 )
                 if self._has_delete_scope:
-                    print(f"[TwitchMirror] Scope OK: {REQUIRED_DELETE_SCOPE}")
+                    log.info("Scope OK: %s", REQUIRED_DELETE_SCOPE)
                 else:
-                    print(
-                        f"[TwitchMirror] WARNING: missing `{REQUIRED_DELETE_SCOPE}`"
-                    )
+                    log.warning("missing `%s`", REQUIRED_DELETE_SCOPE)
                 if self._has_send_scope:
-                    print(f"[TwitchMirror] Scope OK: {REQUIRED_SEND_SCOPE}")
+                    log.info("Scope OK: %s", REQUIRED_SEND_SCOPE)
                 else:
-                    print(
-                        f"[TwitchMirror] WARNING: missing `{REQUIRED_SEND_SCOPE}` "
-                        f"— Discord→Twitch will use IRC (no reliable msg id)"
+                    log.warning(
+                        "missing `%s` — Discord→Twitch will use IRC (no reliable msg id)",
+                        REQUIRED_SEND_SCOPE,
                     )
 
                 headers = self._helix_headers()
@@ -352,42 +354,42 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 ) as resp:
                     if resp.status != 200:
                         body = await resp.text()
-                        print(
-                            f"[TwitchMirror] Helix users (broadcaster) "
-                            f"HTTP {resp.status}: {body[:200]}"
+                        log.warning(
+                            "Helix users (broadcaster) HTTP %s: %s",
+                            resp.status, body[:200],
                         )
                         return
                     data = await resp.json()
                 users = data.get("data") or []
                 if not users:
-                    print(f"[TwitchMirror] Broadcaster login not found: {TWITCH_CHANNEL}")
+                    log.warning("Broadcaster login not found: %s", TWITCH_CHANNEL)
                     return
                 self._broadcaster_id = str(users[0]["id"])
-                print(
-                    f"[TwitchMirror] Helix ready: broadcaster={self._broadcaster_id} "
-                    f"sender/mod={self._moderator_id}"
+                log.info(
+                    "Helix ready: broadcaster=%s sender/mod=%s",
+                    self._broadcaster_id, self._moderator_id,
                 )
         except Exception as e:
-            print(f"[TwitchMirror] Helix id resolve failed: {e}")
+            log.exception("Helix id resolve failed: %s", e)
 
     async def event_ready(self) -> None:
         self.connected = True
         nick = getattr(self, "nick", None) or TWITCH_NICK or "?"
         if nick and nick != "?":
             self._bot_logins.add(str(nick).lower().lstrip("#"))
-        print(f"[TwitchMirror] Connected as {nick} → #{TWITCH_CHANNEL}")
+        log.info("Connected as %s → #%s", nick, TWITCH_CHANNEL)
         if OWNER_PING_MAP:
-            print(
-                f"[TwitchMirror] Owner ping map (@ or bare): "
-                + ", ".join(f"{k}→<@{v}>" for k, v in OWNER_PING_MAP.items())
+            log.info(
+                "Owner ping map (@ or bare): %s",
+                ", ".join(f"{k}→<@{v}>" for k, v in OWNER_PING_MAP.items()),
             )
-        print("[TwitchMirror] Echo filter: only [Discord]-prefixed (bot self-chat mirrored)")
+        log.info("Echo filter: only [Discord]-prefixed (bot self-chat mirrored)")
         await self._load_persisted_map()
         await self._resolve_helix_ids()
         if DISCORD_TO_TWITCH:
-            print("[TwitchMirror] Discord → Twitch: ON (Helix preferred)")
+            log.info("Discord → Twitch: ON (Helix preferred)")
         else:
-            print("[TwitchMirror] Discord → Twitch: OFF")
+            log.info("Discord → Twitch: OFF")
         if self._worker_task is None or self._worker_task.done():
             self._worker_task = asyncio.create_task(self._discord_worker())
 
@@ -398,9 +400,9 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 if tid and self._outbound_pending:
                     discord_id = self._outbound_pending.popleft()
                     await self._remember_outbound(discord_id, tid)
-                    print(
-                        f"[TwitchMirror] Outbound (IRC echo) linked "
-                        f"discord={discord_id} → twitch={tid[:12]}…"
+                    log.debug(
+                        "Outbound (IRC echo) linked discord=%s → twitch=%s…",
+                        discord_id, tid[:12],
                     )
                 return
 
@@ -425,9 +427,9 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 if tid and self._outbound_pending and login in self._bot_logins:
                     discord_id = self._outbound_pending.popleft()
                     await self._remember_outbound(discord_id, tid)
-                    print(
-                        f"[TwitchMirror] Outbound ([Discord] IRC) linked "
-                        f"discord={discord_id} → twitch={tid[:12]}…"
+                    log.debug(
+                        "Outbound ([Discord] IRC) linked discord=%s → twitch=%s…",
+                        discord_id, tid[:12],
                     )
                 return
 
@@ -439,25 +441,25 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                     before = content
                     content = strip_leading_reply_mention(content, tags)
                     if content != before:
-                        print(
-                            f"[TwitchMirror] stripped reply @mention: "
-                            f"{before[:40]!r} → {content[:40]!r}"
+                        log.debug(
+                            "stripped reply @mention: %r → %r",
+                            before[:40], content[:40],
                         )
             except Exception as e:
-                print(f"[TwitchMirror] reply format error (sending plain): {e}")
+                log.warning("reply format error (sending plain): %s", e)
                 reply_header = None
 
             if not content:
                 return
 
             if not tid:
-                print(f"[TwitchMirror] WARNING: no msg id from IRC for @{login}")
+                log.warning("no msg id from IRC for @%s", login)
 
             await self._queue.put(
                 (login, display, content[:1900], tid, reply_header, is_action)
             )
         except Exception as e:
-            print(f"[TwitchMirror] event_message error: {e}")
+            log.exception("event_message error: %s", e)
 
     async def event_raw_data(self, data: str) -> None:  # type: ignore[no-untyped-def]
         if not data:
@@ -525,48 +527,44 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                                     is_sent = rows[0].get("is_sent", True)
                                     if not is_sent:
                                         drop = rows[0].get("drop_reason")
-                                        print(
-                                            f"[TwitchMirror] Helix send dropped: {drop}"
-                                        )
+                                        log.warning("Helix send dropped: %s", drop)
                                         return False
                                 if mid:
                                     await self._remember_outbound(discord_msg_id, str(mid))
-                                    print(
-                                        f"[TwitchMirror] Helix send OK "
-                                        f"discord={discord_msg_id} → "
-                                        f"twitch={str(mid)[:12]}…"
+                                    log.debug(
+                                        "Helix send OK discord=%s → twitch=%s…",
+                                        discord_msg_id, str(mid)[:12],
                                     )
                                 else:
-                                    print(
-                                        "[TwitchMirror] Helix send OK but no message_id "
-                                        f"in response: {body_txt[:200]}"
+                                    log.warning(
+                                        "Helix send OK but no message_id in response: %s",
+                                        body_txt[:200],
                                     )
                                 await asyncio.sleep(SEND_DELAY)
                                 return True
-                            print(
-                                f"[TwitchMirror] Helix send HTTP {resp.status}: "
-                                f"{body_txt[:250]}"
+                            log.warning(
+                                "Helix send HTTP %s: %s",
+                                resp.status, body_txt[:250],
                             )
                 except Exception as e:
-                    print(f"[TwitchMirror] Helix send error: {e}")
+                    log.error("Helix send error: %s", e)
 
             if not self.connected:
-                print("[TwitchMirror] send_to_twitch: not connected")
+                log.warning("send_to_twitch: not connected")
                 return False
             try:
                 channel = self.get_channel(TWITCH_CHANNEL)
                 if channel is None:
                     channel = self.get_channel(f"#{TWITCH_CHANNEL}")
                 if channel is None:
-                    print(f"[TwitchMirror] No IRC channel for #{TWITCH_CHANNEL}")
+                    log.warning("No IRC channel for #%s", TWITCH_CHANNEL)
                     return False
 
                 self._outbound_pending.append(discord_msg_id)
                 await channel.send(text[:480])
                 await asyncio.sleep(SEND_DELAY)
-                print(
-                    "[TwitchMirror] IRC send used (no Helix msg id — "
-                    "delete-from-Discord may not work for this message)"
+                log.debug(
+                    "IRC send used (no Helix msg id — delete-from-Discord may not work for this message)"
                 )
                 return True
             except Exception as e:
@@ -575,24 +573,25 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                         self._outbound_pending.pop()
                 except Exception:
                     pass
-                print(f"[TwitchMirror] IRC send failed: {e}")
+                log.error("IRC send failed: %s", e)
                 return False
 
     async def delete_on_twitch(self, twitch_msg_id: str) -> bool:
         if not twitch_msg_id:
             return False
         if aiohttp is None:
-            print("[TwitchMirror] delete failed: aiohttp missing")
+            log.warning("delete failed: aiohttp missing")
             return False
         if not self._helix_client_id:
-            print("[TwitchMirror] delete failed: no Client-Id")
+            log.warning("delete failed: no Client-Id")
             return False
         if not self._broadcaster_id or not self._moderator_id:
-            print("[TwitchMirror] delete failed: broadcaster/moderator id unknown")
+            log.warning("delete failed: broadcaster/moderator id unknown")
             return False
         if not self._has_delete_scope:
-            print(
-                f"[TwitchMirror] delete failed: missing scope `{REQUIRED_DELETE_SCOPE}`"
+            log.warning(
+                "delete failed: missing scope `%s`",
+                REQUIRED_DELETE_SCOPE,
             )
             return False
 
@@ -609,22 +608,23 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                     url, params=params, headers=self._helix_headers()
                 ) as resp:
                     if resp.status in (200, 204):
-                        print(
-                            f"[TwitchMirror] Helix delete OK {twitch_msg_id[:12]}… "
-                            f"HTTP {resp.status}"
+                        log.debug(
+                            "Helix delete OK %s… HTTP %s",
+                            twitch_msg_id[:12], resp.status,
                         )
                         return True
                     body = await resp.text()
-                    print(
-                        f"[TwitchMirror] Helix delete FAILED HTTP {resp.status}\n"
-                        f"  msg_id={twitch_msg_id}\n"
-                        f"  broadcaster={self._broadcaster_id} "
-                        f"moderator={self._moderator_id}\n"
-                        f"  body={body[:300]}"
+                    log.warning(
+                        "Helix delete FAILED HTTP %s\n"
+                        "  msg_id=%s\n"
+                        "  broadcaster=%s moderator=%s\n"
+                        "  body=%s",
+                        resp.status, twitch_msg_id,
+                        self._broadcaster_id, self._moderator_id, body[:300],
                     )
                     return False
         except Exception as e:
-            print(f"[TwitchMirror] Helix delete error: {e}")
+            log.error("Helix delete error: %s", e)
             return False
 
     async def _fetch_avatar(self, login: str) -> Optional[str]:
@@ -646,7 +646,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.get(url, headers=self._helix_headers()) as resp:
                         if resp.status != 200:
-                            print(f"[TwitchMirror] Helix users {login}: HTTP {resp.status}")
+                            log.debug("Helix users %s: HTTP %s", login, resp.status)
                             self._avatar_cache[login] = None
                             return None
                         data: dict[str, Any] = await resp.json()
@@ -658,7 +658,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 self._avatar_cache[login] = avatar
                 return avatar
             except Exception as e:
-                print(f"[TwitchMirror] Avatar fetch failed for {login}: {e}")
+                log.warning("Avatar fetch failed for %s: %s", login, e)
                 self._avatar_cache[login] = None
                 return None
 
@@ -667,24 +667,24 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
     ) -> Optional[discord.Webhook]:
         me = channel.guild.me if channel.guild else None
         if me and not channel.permissions_for(me).manage_webhooks:
-            print("[TwitchMirror] Missing Manage Webhooks permission")
+            log.warning("Missing Manage Webhooks permission")
             return None
 
         try:
             hooks = await channel.webhooks()
             for h in hooks:
                 if h.name == WEBHOOK_NAME and h.token:
-                    print(f"[TwitchMirror] Reusing webhook id={h.id}")
+                    log.debug("Reusing webhook id=%s", h.id)
                     return h
 
             hook = await channel.create_webhook(
                 name=WEBHOOK_NAME,
                 reason="Twitch chat mirror",
             )
-            print(f"[TwitchMirror] Created webhook id={hook.id}")
+            log.info("Created webhook id=%s", hook.id)
             return hook
         except Exception as e:
-            print(f"[TwitchMirror] Webhook setup failed: {e}")
+            log.error("Webhook setup failed: %s", e)
             return None
 
     async def _delete_discord_message(self, discord_msg_id: int) -> None:
@@ -701,7 +701,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 # Not a webhook message (e.g. Discord→Twitch original) — try channel
                 pass
             except Exception as e:
-                print(f"[TwitchMirror] Webhook delete failed: {e}")
+                log.warning("Webhook delete failed: %s", e)
 
         if deleted:
             return
@@ -714,16 +714,16 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             except discord.NotFound:
                 pass
             except Exception as e:
-                print(f"[TwitchMirror] Channel delete failed: {e}")
+                log.warning("Channel delete failed: %s", e)
 
     async def _process_delete(self, kind: str, value: Optional[str]) -> None:
         if kind == "id" and value:
             discord_id = await self._forget_twitch_id(value)
             if discord_id is not None:
                 await self._delete_discord_message(discord_id)
-                print(
-                    f"[TwitchMirror] Deleted Discord msg={discord_id} "
-                    f"(CLEARMSG {value[:8]}…)"
+                log.debug(
+                    "Deleted Discord msg=%s (CLEARMSG %s…)",
+                    discord_id, value[:8],
                 )
             return
 
@@ -735,7 +735,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 for row in db_rows:
                     tids.add(str(row["twitch_id"]))
             except Exception as e:
-                print(f"[TwitchMirror] Map DB delete_by_login failed: {e}")
+                log.warning("Map DB delete_by_login failed: %s", e)
 
             deleted = 0
             for tid in list(tids):
@@ -745,7 +745,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                     deleted += 1
                     await asyncio.sleep(0.25)
             if deleted:
-                print(f"[TwitchMirror] CLEARCHAT @{login}: removed {deleted} Discord msg(s)")
+                log.info("CLEARCHAT @%s: removed %s Discord msg(s)", login, deleted)
             return
 
         if kind == "all":
@@ -771,7 +771,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                     if did not in seen_out:
                         outbound_items.append((did, str(row["twitch_id"])))
             except Exception as e:
-                print(f"[TwitchMirror] Map DB clear failed: {e}")
+                log.warning("Map DB clear failed: %s", e)
 
             deleted = 0
             for _, discord_id in items:
@@ -783,7 +783,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 deleted += 1
                 await asyncio.sleep(0.25)
             if deleted:
-                print(f"[TwitchMirror] Full CLEARCHAT: removed {deleted} Discord msg(s)")
+                log.info("Full CLEARCHAT: removed %s Discord msg(s)", deleted)
 
     async def _discord_worker(self) -> None:
         await self.discord_bot.wait_until_ready()
@@ -792,25 +792,25 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             try:
                 channel = await self.discord_bot.fetch_channel(self.discord_channel_id)
             except Exception as e:
-                print(
-                    f"[TwitchMirror] Cannot resolve Discord channel "
-                    f"{self.discord_channel_id}: {e}"
+                log.error(
+                    "Cannot resolve Discord channel %s: %s",
+                    self.discord_channel_id, e,
                 )
                 return
 
         if not isinstance(channel, discord.TextChannel):
-            print(f"[TwitchMirror] Channel {self.discord_channel_id} is not a text channel")
+            log.error("Channel %s is not a text channel", self.discord_channel_id)
             return
 
         self._text_channel = channel
         webhook = await self._get_or_create_webhook(channel)
         self._webhook = webhook
         if webhook is None:
-            print("[TwitchMirror] Falling back to bot messages (no webhook)")
+            log.warning("Falling back to bot messages (no webhook)")
 
-        print(
-            f"[TwitchMirror] Mirroring #{TWITCH_CHANNEL} → #{channel.name} "
-            f"(webhook={'yes' if webhook else 'no'})"
+        log.info(
+            "Mirroring #%s → #%s (webhook=%s)",
+            TWITCH_CHANNEL, channel.name, "yes" if webhook else "no",
         )
 
         while True:
@@ -872,7 +872,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                         )
                         discord_msg_id = sent.id
                     except discord.NotFound:
-                        print("[TwitchMirror] Webhook missing – recreating")
+                        log.warning("Webhook missing – recreating")
                         webhook = await self._get_or_create_webhook(channel)
                         self._webhook = webhook
                         if webhook is not None:
@@ -885,7 +885,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                             )
                             discord_msg_id = sent.id
                     except discord.HTTPException as e:
-                        print(f"[TwitchMirror] Webhook send failed: {e}")
+                        log.warning("Webhook send failed: %s", e)
                         if reply_header:
                             try:
                                 sent = await webhook.send(
@@ -897,7 +897,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                                 )
                                 discord_msg_id = sent.id
                             except Exception as e2:
-                                print(f"[TwitchMirror] Plain retry failed: {e2}")
+                                log.warning("Plain retry failed: %s", e2)
                         else:
                             try:
                                 sent = await channel.send(
@@ -906,7 +906,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                                 )
                                 discord_msg_id = sent.id
                             except Exception as e2:
-                                print(f"[TwitchMirror] Fallback send failed: {e2}")
+                                log.warning("Fallback send failed: %s", e2)
                 else:
                     sent = await channel.send(
                         f"**{username}**: {final}",
@@ -921,7 +921,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"[TwitchMirror] Worker error: {e}")
+                log.exception("Worker error: %s", e)
                 await asyncio.sleep(1.0)
 
 
@@ -940,11 +940,11 @@ class TwitchMirrorCog(commands.Cog):
 
     async def cog_load(self) -> None:
         if twitch_commands is None:
-            print("[TwitchMirror] twitchio not installed – cog idle")
+            log.warning("twitchio not installed – cog idle")
             return
         if not is_configured():
-            print(
-                "[TwitchMirror] Disabled – set TWITCH_TOKEN, TWITCH_CHANNEL, "
+            log.warning(
+                "Disabled – set TWITCH_TOKEN, TWITCH_CHANNEL, "
                 "TWITCH_DISCORD_CHANNEL_ID in .env"
             )
             return
@@ -952,22 +952,22 @@ class TwitchMirrorCog(commands.Cog):
         try:
             channel_id = int(TWITCH_DISCORD_CHANNEL_ID)
         except ValueError:
-            print(
-                f"[TwitchMirror] Invalid TWITCH_DISCORD_CHANNEL_ID: "
-                f"{TWITCH_DISCORD_CHANNEL_ID!r}"
+            log.error(
+                "Invalid TWITCH_DISCORD_CHANNEL_ID: %r",
+                TWITCH_DISCORD_CHANNEL_ID,
             )
             return
 
         try:
             await self._store.init()
-            print(f"[TwitchMirror] Map DB: {self._store.path}")
+            log.info("Map DB: %s", self._store.path)
         except Exception as e:
-            print(f"[TwitchMirror] Map DB init failed: {e}")
+            log.error("Map DB init failed: %s", e)
 
         self._discord_channel_id = channel_id
         self._twitch = TwitchMirrorBot(self.bot, channel_id, store=self._store)
         self._task = asyncio.create_task(self._run_twitch())
-        print(f"[TwitchMirror] Starting client for #{TWITCH_CHANNEL}…")
+        log.info("Starting client for #%s…", TWITCH_CHANNEL)
 
     async def _run_twitch(self) -> None:
         assert self._twitch is not None
@@ -978,11 +978,11 @@ class TwitchMirrorCog(commands.Cog):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"[TwitchMirror] Connection error: {e} – retry in {backoff:.0f}s")
+                log.error("Connection error: %s – retry in %.0fs", e, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 1.5, 120.0)
             else:
-                print("[TwitchMirror] Disconnected – reconnecting in 10s")
+                log.info("Disconnected – reconnecting in 10s")
                 await asyncio.sleep(10.0)
                 backoff = 5.0
 
@@ -1035,7 +1035,7 @@ class TwitchMirrorCog(commands.Cog):
 
         ok = await self._twitch.send_to_twitch(payload, message.id)
         if ok:
-            print(f"[TwitchMirror] Discord→Twitch: {display}: {body[:60]!r}")
+            log.debug("Discord→Twitch: %s: %r", display, body[:60])
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
@@ -1052,23 +1052,24 @@ class TwitchMirrorCog(commands.Cog):
             source = "outbound (Discord→Twitch)"
 
         if not twitch_id:
-            print(
-                f"[TwitchMirror] Discord delete msg={payload.message_id} "
-                f"not in map (inbound={len(self._twitch._discord_to_inbound)} "
-                f"outbound={len(self._twitch._discord_to_twitch)}) — skip Twitch delete"
+            log.debug(
+                "Discord delete msg=%s not in map (inbound=%s outbound=%s) — skip Twitch delete",
+                payload.message_id,
+                len(self._twitch._discord_to_inbound),
+                len(self._twitch._discord_to_twitch),
             )
             return
 
         ok = await self._twitch.delete_on_twitch(twitch_id)
         if ok:
-            print(
-                f"[TwitchMirror] Discord delete → Twitch delete "
-                f"{twitch_id[:12]}… ({source})"
+            log.debug(
+                "Discord delete → Twitch delete %s… (%s)",
+                twitch_id[:12], source,
             )
         else:
-            print(
-                f"[TwitchMirror] Could not delete on Twitch "
-                f"({twitch_id[:12]}…, {source}). See Helix error above."
+            log.warning(
+                "Could not delete on Twitch (%s…, %s). See Helix error above.",
+                twitch_id[:12], source,
             )
 
     @app_commands.command(
