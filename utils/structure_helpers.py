@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import base64
 import asyncio
+import logging
 from typing import Any, Optional
 
 import discord
+
+log = logging.getLogger("qnapbot.backup.structure")
 
 
 class AlwaysTruthyDict(dict):
@@ -44,7 +47,7 @@ async def _with_timeout(coro, seconds: float, label: str):
     try:
         return await asyncio.wait_for(coro, timeout=seconds)
     except asyncio.TimeoutError:
-        print(f"[Backup] TIMEOUT ({seconds}s) bei: {label}")
+        log.warning("TIMEOUT (%ss) bei: %s", seconds, label)
         raise
 
 
@@ -72,25 +75,25 @@ def _can_manage_role(me: discord.Member, role: discord.Role) -> tuple[bool, str]
 async def clear_manageable_roles(guild: discord.Guild) -> int:
     me = guild.me
     if me is None:
-        print("[Backup] clear roles: guild.me fehlt")
+        log.warning("clear roles: guild.me fehlt")
         return 0
 
     if not (me.guild_permissions.manage_roles or me.guild_permissions.administrator):
-        print(
-            "[Backup] clear roles: Bot hat weder Manage Roles noch Administrator – Abbruch"
+        log.warning(
+            "clear roles: Bot hat weder Manage Roles noch Administrator – Abbruch"
         )
         return 0
 
     bot_top = me.top_role
-    print(
-        f"[Backup] clear roles: bot='{me.display_name}' top_role='{bot_top.name}' "
-        f"pos={bot_top.position} admin={me.guild_permissions.administrator} "
-        f"manage_roles={me.guild_permissions.manage_roles}"
+    log.info(
+        "clear roles: bot='%s' top_role='%s' pos=%s admin=%s manage_roles=%s",
+        me.display_name, bot_top.name, bot_top.position,
+        me.guild_permissions.administrator, me.guild_permissions.manage_roles,
     )
 
     # Snapshot sorted high → low (delete higher first so hierarchy stays consistent)
     roles = sorted(list(guild.roles), key=lambda r: r.position, reverse=True)
-    print(f"[Backup] clear roles: {len(roles)} Rollen im Cache")
+    log.info("clear roles: %s Rollen im Cache", len(roles))
 
     deleted = 0
     skipped: list[str] = []
@@ -109,17 +112,17 @@ async def clear_manageable_roles(guild: discord.Guild) -> int:
                 f"role.delete {role.name}",
             )
             deleted += 1
-            print(f"[Backup] Rolle gelöscht: {role.name} (pos={role.position})")
+            log.debug("Rolle gelöscht: %s (pos=%s)", role.name, role.position)
             await asyncio.sleep(0.4)
         except discord.Forbidden as e:
             failed.append(f"{role.name}: Forbidden ({e})")
-            print(f"[Backup] Rolle löschen Forbidden '{role.name}': {e}")
+            log.warning("Rolle löschen Forbidden '%s': %s", role.name, e)
         except discord.HTTPException as e:
             failed.append(f"{role.name}: HTTP {e.status} ({e})")
-            print(f"[Backup] Rolle löschen HTTP '{role.name}': {e}")
+            log.warning("Rolle löschen HTTP '%s': %s", role.name, e)
         except Exception as e:
             failed.append(f"{role.name}: {e}")
-            print(f"[Backup] Rolle löschen '{role.name}': {e}")
+            log.warning("Rolle löschen '%s': %s", role.name, e)
 
     # Second pass: Discord sometimes keeps stale hierarchy after bulk deletes.
     # Refresh member/role cache and try remaining roles once more.
@@ -130,7 +133,7 @@ async def clear_manageable_roles(guild: discord.Guild) -> int:
             fetched = await guild.fetch_roles()
             remaining = sorted(fetched, key=lambda r: r.position, reverse=True)
         except Exception as e:
-            print(f"[Backup] clear roles refresh fehlgeschlagen: {e}")
+            log.warning("clear roles refresh fehlgeschlagen: %s", e)
             remaining = sorted(list(guild.roles), key=lambda r: r.position, reverse=True)
 
         # Re-resolve me after potential role changes
@@ -146,20 +149,25 @@ async def clear_manageable_roles(guild: discord.Guild) -> int:
                     f"role.delete.pass2 {role.name}",
                 )
                 deleted += 1
-                print(f"[Backup] Rolle gelöscht (pass 2): {role.name}")
+                log.debug("Rolle gelöscht (pass 2): %s", role.name)
                 await asyncio.sleep(0.4)
             except Exception as e:
-                print(f"[Backup] Rolle löschen pass2 '{role.name}': {e}")
+                log.warning("Rolle löschen pass2 '%s': %s", role.name, e)
                 failed.append(f"{role.name} (pass2): {e}")
 
-    print(f"[Backup] clear roles fertig: {deleted} gelöscht")
+    log.info("clear roles fertig: %s gelöscht", deleted)
     if skipped:
-        # Only log a summary – can be long
-        print(f"[Backup] clear roles übersprungen ({len(skipped)}): " + "; ".join(skipped[:15]))
+        log.debug(
+            "clear roles übersprungen (%s): %s",
+            len(skipped), "; ".join(skipped[:15]),
+        )
         if len(skipped) > 15:
-            print(f"[Backup]   … und {len(skipped) - 15} weitere")
+            log.debug("  … und %s weitere", len(skipped) - 15)
     if failed:
-        print(f"[Backup] clear roles fehlgeschlagen ({len(failed)}): " + "; ".join(failed[:10]))
+        log.warning(
+            "clear roles fehlgeschlagen (%s): %s",
+            len(failed), "; ".join(failed[:10]),
+        )
 
     return deleted
 
@@ -167,10 +175,10 @@ async def clear_manageable_roles(guild: discord.Guild) -> int:
 async def clear_channels(guild: discord.Guild, keep_channel_id: Optional[int] = None) -> int:
     deleted = 0
     channels = list(guild.channels)
-    print(f"[Backup] clear channels: {len(channels)} (keep={keep_channel_id})")
+    log.info("clear channels: %s (keep=%s)", len(channels), keep_channel_id)
     for channel in channels:
         if keep_channel_id and channel.id == keep_channel_id:
-            print(f"[Backup] Channel behalten: #{getattr(channel, 'name', channel.id)}")
+            log.debug("Channel behalten: #%s", getattr(channel, "name", channel.id))
             continue
         try:
             await _with_timeout(
@@ -179,11 +187,14 @@ async def clear_channels(guild: discord.Guild, keep_channel_id: Optional[int] = 
                 f"channel.delete {getattr(channel, 'name', channel.id)}",
             )
             deleted += 1
-            print(f"[Backup] Channel gelöscht: {getattr(channel, 'name', channel.id)}")
+            log.debug("Channel gelöscht: %s", getattr(channel, "name", channel.id))
             await asyncio.sleep(0.35)
         except Exception as e:
-            print(f"[Backup] Channel-Löschen fehlgeschlagen ({getattr(channel, 'name', channel.id)}): {e}")
-    print(f"[Backup] clear channels fertig: {deleted} gelöscht")
+            log.warning(
+                "Channel-Löschen fehlgeschlagen (%s): %s",
+                getattr(channel, "name", channel.id), e,
+            )
+    log.info("clear channels fertig: %s gelöscht", deleted)
     return deleted
 
 
@@ -217,9 +228,9 @@ async def dedupe_roles_by_name(guild: discord.Guild) -> int:
                 removed += 1
                 await asyncio.sleep(0.3)
             except Exception as e:
-                print(f"[Backup] Dedupe '{name}': {e}")
+                log.warning("Dedupe '%s': %s", name, e)
     if removed:
-        print(f"[Backup] {removed} doppelte Rollen entfernt")
+        log.info("%s doppelte Rollen entfernt", removed)
     return removed
 
 
@@ -244,7 +255,7 @@ async def convert_to_news_channels(
         if channel.name not in wanted_names:
             continue
         if getattr(channel, "is_news", lambda: False)():
-            print(f"[Backup] #{channel.name} ist bereits News-Channel")
+            log.debug("#%s ist bereits News-Channel", channel.name)
             continue
         try:
             await _with_timeout(
@@ -256,12 +267,13 @@ async def convert_to_news_channels(
                 f"channel.edit news {channel.name}",
             )
             converted += 1
-            print(f"[Backup] #{channel.name} → Announcement/News")
+            log.info("#%s → Announcement/News", channel.name)
             await asyncio.sleep(0.4)
         except Exception as e:
-            print(
-                f"[Backup] #{channel.name} konnte nicht zu News werden: {e} "
-                f"(Server braucht ggf. Community-Features)"
+            log.warning(
+                "#%s konnte nicht zu News werden: %s "
+                "(Server braucht ggf. Community-Features)",
+                channel.name, e,
             )
     return converted
 
@@ -303,7 +315,7 @@ async def apply_role_hierarchy(
             ordered.append(role)
 
     if not ordered:
-        print("[Backup] Hierarchie: keine matchenden Rollen")
+        log.info("Hierarchie: keine matchenden Rollen")
         return
 
     positions: dict[discord.Role, int] = {}
@@ -314,7 +326,7 @@ async def apply_role_hierarchy(
         positions[role] = pos
 
     preview = ", ".join(f"{r.name}→{positions[r]}" for r in ordered[:5])
-    print(f"[Backup] Hierarchie Mapping (Top→…): Bot@{bot_top}: {preview}")
+    log.info("Hierarchie Mapping (Top→…): Bot@%s: %s", bot_top, preview)
 
     try:
         await _with_timeout(
@@ -324,10 +336,10 @@ async def apply_role_hierarchy(
             30.0,
             "edit_role_positions",
         )
-        print(f"[Backup] Hierarchie OK: {len(ordered)} Rollen")
+        log.info("Hierarchie OK: %s Rollen", len(ordered))
         return
     except Exception as e:
-        print(f"[Backup] edit_role_positions batch: {e}")
+        log.warning("edit_role_positions batch: %s", e)
 
     for role, pos in sorted(positions.items(), key=lambda x: x[1], reverse=True):
         try:
@@ -338,7 +350,7 @@ async def apply_role_hierarchy(
             )
             await asyncio.sleep(0.35)
         except Exception as e:
-            print(f"[Backup] Position '{role.name}' -> {pos}: {e}")
+            log.warning("Position '%s' -> %s: %s", role.name, pos, e)
 
 
 async def fetch_icon_b64(guild: discord.Guild) -> Optional[str]:
@@ -348,7 +360,7 @@ async def fetch_icon_b64(guild: discord.Guild) -> Optional[str]:
         data = await guild.icon.read()
         return base64.b64encode(data).decode("ascii")
     except Exception as e:
-        print(f"[Backup] Icon lesen fehlgeschlagen: {e}")
+        log.warning("Icon lesen fehlgeschlagen: %s", e)
         return None
 
 
@@ -376,7 +388,7 @@ async def apply_guild_branding(guild: discord.Guild, g: dict[str, Any]) -> list[
                     if resp.status == 200:
                         icon_bytes = await resp.read()
         except Exception as e:
-            print(f"[Backup] Icon-Download fehlgeschlagen: {e}")
+            log.warning("Icon-Download fehlgeschlagen: %s", e)
 
     if icon_bytes:
         kwargs["icon"] = icon_bytes
@@ -391,19 +403,19 @@ async def apply_guild_branding(guild: discord.Guild, g: dict[str, Any]) -> list[
             "guild.edit branding",
         )
         applied.extend(kwargs.keys())
-        print(f"[Backup] Guild branding: {applied}")
+        log.info("Guild branding: %s", applied)
     except Exception as e:
-        print(f"[Backup] Guild branding: {e}")
+        log.warning("Guild branding: %s", e)
         if "name" in kwargs:
             try:
                 await guild.edit(name=kwargs["name"], reason="Backup Restore name")
                 applied.append("name")
             except Exception as e2:
-                print(f"[Backup] Guild name: {e2}")
+                log.warning("Guild name: %s", e2)
         if "icon" in kwargs:
             try:
                 await guild.edit(icon=kwargs["icon"], reason="Backup Restore icon")
                 applied.append("icon")
             except Exception as e2:
-                print(f"[Backup] Guild icon: {e2}")
+                log.warning("Guild icon: %s", e2)
     return applied
