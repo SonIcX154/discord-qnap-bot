@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import asyncio
 import logging
@@ -8,19 +10,32 @@ from typing import Optional
 
 log = logging.getLogger("qnapbot.voice_stayer")
 
-# ====================== ADMIN CONFIG ======================
-# Hardcode YOUR Discord user ID here
-ADMIN_USER_ID = 406523291382186004   # <-- REPLACE THIS WITH YOUR REAL DISCORD USER ID
+
+def _parse_bot_dev_ids() -> set[int]:
+    """Parse BOT_DEV_ID / BOT_DEV_IDS (comma or semicolon separated)."""
+    raw = (os.getenv("BOT_DEV_ID") or os.getenv("BOT_DEV_IDS") or "").strip()
+    ids: set[int] = set()
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.add(int(part))
+    return ids
+
+
+BOT_DEV_IDS: set[int] = _parse_bot_dev_ids()
 
 
 def is_admin_or_manage_guild(interaction: discord.Interaction) -> bool:
-    """Allows the hardcoded admin OR anyone with Manage Guild permission."""
-    if interaction.user.id == ADMIN_USER_ID:
+    """Allows BOT_DEV_ID(s) OR anyone with Manage Guild permission."""
+    if interaction.user.id in BOT_DEV_IDS:
         return True
-    if interaction.guild and isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.manage_guild:
+    if (
+        interaction.guild
+        and isinstance(interaction.user, discord.Member)
+        and interaction.user.guild_permissions.manage_guild
+    ):
         return True
     return False
-# ==========================================================
 
 
 class VoiceStayer(commands.Cog):
@@ -36,13 +51,17 @@ class VoiceStayer(commands.Cog):
         self.voice_channel_id = int(os.getenv("VOICE_CHANNEL_ID", "0"))
         self._voice_task: Optional[asyncio.Task[None]] = None
         self._running = True
-        self.enabled = False   # Can be toggled with /voice-stayer
+        self.enabled = False  # Can be toggled with /voice-stayer
 
     async def cog_load(self) -> None:
         """Start the background task when the cog is loaded."""
         if self.voice_channel_id == 0:
             log.warning("VOICE_CHANNEL_ID is not set in .env – voice stayer disabled")
             return
+        if BOT_DEV_IDS:
+            log.info("BOT_DEV_ID(s) loaded: %s", ", ".join(str(i) for i in sorted(BOT_DEV_IDS)))
+        else:
+            log.info("No BOT_DEV_ID set – only Manage Guild can toggle voice-stayer")
         self._voice_task = asyncio.create_task(self._stay_in_voice_channel())
         log.info("VoiceStayer initialized (target channel ID: %s)", self.voice_channel_id)
 
@@ -59,7 +78,7 @@ class VoiceStayer(commands.Cog):
     @app_commands.check(is_admin_or_manage_guild)
     @app_commands.command(
         name="voice-stayer",
-        description="Toggle the automatic voice stayer on or off (Admin only)"
+        description="Toggle the automatic voice stayer on or off (Admin / Bot-Dev only)",
     )
     async def toggle_voice_stayer(self, interaction: discord.Interaction) -> None:
         self.enabled = not self.enabled
@@ -67,7 +86,7 @@ class VoiceStayer(commands.Cog):
         if self.enabled:
             await interaction.response.send_message(
                 "✅ Voice Stayer is now **enabled**. The bot will stay connected to the voice channel.",
-                ephemeral=True
+                ephemeral=True,
             )
         else:
             # Disconnect if currently connected
@@ -77,21 +96,26 @@ class VoiceStayer(commands.Cog):
             if voice_client and voice_client.is_connected():  # type: ignore[attr-defined]
                 try:
                     await voice_client.disconnect(force=True)
-                    log.info("Disconnected from voice channel (stayer disabled by %s)", interaction.user)
+                    log.info(
+                        "Disconnected from voice channel (stayer disabled by %s)",
+                        interaction.user,
+                    )
                 except Exception:
                     pass
 
             await interaction.response.send_message(
                 "❌ Voice Stayer is now **disabled**. The bot will no longer force itself into the voice channel.",
-                ephemeral=True
+                ephemeral=True,
             )
 
     @toggle_voice_stayer.error
-    async def toggle_voice_stayer_error(self, interaction: discord.Interaction, error: Exception) -> None:  # type: ignore[misc]
+    async def toggle_voice_stayer_error(
+        self, interaction: discord.Interaction, error: Exception
+    ) -> None:  # type: ignore[misc]
         if isinstance(error, app_commands.CheckFailure):
             await interaction.response.send_message(
-                "❌ You need **Manage Guild** permission or be the bot admin to use this command.",
-                ephemeral=True
+                "❌ Du brauchst **Manage Guild** oder musst als **Bot-Dev** hinterlegt sein.",
+                ephemeral=True,
             )
         else:
             raise error
@@ -110,7 +134,9 @@ class VoiceStayer(commands.Cog):
                 channel = self.bot.get_channel(self.voice_channel_id)
 
                 if not channel or not isinstance(channel, discord.VoiceChannel):
-                    log.warning("Channel %s not found or not a VoiceChannel", self.voice_channel_id)
+                    log.warning(
+                        "Channel %s not found or not a VoiceChannel", self.voice_channel_id
+                    )
                     await asyncio.sleep(60)
                     continue
 
@@ -138,7 +164,9 @@ class VoiceStayer(commands.Cog):
                         if voice_client and voice_client.is_connected():  # type: ignore[attr-defined]
                             await voice_client.disconnect(force=True)
                         await channel.connect(reconnect=True)
-                        log.info("Connected to voice channel: %s (%s)", channel.name, channel.id)
+                        log.info(
+                            "Connected to voice channel: %s (%s)", channel.name, channel.id
+                        )
                     except discord.ClientException as e:
                         log.warning("ClientException while connecting: %s", e)
                     except Exception as e:
