@@ -11,7 +11,7 @@ import time
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import discord
 from discord.ext import commands
@@ -39,6 +39,8 @@ SETTING_KEY = "badgebase.notify_channel"
 SEEN_DB_PATH = os.getenv("BADGEBASE_SEEN_PATH", "data/badgebase_seen.db")
 
 _LOGIN_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+PriceFilter = Literal["all", "free", "paid"]
 
 
 class SeenStore:
@@ -124,9 +126,21 @@ def _fmt_dt(value: Optional[str]) -> str:
     return local.strftime("%d.%m.%Y %H:%M")
 
 
+def _is_paid(badge: dict[str, Any]) -> bool:
+    """Robust paid detection (bool / 0-1 / strings)."""
+    raw = badge.get("paid")
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return raw != 0
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("1", "true", "yes", "paid")
+    return False
+
+
 def _badge_embed(badge: dict[str, Any], *, prefix: str = "Neues Badge") -> discord.Embed:
     title = badge.get("title") or f"Badge #{badge.get('id')}"
-    paid = bool(badge.get("paid"))
+    paid = _is_paid(badge)
     embed = discord.Embed(
         title=f"{'💰' if paid else '🆓'} {prefix}: {title}",
         url=badge.get("url") or None,
@@ -222,13 +236,45 @@ class BadgeBaseCog(commands.Cog):
             return {}
         return data
 
-    async def _fetch_claimable(self) -> list[dict[str, Any]]:
-        """Full catalogue of currently claimable badges (for notify poll)."""
-        data = await self._api_get("/badges", {"status": "claimable"})
+    async def _fetch_claimable(self, *, price: Optional[str] = None) -> list[dict[str, Any]]:
+        """Catalogue of currently claimable badges (optional price=free|paid)."""
+        params: dict[str, str] = {"status": "claimable"}
+        if price in ("free", "paid"):
+            params["price"] = price
+        data = await self._api_get("/badges", params)
         items = data.get("data")
         if not isinstance(items, list):
             return []
         return [b for b in items if isinstance(b, dict) and b.get("id") is not None]
+
+    async def _paid_id_set(self) -> set[int]:
+        """IDs of claimable badges classified as paid by the catalogue."""
+        paid = await self._fetch_claimable(price="paid")
+        return {int(b["id"]) for b in paid}
+
+    async def _enrich_paid_flags(self, badges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """/user/.../missing often omits `paid` – fill from catalogue price filter."""
+        if not badges:
+            return badges
+        try:
+            paid_ids = await self._paid_id_set()
+        except Exception as e:
+            log.warning("Could not load paid catalogue for enrichment: %s", e)
+            paid_ids = set()
+
+        out: list[dict[str, Any]] = []
+        for b in badges:
+            copy = dict(b)
+            bid = int(copy["id"])
+            if bid in paid_ids:
+                copy["paid"] = True
+            elif "paid" not in copy or copy.get("paid") is None:
+                # only force false when catalogue didn't mark it paid
+                copy["paid"] = False
+            else:
+                copy["paid"] = _is_paid(copy)
+            out.append(copy)
+        return out
 
     async def _fetch_missing(self, login: str) -> list[dict[str, Any]]:
         """Badges this user does not own yet (default: only currently claimable)."""
@@ -239,7 +285,8 @@ class BadgeBaseCog(commands.Cog):
         items = data.get("data")
         if not isinstance(items, list):
             return []
-        return [b for b in items if isinstance(b, dict) and b.get("id") is not None]
+        raw = [b for b in items if isinstance(b, dict) and b.get("id") is not None]
+        return await self._enrich_paid_flags(raw)
 
     async def _notify_guilds(self, badges: list[dict[str, Any]]) -> None:
         if not badges:
@@ -288,6 +335,12 @@ class BadgeBaseCog(commands.Cog):
         fresh = [b for b in badges if int(b["id"]) not in known]
         if not fresh:
             return
+
+        # Enrich paid flags for nicer embeds
+        try:
+            fresh = await self._enrich_paid_flags(fresh)
+        except Exception:
+            pass
 
         log.info("BadgeBase: %s new claimable badge(s)", len(fresh))
         await self._notify_guilds(fresh)
@@ -445,8 +498,15 @@ class BadgeBaseCog(commands.Cog):
     )
     @app_commands.describe(
         login="Twitch-Login (sonst BADGEBASE_TWITCH_LOGIN aus .env)",
+        price="Nur free, nur paid, oder alle",
         limit="Max. Einträge in der Liste (1–25, Default 15)",
-        detail="Zusätzlich 1 Badge als volles Embed zeigen",
+    )
+    @app_commands.choices(
+        price=[
+            app_commands.Choice(name="Alle", value="all"),
+            app_commands.Choice(name="Nur Free", value="free"),
+            app_commands.Choice(name="Nur Paid", value="paid"),
+        ]
     )
     @app_commands.default_permissions(manage_guild=True)
     @admin_or_bot_dev
@@ -454,8 +514,8 @@ class BadgeBaseCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         login: Optional[str] = None,
+        price: app_commands.Choice[str] = None,  # type: ignore[assignment]
         limit: app_commands.Range[int, 1, 25] = 15,
-        detail: bool = False,
     ) -> None:
         if not API_KEY:
             await interaction.response.send_message(
@@ -479,6 +539,10 @@ class BadgeBaseCog(commands.Cog):
             )
             return
 
+        price_filter: PriceFilter = "all"
+        if price is not None:
+            price_filter = price.value  # type: ignore[assignment]
+
         await interaction.response.defer(ephemeral=True)
         try:
             badges = await self._fetch_missing(resolved)
@@ -489,47 +553,52 @@ class BadgeBaseCog(commands.Cog):
             )
             return
 
+        if price_filter == "free":
+            badges = [b for b in badges if not _is_paid(b)]
+        elif price_filter == "paid":
+            badges = [b for b in badges if _is_paid(b)]
+
         if not badges:
+            label = {
+                "all": "keine fehlenden claimable Badges",
+                "free": "keine fehlenden **free** claimable Badges",
+                "paid": "keine fehlenden **paid** claimable Badges",
+            }[price_filter]
             await interaction.followup.send(
-                f"✅ **@{resolved}** – keine fehlenden claimable Badges.",
+                f"✅ **@{resolved}** – {label}.",
                 ephemeral=True,
             )
             return
 
-        free_n = sum(1 for b in badges if not b.get("paid"))
-        paid_n = len(badges) - free_n
+        free_n = sum(1 for b in badges if not _is_paid(b))
+        paid_n = sum(1 for b in badges if _is_paid(b))
 
         lines: list[str] = []
         for b in badges[: int(limit)]:
             bid = int(b["id"])
             title = b.get("title") or f"#{bid}"
-            paid = "💰" if b.get("paid") else "🆓"
+            icon = "💰" if _is_paid(b) else "🆓"
             link = b.get("url") or ""
             if link:
-                lines.append(f"{paid} **[{title}]({link})** `{bid}`")
+                lines.append(f"{icon} **[{title}]({link})** `{bid}`")
             else:
-                lines.append(f"{paid} **{title}** `{bid}`")
+                lines.append(f"{icon} **{title}** `{bid}`")
 
         more = len(badges) - int(limit)
         footer_extra = f" · +{more} weitere" if more > 0 else ""
+        filter_label = {"all": "alle", "free": "nur free", "paid": "nur paid"}[price_filter]
 
         embed = discord.Embed(
             title=f"Fehlende claimable Badges · @{resolved}",
             description="\n".join(lines) if lines else "–",
-            color=discord.Color.green(),
+            color=discord.Color.gold() if price_filter == "paid" else discord.Color.green(),
         )
         embed.add_field(name="Gesamt", value=str(len(badges)), inline=True)
         embed.add_field(name="Free", value=str(free_n), inline=True)
         embed.add_field(name="Paid", value=str(paid_n), inline=True)
-        embed.set_footer(text=f"GET /user/{resolved}/missing{footer_extra}")
+        embed.set_footer(text=f"/user/{resolved}/missing · Filter: {filter_label}{footer_extra}")
 
         await interaction.followup.send(embed=embed, ephemeral=True)
-
-        if detail and badges:
-            await interaction.followup.send(
-                embed=_badge_embed(badges[0], prefix="Beispiel"),
-                ephemeral=True,
-            )
 
     @badgebase_claimable.error
     async def badgebase_claimable_error(
