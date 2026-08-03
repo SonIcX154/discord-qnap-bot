@@ -104,7 +104,6 @@ def _parse_dt(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     try:
-        # API uses ISO date-time; tolerate trailing Z
         text = value.replace("Z", "+00:00")
         return datetime.fromisoformat(text)
     except Exception:
@@ -121,11 +120,11 @@ def _fmt_dt(value: Optional[str]) -> str:
     return local.strftime("%d.%m.%Y %H:%M")
 
 
-def _badge_embed(badge: dict[str, Any]) -> discord.Embed:
+def _badge_embed(badge: dict[str, Any], *, prefix: str = "Neues Badge") -> discord.Embed:
     title = badge.get("title") or f"Badge #{badge.get('id')}"
     paid = bool(badge.get("paid"))
     embed = discord.Embed(
-        title=f"{'💰' if paid else '🆓'} Neues Badge: {title}",
+        title=f"{'💰' if paid else '🆓'} {prefix}: {title}",
         url=badge.get("url") or None,
         color=discord.Color.gold() if paid else discord.Color.green(),
         description=(
@@ -179,6 +178,10 @@ class BadgeBaseCog(commands.Cog):
             await self._session.close()
 
     async def _get_session(self) -> Any:
+        if aiohttp is None:
+            raise RuntimeError("aiohttp not installed")
+        if not API_KEY:
+            raise RuntimeError("BADGEBASE_API_KEY not set")
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=20)
             self._session = aiohttp.ClientSession(
@@ -204,11 +207,11 @@ class BadgeBaseCog(commands.Cog):
             if resp.status in (401, 403):
                 body = await resp.text()
                 log.error("BadgeBase auth failed HTTP %s: %s", resp.status, body[:200])
-                return []
+                raise RuntimeError(f"Auth failed HTTP {resp.status}")
             if resp.status != 200:
                 body = await resp.text()
                 log.warning("BadgeBase HTTP %s: %s", resp.status, body[:200])
-                return []
+                raise RuntimeError(f"HTTP {resp.status}: {body[:120]}")
             data = await resp.json()
         items = data.get("data") if isinstance(data, dict) else None
         if not isinstance(items, list):
@@ -255,7 +258,6 @@ class BadgeBaseCog(commands.Cog):
 
         known = await self.seen.known_ids()
         if not known:
-            # First run: seed DB silently so we don't spam every current badge
             await self.seen.mark_many(badges)
             log.info("BadgeBase bootstrap: seeded %s claimable badge(s)", len(badges))
             return
@@ -271,7 +273,6 @@ class BadgeBaseCog(commands.Cog):
     async def _poll_loop(self) -> None:
         await self.bot.wait_until_ready()
         await asyncio.sleep(8)
-        # Bootstrap without notifications
         try:
             await self._poll_once(bootstrap=True)
         except Exception as e:
@@ -398,6 +399,104 @@ class BadgeBaseCog(commands.Cog):
 
     @badgebase_status.error
     async def badgebase_status_error(
+        self, interaction: discord.Interaction, error: Exception
+    ) -> None:  # type: ignore[misc]
+        if isinstance(error, app_commands.CheckFailure):
+            if interaction.response.is_done():
+                return
+            await interaction.response.send_message(
+                "❌ Du brauchst **Manage Guild** oder musst als **Bot-Dev** hinterlegt sein.",
+                ephemeral=True,
+            )
+        else:
+            raise error
+
+    @app_commands.command(
+        name="badgebase-claimable",
+        description="Aktuell claimbare Badges von BadgeBase laden (API-Test)",
+    )
+    @app_commands.describe(
+        limit="Max. Einträge in der Liste (1–25, Default 10)",
+        detail="Wenn an: zusätzlich 1 Badge als volles Embed zeigen",
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    @admin_or_bot_dev
+    async def badgebase_claimable(
+        self,
+        interaction: discord.Interaction,
+        limit: app_commands.Range[int, 1, 25] = 10,
+        detail: bool = False,
+    ) -> None:
+        if not API_KEY:
+            await interaction.response.send_message(
+                "❌ `BADGEBASE_API_KEY` ist nicht gesetzt.",
+                ephemeral=True,
+            )
+            return
+        if aiohttp is None:
+            await interaction.response.send_message(
+                "❌ `aiohttp` ist nicht installiert.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            badges = await self._fetch_claimable()
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ API-Fehler: `{e}`",
+                ephemeral=True,
+            )
+            return
+
+        if not badges:
+            await interaction.followup.send(
+                "Keine claimbaren Badges gefunden (oder leere Antwort).",
+                ephemeral=True,
+            )
+            return
+
+        known = await self.seen.known_ids()
+        free_n = sum(1 for b in badges if not b.get("paid"))
+        paid_n = len(badges) - free_n
+
+        lines: list[str] = []
+        for b in badges[: int(limit)]:
+            bid = int(b["id"])
+            title = b.get("title") or f"#{bid}"
+            paid = "💰" if b.get("paid") else "🆓"
+            seen = "· gesehen" if bid in known else "· **neu**"
+            link = b.get("url") or ""
+            if link:
+                lines.append(f"{paid} **[{title}]({link})** `{bid}` {seen}")
+            else:
+                lines.append(f"{paid} **{title}** `{bid}` {seen}")
+
+        more = len(badges) - int(limit)
+        footer_extra = f" · +{more} weitere" if more > 0 else ""
+
+        embed = discord.Embed(
+            title=f"Claimable Badges ({len(badges)})",
+            description="\n".join(lines) if lines else "–",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="Free", value=str(free_n), inline=True)
+        embed.add_field(name="Paid", value=str(paid_n), inline=True)
+        embed.add_field(name="In Seen-DB", value=str(len(known)), inline=True)
+        embed.set_footer(text=f"BadgeBase API-Test{footer_extra}")
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+        if detail and badges:
+            sample = badges[0]
+            await interaction.followup.send(
+                embed=_badge_embed(sample, prefix="Beispiel"),
+                ephemeral=True,
+            )
+
+    @badgebase_claimable.error
+    async def badgebase_claimable_error(
         self, interaction: discord.Interaction, error: Exception
     ) -> None:  # type: ignore[misc]
         if isinstance(error, app_commands.CheckFailure):
