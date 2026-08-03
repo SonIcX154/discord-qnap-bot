@@ -1,11 +1,12 @@
 """BadgeBase watcher – Discord notify when new claimable Twitch badges appear.
 
 Channel is configured per guild via /badgebase-channel (not .env).
-Only secret left in env: BADGEBASE_API_KEY.
+Only secrets/defaults in env: BADGEBASE_API_KEY, optional BADGEBASE_TWITCH_LOGIN.
 """
 from __future__ import annotations
 
 import os
+import re
 import time
 import asyncio
 import logging
@@ -32,9 +33,12 @@ except ImportError:
 
 API_BASE = "https://badgebase.de/api/v1"
 API_KEY = os.getenv("BADGEBASE_API_KEY", "").strip()
+DEFAULT_LOGIN = os.getenv("BADGEBASE_TWITCH_LOGIN", "").strip().lstrip("@").lower()
 POLL_SECONDS = max(60, int(os.getenv("BADGEBASE_POLL_SECONDS", "300")))  # default 5 min
 SETTING_KEY = "badgebase.notify_channel"
 SEEN_DB_PATH = os.getenv("BADGEBASE_SEEN_PATH", "data/badgebase_seen.db")
+
+_LOGIN_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 class SeenStore:
@@ -194,26 +198,45 @@ class BadgeBaseCog(commands.Cog):
             )
         return self._session
 
-    async def _fetch_claimable(self) -> list[dict[str, Any]]:
+    async def _api_get(self, path: str, params: Optional[dict[str, str]] = None) -> dict[str, Any]:
         session = await self._get_session()
-        url = f"{API_BASE}/badges"
-        params = {"status": "claimable"}
-        async with session.get(url, params=params) as resp:
+        url = f"{API_BASE}{path}"
+        async with session.get(url, params=params or {}) as resp:
             if resp.status == 429:
                 retry = int(resp.headers.get("Retry-After", "60"))
                 log.warning("BadgeBase rate limited – sleep %ss", retry)
                 await asyncio.sleep(retry)
-                return []
+                raise RuntimeError(f"Rate limited, retry after {retry}s")
             if resp.status in (401, 403):
                 body = await resp.text()
                 log.error("BadgeBase auth failed HTTP %s: %s", resp.status, body[:200])
                 raise RuntimeError(f"Auth failed HTTP {resp.status}")
+            if resp.status == 404:
+                raise RuntimeError("Not found (404) – Login prüfen")
             if resp.status != 200:
                 body = await resp.text()
                 log.warning("BadgeBase HTTP %s: %s", resp.status, body[:200])
                 raise RuntimeError(f"HTTP {resp.status}: {body[:120]}")
             data = await resp.json()
-        items = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return {}
+        return data
+
+    async def _fetch_claimable(self) -> list[dict[str, Any]]:
+        """Full catalogue of currently claimable badges (for notify poll)."""
+        data = await self._api_get("/badges", {"status": "claimable"})
+        items = data.get("data")
+        if not isinstance(items, list):
+            return []
+        return [b for b in items if isinstance(b, dict) and b.get("id") is not None]
+
+    async def _fetch_missing(self, login: str) -> list[dict[str, Any]]:
+        """Badges this user does not own yet (default: only currently claimable)."""
+        login = login.strip().lstrip("@").lower()
+        if not _LOGIN_RE.match(login):
+            raise RuntimeError("Ungültiger Twitch-Login (nur A–Z, 0–9, _)")
+        data = await self._api_get(f"/user/{login}/missing")
+        items = data.get("data")
         if not isinstance(items, list):
             return []
         return [b for b in items if isinstance(b, dict) and b.get("id") is not None]
@@ -390,6 +413,11 @@ class BadgeBaseCog(commands.Cog):
             inline=True,
         )
         embed.add_field(
+            name="Default-Login",
+            value=f"`{DEFAULT_LOGIN}`" if DEFAULT_LOGIN else "*nicht gesetzt*",
+            inline=True,
+        )
+        embed.add_field(
             name="Notify-Channel",
             value=f"<#{channel_id}>" if channel_id else "*nicht gesetzt*",
             inline=False,
@@ -413,18 +441,20 @@ class BadgeBaseCog(commands.Cog):
 
     @app_commands.command(
         name="badgebase-claimable",
-        description="Aktuell claimbare Badges von BadgeBase laden (API-Test)",
+        description="Badges die du noch nicht hast und die gerade claimable sind",
     )
     @app_commands.describe(
-        limit="Max. Einträge in der Liste (1–25, Default 10)",
-        detail="Wenn an: zusätzlich 1 Badge als volles Embed zeigen",
+        login="Twitch-Login (sonst BADGEBASE_TWITCH_LOGIN aus .env)",
+        limit="Max. Einträge in der Liste (1–25, Default 15)",
+        detail="Zusätzlich 1 Badge als volles Embed zeigen",
     )
     @app_commands.default_permissions(manage_guild=True)
     @admin_or_bot_dev
     async def badgebase_claimable(
         self,
         interaction: discord.Interaction,
-        limit: app_commands.Range[int, 1, 25] = 10,
+        login: Optional[str] = None,
+        limit: app_commands.Range[int, 1, 25] = 15,
         detail: bool = False,
     ) -> None:
         if not API_KEY:
@@ -440,24 +470,32 @@ class BadgeBaseCog(commands.Cog):
             )
             return
 
+        resolved = (login or DEFAULT_LOGIN or "").strip().lstrip("@").lower()
+        if not resolved:
+            await interaction.response.send_message(
+                "❌ Kein Twitch-Login.\n"
+                "Entweder `login:` angeben oder `BADGEBASE_TWITCH_LOGIN` in der `.env` setzen.",
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.defer(ephemeral=True)
         try:
-            badges = await self._fetch_claimable()
+            badges = await self._fetch_missing(resolved)
         except Exception as e:
             await interaction.followup.send(
-                f"❌ API-Fehler: `{e}`",
+                f"❌ API-Fehler für `{resolved}`: `{e}`",
                 ephemeral=True,
             )
             return
 
         if not badges:
             await interaction.followup.send(
-                "Keine claimbaren Badges gefunden (oder leere Antwort).",
+                f"✅ **@{resolved}** – keine fehlenden claimable Badges.",
                 ephemeral=True,
             )
             return
 
-        known = await self.seen.known_ids()
         free_n = sum(1 for b in badges if not b.get("paid"))
         paid_n = len(badges) - free_n
 
@@ -466,32 +504,30 @@ class BadgeBaseCog(commands.Cog):
             bid = int(b["id"])
             title = b.get("title") or f"#{bid}"
             paid = "💰" if b.get("paid") else "🆓"
-            seen = "· gesehen" if bid in known else "· **neu**"
             link = b.get("url") or ""
             if link:
-                lines.append(f"{paid} **[{title}]({link})** `{bid}` {seen}")
+                lines.append(f"{paid} **[{title}]({link})** `{bid}`")
             else:
-                lines.append(f"{paid} **{title}** `{bid}` {seen}")
+                lines.append(f"{paid} **{title}** `{bid}`")
 
         more = len(badges) - int(limit)
         footer_extra = f" · +{more} weitere" if more > 0 else ""
 
         embed = discord.Embed(
-            title=f"Claimable Badges ({len(badges)})",
+            title=f"Fehlende claimable Badges · @{resolved}",
             description="\n".join(lines) if lines else "–",
             color=discord.Color.green(),
         )
+        embed.add_field(name="Gesamt", value=str(len(badges)), inline=True)
         embed.add_field(name="Free", value=str(free_n), inline=True)
         embed.add_field(name="Paid", value=str(paid_n), inline=True)
-        embed.add_field(name="In Seen-DB", value=str(len(known)), inline=True)
-        embed.set_footer(text=f"BadgeBase API-Test{footer_extra}")
+        embed.set_footer(text=f"GET /user/{resolved}/missing{footer_extra}")
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
         if detail and badges:
-            sample = badges[0]
             await interaction.followup.send(
-                embed=_badge_embed(sample, prefix="Beispiel"),
+                embed=_badge_embed(badges[0], prefix="Beispiel"),
                 ephemeral=True,
             )
 
