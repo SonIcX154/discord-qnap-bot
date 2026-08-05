@@ -113,7 +113,7 @@ async def fetch_recent_messages(
     channel: str,
     *,
     after_ts: float,
-    limit: int = 100,
+    limit: int = 50,
     api_base: str = DEFAULT_API,
 ) -> list[CatchupMessage]:
     """Load recent PRIVMSGs for channel with tmi-sent-ts > after_ts (unix seconds)."""
@@ -132,7 +132,7 @@ async def fetch_recent_messages(
         "Accept": "application/json",
     }
 
-    timeout = aiohttp.ClientTimeout(total=20)
+    timeout = aiohttp.ClientTimeout(total=15)
     async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
         async with session.get(url, params=params) as resp:
             body_txt = await resp.text()
