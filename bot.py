@@ -65,6 +65,14 @@ class QNAPBot(commands.Bot):
             log.warning("No cogs directory found.")
         log.info("Cog loading complete.")
 
+        # Twitch mirror: robotty recent-messages catch-up after IRC reconnect
+        try:
+            from utils.twitch_catchup_install import install_catchup
+
+            install_catchup()
+        except Exception:
+            log.exception("Twitch catch-up install failed (mirror still works without it)")
+
         # Global slash-command error handler (local @command.error still wins)
         self.tree.error(self.on_app_command_error)
 
