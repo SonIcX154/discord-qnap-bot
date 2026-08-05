@@ -50,6 +50,18 @@ class QNAPBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         """Load all cogs automatically on startup."""
+        # Patch Twitch mirror classes before the cog starts its IRC supervisor
+        try:
+            # Import cog module first so classes exist, without going through load_extension
+            import cogs.twitch_mirror  # noqa: F401
+            from utils.twitch_catchup_install import install_catchup
+
+            install_catchup()
+        except Exception:
+            log.exception(
+                "Twitch catch-up install failed (mirror still works without it)"
+            )
+
         log.info("Loading cogs…")
         cogs_dir = "./cogs"
         if os.path.exists(cogs_dir):
@@ -64,14 +76,6 @@ class QNAPBot(commands.Bot):
         else:
             log.warning("No cogs directory found.")
         log.info("Cog loading complete.")
-
-        # Twitch mirror: robotty recent-messages catch-up after IRC reconnect
-        try:
-            from utils.twitch_catchup_install import install_catchup
-
-            install_catchup()
-        except Exception:
-            log.exception("Twitch catch-up install failed (mirror still works without it)")
 
         # Global slash-command error handler (local @command.error still wins)
         self.tree.error(self.on_app_command_error)
