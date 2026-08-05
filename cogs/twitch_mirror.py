@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import time
 import asyncio
@@ -91,6 +92,11 @@ except ImportError:
         compose_mirror_content,
     )
 
+# No IRC traffic (incl. server PINGs) for this long → treat as blackhole and reconnect.
+# Twitch typically PINGs every ~4 minutes; default 5 min is slightly above that.
+IRC_IDLE_SECONDS = max(120, int(os.getenv("TWITCH_IRC_IDLE_SECONDS", "300")))
+IRC_WATCHDOG_INTERVAL = 30.0
+
 
 class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # type: ignore[misc]
     def __init__(
@@ -115,6 +121,8 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         self._delete_queue: asyncio.Queue[tuple[str, Optional[str]]] = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None
         self.connected = False
+        self._was_ready = False
+        self._last_irc_activity = time.time()
         self._avatar_cache: dict[str, Optional[str]] = {}
         self._avatar_lock = asyncio.Lock()
 
@@ -140,6 +148,9 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         self._has_delete_scope: bool = False
         self._has_send_scope: bool = False
         self._helix_client_id: str = TWITCH_CLIENT_ID
+
+    def _touch_irc(self) -> None:
+        self._last_irc_activity = time.time()
 
     def _track_outbound_tid(self, twitch_id: str) -> None:
         self._outbound_twitch_ids[twitch_id] = None
@@ -376,6 +387,8 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
 
     async def event_ready(self) -> None:
         self.connected = True
+        self._was_ready = True
+        self._touch_irc()
         nick = getattr(self, "nick", None) or TWITCH_NICK or "?"
         if nick and nick != "?":
             self._bot_logins.add(str(nick).lower().lstrip("#"))
@@ -387,6 +400,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             )
         log.info("Echo filter: only [Discord]-prefixed (bot self-chat mirrored)")
         log.info("CLEARCHAT window: last %ss", CLEAR_WINDOW_SECONDS)
+        log.info("IRC idle watchdog: %ss", IRC_IDLE_SECONDS)
         await self._load_persisted_map()
         await self._resolve_helix_ids()
         if DISCORD_TO_TWITCH:
@@ -396,7 +410,13 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
         if self._worker_task is None or self._worker_task.done():
             self._worker_task = asyncio.create_task(self._discord_worker())
 
+    async def event_error(self, error: Exception, data: Optional[str] = None) -> None:  # type: ignore[override]
+        self.connected = False
+        snippet = (data or "")[:200]
+        log.error("Twitch event_error: %s%s", error, f" data={snippet!r}" if snippet else "")
+
     async def event_message(self, message) -> None:  # type: ignore[no-untyped-def]
+        self._touch_irc()
         try:
             if getattr(message, "echo", False):
                 tid = twitch_msg_id(message)
@@ -465,6 +485,8 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
             log.exception("event_message error: %s", e)
 
     async def event_raw_data(self, data: str) -> None:  # type: ignore[no-untyped-def]
+        # Any IRC traffic (PING/PONG, JOIN, PRIVMSG, …) proves the socket is alive.
+        self._touch_irc()
         if not data:
             return
 
@@ -486,6 +508,7 @@ class TwitchMirrorBot(twitch_commands.Bot if twitch_commands else object):  # ty
                 await self._delete_queue.put(("all", None))
 
     async def event_message_delete(self, message) -> None:  # type: ignore[no-untyped-def]
+        self._touch_irc()
         tid = twitch_msg_id(message)
         if tid:
             await self._delete_queue.put(("id", tid))
@@ -961,26 +984,117 @@ class TwitchMirrorCog(commands.Cog):
             log.error("Map DB init failed: %s", e)
 
         self._discord_channel_id = channel_id
-        self._twitch = TwitchMirrorBot(self.bot, channel_id, store=self._store)
         self._task = asyncio.create_task(self._run_twitch())
-        log.info("Starting client for #%s…", TWITCH_CHANNEL)
+        log.info(
+            "Starting Twitch client for #%s (idle watchdog %ss)…",
+            TWITCH_CHANNEL, IRC_IDLE_SECONDS,
+        )
+
+    async def _shutdown_client(self, client: Optional[TwitchMirrorBot]) -> None:
+        if client is None:
+            return
+        client.connected = False
+        try:
+            await client.close()
+        except Exception as e:
+            log.debug("Twitch client.close: %s", e)
+        wt = getattr(client, "_worker_task", None)
+        if wt is not None and not wt.done():
+            wt.cancel()
+            try:
+                await wt
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _irc_watchdog(
+        self,
+        client: TwitchMirrorBot,
+        start_task: asyncio.Task,
+    ) -> None:
+        """Detect blackholed IRC sockets (no traffic incl. PINGs) and force reconnect."""
+        while not start_task.done():
+            await asyncio.sleep(IRC_WATCHDOG_INTERVAL)
+            if not client.connected:
+                continue
+            idle = time.time() - client._last_irc_activity
+            if idle >= IRC_IDLE_SECONDS:
+                log.warning(
+                    "IRC idle for %.0fs (limit %ss) – forcing reconnect "
+                    "(likely network blackhole / gateway change)",
+                    idle, IRC_IDLE_SECONDS,
+                )
+                await self._shutdown_client(client)
+                return
 
     async def _run_twitch(self) -> None:
-        assert self._twitch is not None
+        """Supervise the Twitch IRC client: recreate on exit, crash, or idle timeout."""
         backoff = 5.0
         while True:
+            client: Optional[TwitchMirrorBot] = None
+            start_task: Optional[asyncio.Task] = None
+            watch_task: Optional[asyncio.Task] = None
+            was_ready = False
             try:
-                await self._twitch.start()
+                client = TwitchMirrorBot(
+                    self.bot, self._discord_channel_id, store=self._store
+                )
+                self._twitch = client
+                start_task = asyncio.create_task(
+                    client.start(), name="twitch-mirror-start"
+                )
+                watch_task = asyncio.create_task(
+                    self._irc_watchdog(client, start_task),
+                    name="twitch-mirror-watchdog",
+                )
+
+                done, pending = await asyncio.wait(
+                    {start_task, watch_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for t in pending:
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+                was_ready = bool(getattr(client, "_was_ready", False))
+
+                if start_task in done and not start_task.cancelled():
+                    exc = start_task.exception()
+                    if exc is not None:
+                        log.error(
+                            "Twitch client crashed: %s – retry in %.0fs",
+                            exc, backoff,
+                        )
+                    else:
+                        log.warning(
+                            "Twitch client exited – reconnecting in %.0fs",
+                            backoff,
+                        )
+                else:
+                    log.warning(
+                        "Twitch reconnect scheduled in %.0fs (watchdog or cancel)",
+                        backoff,
+                    )
+
             except asyncio.CancelledError:
+                await self._shutdown_client(client)
+                self._twitch = None
                 break
             except Exception as e:
-                log.error("Connection error: %s – retry in %.0fs", e, backoff)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 1.5, 120.0)
-            else:
-                log.info("Disconnected – reconnecting in 10s")
-                await asyncio.sleep(10.0)
+                log.error("Twitch run loop error: %s – retry in %.0fs", e, backoff)
+            finally:
+                if client is not None:
+                    await self._shutdown_client(client)
+                if self._twitch is client:
+                    self._twitch = None
+
+            await asyncio.sleep(backoff)
+            if was_ready:
                 backoff = 5.0
+            else:
+                backoff = min(backoff * 1.5, 120.0)
 
     async def cog_unload(self) -> None:
         if self._task and not self._task.done():
@@ -989,13 +1103,8 @@ class TwitchMirrorCog(commands.Cog):
                 await self._task
             except (asyncio.CancelledError, Exception):
                 pass
-        if self._twitch is not None:
-            try:
-                await self._twitch.close()
-            except Exception:
-                pass
-            if self._twitch._worker_task and not self._twitch._worker_task.done():
-                self._twitch._worker_task.cancel()
+        await self._shutdown_client(self._twitch)
+        self._twitch = None
 
     def _is_mirror_channel(self, channel_id: Optional[int]) -> bool:
         return bool(self._discord_channel_id and channel_id == self._discord_channel_id)
@@ -1092,6 +1201,9 @@ class TwitchMirrorCog(commands.Cog):
             and self._twitch._moderator_id
             and self._twitch._helix_client_id
         )
+        idle_s = 0
+        if self._twitch is not None:
+            idle_s = int(max(0, time.time() - self._twitch._last_irc_activity))
 
         db_counts = {"total": 0, "inbound": 0, "outbound": 0}
         try:
@@ -1112,6 +1224,11 @@ class TwitchMirrorCog(commands.Cog):
         embed.add_field(
             name="Connection",
             value="🟢 connected" if connected else "🔴 disconnected / starting",
+            inline=True,
+        )
+        embed.add_field(
+            name="IRC idle",
+            value=f"`{idle_s}s` / limit `{IRC_IDLE_SECONDS}s`",
             inline=True,
         )
         embed.add_field(
