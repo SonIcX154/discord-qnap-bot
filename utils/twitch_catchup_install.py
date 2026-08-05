@@ -1,11 +1,11 @@
-"""Runtime patches: catch-up missed Twitch chat via robotty after IRC reconnect."""
+"""Runtime patches: catch-up missed Twitch chat via robotty (reconnect + periodic)."""
 from __future__ import annotations
 
 import os
 import time
 import asyncio
 import logging
-from typing import Optional, Any
+from typing import Any
 
 import discord
 
@@ -17,7 +17,10 @@ CATCHUP_ENABLED = os.getenv("TWITCH_CATCHUP", "1").strip().lower() not in (
     "no",
     "off",
 )
-CATCHUP_LIMIT = max(10, min(500, int(os.getenv("TWITCH_CATCHUP_LIMIT", "100"))))
+# Small payload – enough for quiet/medium chats over a few minutes
+CATCHUP_LIMIT = max(10, min(500, int(os.getenv("TWITCH_CATCHUP_LIMIT", "50"))))
+# 0 = disable periodic; default 5 minutes
+CATCHUP_INTERVAL = max(0, int(os.getenv("TWITCH_CATCHUP_INTERVAL", "300")))
 CATCHUP_API = os.getenv(
     "TWITCH_CATCHUP_API",
     "https://recent-messages.robotty.de/api/v2/recent-messages",
@@ -46,12 +49,21 @@ def install_catchup() -> None:
     TwitchMirrorCog = tm.TwitchMirrorCog
 
     # --- Bot: catch-up runner -------------------------------------------------
-    async def _catchup_from_robotty(self: Any, after_ts: float) -> None:
+    async def _catchup_from_robotty(
+        self: Any,
+        after_ts: float,
+        *,
+        announce: bool = True,
+        delay: float = 0.0,
+    ) -> int:
+        """Fetch robotty history and enqueue unknown msgs. Returns count posted."""
         aiohttp = tm.aiohttp
         if aiohttp is None:
             log.warning("Catch-up skipped: aiohttp missing")
-            return
-        await asyncio.sleep(2.0)
+            return 0
+        if delay > 0:
+            await asyncio.sleep(delay)
+
         try:
             messages = await fetch_recent_messages(
                 tm.TWITCH_CHANNEL,
@@ -61,14 +73,14 @@ def install_catchup() -> None:
             )
         except Exception as e:
             log.exception("Catch-up fetch failed: %s", e)
-            return
+            return 0
 
         if not messages:
-            log.info(
-                "Catch-up: no messages after %s (robotty)",
+            log.debug(
+                "Catch-up: nothing after %s",
                 time.strftime("%H:%M:%S", time.localtime(after_ts)),
             )
-            return
+            return 0
 
         fresh = []
         for m in messages:
@@ -79,11 +91,11 @@ def install_catchup() -> None:
             fresh.append(m)
 
         if not fresh:
-            log.info(
-                "Catch-up: %s robotty msgs, all already known/skipped",
+            log.debug(
+                "Catch-up: %s robotty msgs, all known/skipped",
                 len(messages),
             )
-            return
+            return 0
 
         log.info(
             "Catch-up: enqueue %s missed msg(s) since %s",
@@ -91,24 +103,27 @@ def install_catchup() -> None:
             time.strftime("%H:%M:%S", time.localtime(after_ts)),
         )
 
-        try:
-            await self.discord_bot.wait_until_ready()
-            ch = self._text_channel or self.discord_bot.get_channel(self.discord_channel_id)
-            if ch is None:
-                try:
-                    ch = await self.discord_bot.fetch_channel(self.discord_channel_id)
-                except Exception:
-                    ch = None
-            if isinstance(ch, discord.TextChannel):
-                first = fresh[0].time_label()
-                last = fresh[-1].time_label()
-                await ch.send(
-                    f"♻️ **Catch-up** · `{len(fresh)}` Nachrichten nachgeholt "
-                    f"(`{first}`–`{last}`, recent-messages)",
-                    allowed_mentions=discord.AllowedMentions.none(),
+        if announce:
+            try:
+                await self.discord_bot.wait_until_ready()
+                ch = self._text_channel or self.discord_bot.get_channel(
+                    self.discord_channel_id
                 )
-        except Exception as e:
-            log.warning("Catch-up notice failed: %s", e)
+                if ch is None:
+                    try:
+                        ch = await self.discord_bot.fetch_channel(self.discord_channel_id)
+                    except Exception:
+                        ch = None
+                if isinstance(ch, discord.TextChannel):
+                    first = fresh[0].time_label()
+                    last = fresh[-1].time_label()
+                    await ch.send(
+                        f"♻️ **Catch-up** · `{len(fresh)}` Nachrichten nachgeholt "
+                        f"(`{first}`–`{last}`, recent-messages)",
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+            except Exception as e:
+                log.warning("Catch-up notice failed: %s", e)
 
         for m in fresh:
             label = m.time_label()
@@ -118,31 +133,89 @@ def install_catchup() -> None:
             )
             await asyncio.sleep(0.05)
 
+        return len(fresh)
+
     TwitchMirrorBot._catchup_from_robotty = _catchup_from_robotty  # type: ignore[attr-defined]
+
+    async def _periodic_catchup_loop(self: Any) -> None:
+        """While IRC looks connected, poll robotty every CATCHUP_INTERVAL seconds."""
+        if CATCHUP_INTERVAL <= 0:
+            return
+        log.info("Periodic catch-up every %ss (limit=%s)", CATCHUP_INTERVAL, CATCHUP_LIMIT)
+        try:
+            while True:
+                await asyncio.sleep(float(CATCHUP_INTERVAL))
+                if not getattr(self, "connected", False):
+                    continue
+                # Look back one interval (+30s slack), never older than last IRC activity window
+                after = time.time() - float(CATCHUP_INTERVAL) - 30.0
+                watermark = getattr(self, "_catchup_watermark_ts", None)
+                if watermark is not None:
+                    after = max(after, float(watermark))
+                try:
+                    n = await self._catchup_from_robotty(
+                        after, announce=True, delay=0.0
+                    )
+                    # Advance watermark so we don't re-scan the same window forever
+                    self._catchup_watermark_ts = time.time() - 5.0
+                    if n:
+                        log.debug("Periodic catch-up posted %s msg(s)", n)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log.warning("Periodic catch-up error: %s", e)
+        except asyncio.CancelledError:
+            log.debug("Periodic catch-up stopped")
+
+    TwitchMirrorBot._periodic_catchup_loop = _periodic_catchup_loop  # type: ignore[attr-defined]
 
     orig_ready = TwitchMirrorBot.event_ready
 
     async def event_ready(self: Any) -> None:
         await orig_ready(self)
+
+        # One-shot catch-up after reconnect
         after = getattr(self, "_catchup_after_ts", None)
-        if not CATCHUP_ENABLED or after is None:
-            return
-        self._catchup_after_ts = None
-        task = getattr(self, "_catchup_task", None)
-        if task is not None and not task.done():
-            return
-        self._catchup_task = asyncio.create_task(
-            self._catchup_from_robotty(float(after)),
-            name="twitch-catchup",
-        )
+        if CATCHUP_ENABLED and after is not None:
+            self._catchup_after_ts = None
+            task = getattr(self, "_catchup_task", None)
+            if task is None or task.done():
+                self._catchup_task = asyncio.create_task(
+                    self._catchup_from_robotty(float(after), announce=True, delay=2.0),
+                    name="twitch-catchup",
+                )
+
+        # Periodic catch-up while this client stays connected
+        if CATCHUP_ENABLED and CATCHUP_INTERVAL > 0:
+            pt = getattr(self, "_periodic_catchup_task", None)
+            if pt is None or pt.done():
+                self._periodic_catchup_task = asyncio.create_task(
+                    self._periodic_catchup_loop(),
+                    name="twitch-catchup-periodic",
+                )
 
     TwitchMirrorBot.event_ready = event_ready  # type: ignore[method-assign]
 
-    # --- Cog: remember window + pass to new client -----------------------------
-    orig_run = TwitchMirrorCog._run_twitch
+    # Cancel periodic task when client is shut down
+    orig_shutdown = TwitchMirrorCog._shutdown_client
 
+    async def _shutdown_client(self: Any, client: Any) -> None:
+        if client is not None:
+            for attr in ("_catchup_task", "_periodic_catchup_task"):
+                t = getattr(client, attr, None)
+                if t is not None and not t.done():
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
+        await orig_shutdown(self, client)
+
+    TwitchMirrorCog._shutdown_client = _shutdown_client  # type: ignore[method-assign]
+
+    # --- Cog: remember window + pass to new client -----------------------------
     async def _run_twitch(self: Any) -> None:
-        """Wrap original supervisor to record catch-up window and pass it on."""
+        """Supervise IRC client; record catch-up window across reconnects."""
         if not hasattr(self, "_pending_catchup_ts"):
             self._pending_catchup_ts = None
 
@@ -229,7 +302,6 @@ def install_catchup() -> None:
 
     TwitchMirrorCog._run_twitch = _run_twitch  # type: ignore[method-assign]
 
-    # Ensure pending attr exists on new cogs
     orig_cog_init = TwitchMirrorCog.__init__
 
     def cog_init(self: Any, bot: Any) -> None:
@@ -240,8 +312,9 @@ def install_catchup() -> None:
 
     _installed = True
     log.info(
-        "Catch-up install: enabled=%s limit=%s api=%s",
+        "Catch-up install: enabled=%s limit=%s interval=%ss api=%s",
         CATCHUP_ENABLED,
         CATCHUP_LIMIT,
+        CATCHUP_INTERVAL,
         CATCHUP_API,
     )
