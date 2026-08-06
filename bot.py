@@ -37,6 +37,13 @@ intents.guilds = True
 intents.members = True
 intents.message_content = True  # Needed for BackupCog (reading message content)
 
+# Redundant – everything lives in /bot-status now
+LEGACY_STATUS_COMMANDS = (
+    "twitch-mirror-status",
+    "backup-status",
+    "badgebase-status",
+)
+
 
 class QNAPBot(commands.Bot):
     def __init__(self) -> None:
@@ -76,6 +83,12 @@ class QNAPBot(commands.Bot):
         else:
             log.warning("No cogs directory found.")
         log.info("Cog loading complete.")
+
+        # Drop legacy per-cog status commands before slash sync
+        for name in LEGACY_STATUS_COMMANDS:
+            removed = self.tree.remove_command(name)
+            if removed is not None:
+                log.info("  Removed legacy slash command /%s", name)
 
         # Global slash-command error handler (local @command.error still wins)
         self.tree.error(self.on_app_command_error)
