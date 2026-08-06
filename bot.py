@@ -57,17 +57,6 @@ class QNAPBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         """Load all cogs automatically on startup."""
-        # Attach catch-up mixin before TwitchMirrorCog starts the IRC supervisor
-        try:
-            import cogs.twitch_mirror  # noqa: F401
-            from utils.twitch_catchup_install import wire_catchup
-
-            wire_catchup()
-        except Exception:
-            log.exception(
-                "Twitch catch-up wire failed (mirror still works without it)"
-            )
-
         log.info("Loading cogs…")
         cogs_dir = "./cogs"
         if os.path.exists(cogs_dir):
