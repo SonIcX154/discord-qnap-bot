@@ -1,11 +1,11 @@
-"""Robotty catch-up methods mixed into TwitchMirrorBot."""
+"""Robotty catch-up mixed into TwitchMirrorBot + reconnect supervisor."""
 from __future__ import annotations
 
 import os
 import time
 import asyncio
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import discord
 
@@ -57,19 +57,10 @@ class TwitchCatchupMixin:
         except ImportError:
             from .twitch_helpers import TWITCH_CHANNEL
 
-        aiohttp = getattr(self, "_aiohttp_ref", None)
-        if aiohttp is None:
-            try:
-                import cogs.twitch_mirror as tm
-
-                aiohttp = tm.aiohttp
-            except Exception:
-                try:
-                    import aiohttp as _aiohttp
-
-                    aiohttp = _aiohttp
-                except ImportError:
-                    aiohttp = None
+        try:
+            import aiohttp
+        except ImportError:
+            aiohttp = None  # type: ignore
 
         if aiohttp is None:
             log.warning("Catch-up skipped: aiohttp missing")
@@ -199,3 +190,96 @@ class TwitchCatchupMixin:
                     await t
                 except (asyncio.CancelledError, Exception):
                     pass
+
+
+async def run_twitch_supervisor(cog: Any) -> None:
+    """IRC client supervisor with catch-up window across reconnects.
+
+    Used as TwitchMirrorCog._run_twitch body (native, no monkeypatch).
+    """
+    try:
+        from cogs import twitch_mirror as tm
+    except ImportError:
+        import cogs.twitch_mirror as tm  # type: ignore
+
+    if not hasattr(cog, "_pending_catchup_ts"):
+        cog._pending_catchup_ts = None
+
+    backoff = 5.0
+    while True:
+        client = None
+        start_task = None
+        watch_task = None
+        was_ready = False
+        try:
+            catchup_ts = cog._pending_catchup_ts
+            cog._pending_catchup_ts = None
+            client = tm.TwitchMirrorBot(
+                cog.bot, cog._discord_channel_id, store=cog._store
+            )
+            client._catchup_after_ts = catchup_ts
+            cog._twitch = client
+            start_task = asyncio.create_task(client.start(), name="twitch-mirror-start")
+            watch_task = asyncio.create_task(
+                cog._irc_watchdog(client, start_task),
+                name="twitch-mirror-watchdog",
+            )
+
+            done, pending = await asyncio.wait(
+                {start_task, watch_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            was_ready = bool(getattr(client, "_was_ready", False))
+
+            if start_task in done and not start_task.cancelled():
+                exc = start_task.exception()
+                if exc is not None:
+                    log.error(
+                        "Twitch client crashed: %s – retry in %.0fs",
+                        exc,
+                        backoff,
+                    )
+                else:
+                    log.warning(
+                        "Twitch client exited – reconnecting in %.0fs",
+                        backoff,
+                    )
+            else:
+                log.warning(
+                    "Twitch reconnect scheduled in %.0fs (watchdog or cancel)",
+                    backoff,
+                )
+
+        except asyncio.CancelledError:
+            await cog._shutdown_client(client)
+            cog._twitch = None
+            break
+        except Exception as e:
+            log.error("Twitch run loop error: %s – retry in %.0fs", e, backoff)
+        finally:
+            if client is not None:
+                if getattr(client, "_was_ready", False) and CATCHUP_ENABLED:
+                    cog._pending_catchup_ts = float(client._last_irc_activity)
+                    log.info(
+                        "Catch-up window starts at %s",
+                        time.strftime(
+                            "%H:%M:%S",
+                            time.localtime(cog._pending_catchup_ts),
+                        ),
+                    )
+                await cog._shutdown_client(client)
+            if cog._twitch is client:
+                cog._twitch = None
+
+        await asyncio.sleep(backoff)
+        if was_ready:
+            backoff = 5.0
+        else:
+            backoff = min(backoff * 1.5, 120.0)
