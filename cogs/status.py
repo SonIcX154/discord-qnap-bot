@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
 import aiosqlite
 import discord
@@ -162,7 +162,7 @@ class StatusCog(commands.Cog):
                 f"{idle_part}{db_part}"
             )
         except Exception as e:
-            return f"unavailable (`{e}`")"
+            return f"unavailable (`{e}`)"
 
     async def _backup_line(self) -> str:
         try:
@@ -254,7 +254,7 @@ class StatusCog(commands.Cog):
             try:
                 if interaction.guild:
                     settings = getattr(cog, "settings", None)
-                    key = getattr(cog, "SETTING_KEY", None) or "badgebase.notify_channel"
+                    key = "badgebase.notify_channel"
                     if settings is not None and hasattr(settings, "get_channel"):
                         cid = await settings.get_channel(interaction.guild.id, key)
                         if cid:
@@ -262,22 +262,20 @@ class StatusCog(commands.Cog):
             except Exception:
                 pass
 
-            poll = getattr(cog, "POLL_SECONDS", None)
-            # module-level constant if missing on instance
-            if poll is None:
-                try:
-                    import cogs.badgebase as bb
+            poll: Any = "?"
+            try:
+                import cogs.badgebase as bb
 
-                    poll = getattr(bb, "POLL_SECONDS", "?")
-                except Exception:
-                    poll = "?"
+                poll = getattr(bb, "POLL_SECONDS", "?")
+            except Exception:
+                pass
 
             return (
                 f"API: {'✅' if key_ok else '❌'} · known **{known_n}**\n"
                 f"Poll: `{poll}s` · channel: {channel_txt}"
             )
         except Exception as e:
-            return f"unavailable (`{e}`")"
+            return f"unavailable (`{e}`)"
 
 
 async def setup(bot: commands.Bot) -> None:
