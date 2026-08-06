@@ -53,7 +53,6 @@ class StatusCog(commands.Cog):
     )
     @app_commands.default_permissions(administrator=True)
     async def status_overview(self, interaction: discord.Interaction) -> None:
-        # Method must NOT be named bot_* / cog_* (discord.py restriction)
         await interaction.response.defer(ephemeral=True)
 
         latency_ms = round(self.bot.latency * 1000)
@@ -119,7 +118,6 @@ class StatusCog(commands.Cog):
             return f"error: `{e}`"
 
     async def _twitch_line(self) -> str:
-        """Never fail the whole /bot-status if mirror is missing or broken."""
         try:
             twitch_cog = self.bot.get_cog("TwitchMirrorCog")
             if twitch_cog is None:
@@ -262,7 +260,7 @@ class StatusCog(commands.Cog):
             except Exception:
                 pass
 
-            poll: Any = "?"
+            poll = "?"
             try:
                 import cogs.badgebase as bb
 
