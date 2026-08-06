@@ -127,7 +127,6 @@ def _fmt_dt(value: Optional[str]) -> str:
 
 
 def _is_paid(badge: dict[str, Any]) -> bool:
-    """Robust paid detection (bool / 0-1 / strings)."""
     raw = badge.get("paid")
     if isinstance(raw, bool):
         return raw
@@ -237,7 +236,6 @@ class BadgeBaseCog(commands.Cog):
         return data
 
     async def _fetch_claimable(self, *, price: Optional[str] = None) -> list[dict[str, Any]]:
-        """Catalogue of currently claimable badges (optional price=free|paid)."""
         params: dict[str, str] = {"status": "claimable"}
         if price in ("free", "paid"):
             params["price"] = price
@@ -248,12 +246,10 @@ class BadgeBaseCog(commands.Cog):
         return [b for b in items if isinstance(b, dict) and b.get("id") is not None]
 
     async def _paid_id_set(self) -> set[int]:
-        """IDs of claimable badges classified as paid by the catalogue."""
         paid = await self._fetch_claimable(price="paid")
         return {int(b["id"]) for b in paid}
 
     async def _enrich_paid_flags(self, badges: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """/user/.../missing often omits `paid` – fill from catalogue price filter."""
         if not badges:
             return badges
         try:
@@ -269,7 +265,6 @@ class BadgeBaseCog(commands.Cog):
             if bid in paid_ids:
                 copy["paid"] = True
             elif "paid" not in copy or copy.get("paid") is None:
-                # only force false when catalogue didn't mark it paid
                 copy["paid"] = False
             else:
                 copy["paid"] = _is_paid(copy)
@@ -277,7 +272,6 @@ class BadgeBaseCog(commands.Cog):
         return out
 
     async def _fetch_missing(self, login: str) -> list[dict[str, Any]]:
-        """Badges this user does not own yet (default: only currently claimable)."""
         login = login.strip().lstrip("@").lower()
         if not _LOGIN_RE.match(login):
             raise RuntimeError("Ungültiger Twitch-Login (nur A–Z, 0–9, _)")
@@ -336,7 +330,6 @@ class BadgeBaseCog(commands.Cog):
         if not fresh:
             return
 
-        # Enrich paid flags for nicer embeds
         try:
             fresh = await self._enrich_paid_flags(fresh)
         except Exception:
@@ -422,64 +415,6 @@ class BadgeBaseCog(commands.Cog):
 
     @badgebase_channel.error
     async def badgebase_channel_error(
-        self, interaction: discord.Interaction, error: Exception
-    ) -> None:  # type: ignore[misc]
-        if isinstance(error, app_commands.CheckFailure):
-            if interaction.response.is_done():
-                return
-            await interaction.response.send_message(
-                "❌ Du brauchst **Manage Guild** oder musst als **Bot-Dev** hinterlegt sein.",
-                ephemeral=True,
-            )
-        else:
-            raise error
-
-    @app_commands.command(
-        name="badgebase-status",
-        description="Status des BadgeBase-Watchers",
-    )
-    @app_commands.default_permissions(manage_guild=True)
-    @admin_or_bot_dev
-    async def badgebase_status(self, interaction: discord.Interaction) -> None:
-        known = await self.seen.known_ids()
-        channel_id = None
-        if interaction.guild:
-            channel_id = await self.settings.get_channel(interaction.guild.id, SETTING_KEY)
-
-        embed = discord.Embed(
-            title="BadgeBase Status",
-            color=discord.Color.blurple() if API_KEY else discord.Color.orange(),
-        )
-        embed.add_field(
-            name="API-Key",
-            value="✅ gesetzt" if API_KEY else "❌ fehlt (`BADGEBASE_API_KEY`)",
-            inline=True,
-        )
-        embed.add_field(
-            name="Poll-Intervall",
-            value=f"`{POLL_SECONDS}s`",
-            inline=True,
-        )
-        embed.add_field(
-            name="Bekannte Badges",
-            value=f"`{len(known)}`",
-            inline=True,
-        )
-        embed.add_field(
-            name="Default-Login",
-            value=f"`{DEFAULT_LOGIN}`" if DEFAULT_LOGIN else "*nicht gesetzt*",
-            inline=True,
-        )
-        embed.add_field(
-            name="Notify-Channel",
-            value=f"<#{channel_id}>" if channel_id else "*nicht gesetzt*",
-            inline=False,
-        )
-        embed.set_footer(text="Channel setzen: /badgebase-channel")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @badgebase_status.error
-    async def badgebase_status_error(
         self, interaction: discord.Interaction, error: Exception
     ) -> None:  # type: ignore[misc]
         if isinstance(error, app_commands.CheckFailure):
