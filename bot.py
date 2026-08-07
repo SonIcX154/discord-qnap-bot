@@ -56,18 +56,39 @@ class QNAPBot(commands.Bot):
         self.start_time: float = time.time()
 
     async def setup_hook(self) -> None:
-        """Load all cogs automatically on startup."""
+        """Load cogs on startup.
+
+        ENABLED_COGS (optional): comma-separated list of cog module names
+        (filename without .py). Example:
+          ENABLED_COGS=economy,roulette,slots,birthdays,twitch_mirror,status
+        Empty / unset = load every cogs/*.py (except _*).
+        """
+        enabled_raw = os.getenv("ENABLED_COGS", "").strip()
+        enabled: set[str] | None = None
+        if enabled_raw:
+            enabled = {
+                name.strip().removeprefix("cogs.").removesuffix(".py")
+                for name in enabled_raw.split(",")
+                if name.strip()
+            }
+            log.info("ENABLED_COGS filter: %s", ", ".join(sorted(enabled)) or "(empty)")
+
         log.info("Loading cogs…")
         cogs_dir = "./cogs"
         if os.path.exists(cogs_dir):
             for filename in sorted(os.listdir(cogs_dir)):
-                if filename.endswith(".py") and not filename.startswith("_"):
-                    extension = f"cogs.{filename[:-3]}"
-                    try:
-                        await self.load_extension(extension)
-                        log.info("  ✅ Loaded cog: %s", extension)
-                    except Exception:
-                        log.exception("  ❌ Failed to load cog %s", extension)
+                if not filename.endswith(".py") or filename.startswith("_"):
+                    continue
+                module = filename[:-3]
+                if enabled is not None and module not in enabled:
+                    log.info("  ⏭️  Skipped cog: cogs.%s (not in ENABLED_COGS)", module)
+                    continue
+                extension = f"cogs.{module}"
+                try:
+                    await self.load_extension(extension)
+                    log.info("  ✅ Loaded cog: %s", extension)
+                except Exception:
+                    log.exception("  ❌ Failed to load cog %s", extension)
         else:
             log.warning("No cogs directory found.")
         log.info("Cog loading complete.")
