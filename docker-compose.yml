@@ -5,8 +5,23 @@ services:
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
+      # Birthday announce, daily reset, restore timestamps use this TZ
       - TZ=Europe/Berlin
+      # Optional: only load listed cogs (filename without .py).
+      # Uncomment for a slim instance (no backup / voice / badgebase):
+      # - ENABLED_COGS=economy,roulette,slots,birthdays,twitch_mirror,status,presence
     env_file:
       - .env
     volumes:
+      # Persistent runtime data — keep this mapped or DBs are lost on rebuild:
+      #   data/birthdays.json, economy.db, backup.db, twitch_mirror.db,
+      #   backups/attachments/, guild settings, etc.
       - ./data:/app/data
+    healthcheck:
+      # PID 1 is `python bot.py`. Detects a dead main process; a frozen
+      # event loop still looks healthy (no HTTP endpoint in this bot).
+      test: ["CMD-SHELL", "python -c \"import os; os.kill(1, 0)\""]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
