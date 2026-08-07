@@ -279,23 +279,6 @@ class BackupAdminCog(commands.Cog):
                 return cursor.lastrowid  # type: ignore[return-value]
 
         original_restore = cog._restore_structure
-        original_status = None
-        for cmd in getattr(cog, "__cog_app_commands__", []):
-            if cmd.name == "backup-status":
-                original_status = cmd._callback
-                break
-
-        async def fixed_status(_cog: Any, interaction: discord.Interaction) -> None:
-            # Prune stale/excluded channel_progress before showing counts
-            try:
-                await admin._prune_progress_now()
-            except Exception as e:
-                log.warning("status prune: %s", e)
-            if original_status is not None:
-                await original_status(_cog, interaction)
-            else:
-                # Fallback: shouldn't happen
-                await interaction.response.send_message("Status unavailable.", ephemeral=True)
 
         async def restore_with_extras(
             guild: discord.Guild,
@@ -564,19 +547,14 @@ class BackupAdminCog(commands.Cog):
             elif cmd.name == "backup-restore-messages":
                 cmd._callback = fixed_restore_messages  # type: ignore[attr-defined]
                 patched.append("backup-restore-messages")
-            elif cmd.name == "backup-status":
-                cmd._callback = fixed_status  # type: ignore[attr-defined]
-                patched.append("backup-status-prune")
         for cmd in self.bot.tree.get_commands():
-            if cmd.name in ("backup-snapshots", "backup-restore-messages", "backup-status") and hasattr(
+            if cmd.name in ("backup-snapshots", "backup-restore-messages") and hasattr(
                 cmd, "_callback"
             ):
                 if cmd.name == "backup-snapshots":
                     cmd._callback = fixed_snapshots  # type: ignore[attr-defined]
                 elif cmd.name == "backup-restore-messages":
                     cmd._callback = fixed_restore_messages  # type: ignore[attr-defined]
-                elif cmd.name == "backup-status":
-                    cmd._callback = fixed_status  # type: ignore[attr-defined]
                 if cmd.name not in patched:
                     patched.append(cmd.name)
         log.info("Patches OK: %s", patched)
