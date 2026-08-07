@@ -1,6 +1,6 @@
 name: apply-status-cleanup
 
-# One-tap from phone: Actions → this workflow → Run workflow
+# Phone: GitHub → Actions → apply-status-cleanup → Run workflow
 on:
   workflow_dispatch:
 
@@ -19,16 +19,21 @@ jobs:
           import base64, zlib
           from pathlib import Path
 
-          def decode(src: str, dest: str) -> None:
-              raw = zlib.decompress(base64.b64decode(Path(src).read_text()))
+          def decode(stem: str, dest: str) -> None:
+              a = Path(f"scripts/status_cleanup/{stem}.z64.a").read_text().strip()
+              b = Path(f"scripts/status_cleanup/{stem}.z64.b").read_text().strip()
+              raw = zlib.decompress(base64.b64decode(a + b))
               Path(dest).write_bytes(raw)
               print(dest, len(raw), "bytes")
 
-          decode("scripts/status_cleanup/backup_admin.py.z64", "cogs/backup_admin.py")
-          decode("scripts/status_cleanup/backup.py.z64", "cogs/backup.py")
+          decode("backup_admin.py", "cogs/backup_admin.py")
+          decode("backup.py", "cogs/backup.py")
           PY
           python3 -m py_compile cogs/backup_admin.py cogs/backup.py
-          grep -n "backup-status" cogs/backup.py cogs/backup_admin.py && exit 1 || echo "OK: no backup-status left"
+          if grep -n "backup-status" cogs/backup.py cogs/backup_admin.py; then
+            exit 1
+          fi
+          echo "OK: no backup-status left"
 
       - name: Commit and push
         run: |
