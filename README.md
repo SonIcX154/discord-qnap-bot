@@ -1,152 +1,43 @@
 # Discord QNAP Bot
 
-A Discord bot built for **QNAP Container Station** (Docker). It combines persistent voice presence, birthdays, an economy/minigame system, full server message backup & restore, and an optional Twitch ↔ Discord chat mirror.
+A Discord bot built for a QNAP (or any Docker) host: voice presence, economy, minigames, full guild backup/restore, Twitch chat mirror, and BadgeBase notifications.
 
 ## Features
 
-| Area | What it does |
-|------|----------------|
-| **Voice stayer** | Stays connected to a configured voice channel 24/7 with auto-reconnect |
-| **Birthdays** | Per-guild birthday storage, slash commands, daily announcements |
-| **Economy** | Coins, daily, give/beg, leaderboard, chat/voice earnings |
-| **Minigames** | `/coinflip`, `/roulette`, `/slots` (owner-only buttons) |
-| **Backup** | Live message logging, attachments, structure snapshots, structure/message restore, soft-delete retention, force-sync |
-| **Twitch mirror** | Twitch → Discord webhooks, Discord → Twitch, bidirectional deletes |
-
-## Repo layout
-
-```text
-bot.py                 # launcher, intents, cog auto-load, slash sync, global errors
-cogs/
-  backup.py            # message logging, backfill, snapshots, restore
-  backup_admin.py      # purge, excludes, retention, restore patches
-  birthdays.py         # birthday commands + daily task
-  economy.py           # coins, coinflip, leaderboard, give/beg
-  roulette.py          # roulette minigame
-  slots.py             # slots minigame
-  twitch_mirror.py     # Twitch ↔ Discord mirror
-  voice_stayer.py      # permanent voice connection
-  presence.py          # bot presence
-utils/
-  backup_ops.py        # DB helpers, purge, excludes
-  message_restore.py   # webhook message restore
-  structure_helpers.py # role hierarchy, branding, clear helpers
-  bet_mixin.py         # shared bet +/- buttons + OWNER_ONLY_MSG
-  replay_mixin.py      # "Nochmal spielen" button
-scripts/               # rebuild helpers for QNAP
-Dockerfile
-docker-compose.yml     # TZ=Europe/Berlin, ./data volume
-.env.example
-requirements.txt
-```
+- **Voice stayer** — join a target voice channel and stay connected
+- **Economy** — balances, daily, transfer, leaderboard; chat + voice passive income
+- **Minigames** — roulette and slots
+- **Backup** — message history, attachments, structure snapshots, restore
+- **Twitch mirror** — bidirectional chat mirror with delete sync + robotty catch-up
+- **BadgeBase** — claimable badge notifications
+- **Birthdays** — birthday tracking and announcements
+- **Status** — single `/bot-status` overview for admins
 
 ## Requirements
 
-- Docker (or Container Station on QNAP)
-- Discord bot token with intents: **Server Members**, **Message Content**, and usual guild/voice intents
-- Bot permissions as needed for each feature (Manage Channels/Roles for restore, Manage Webhooks for message restore / Twitch mirror, etc.)
+- Python 3.11+
+- Discord bot token
+- (Optional) Twitch token + client id for the mirror
+- (Optional) BadgeBase API key
 
 ## Quick start
 
-1. Copy `.env.example` → `.env` and fill at least `DISCORD_TOKEN` and `VOICE_CHANNEL_ID`.
-2. Start:
-
 ```bash
-docker compose up -d --build
-```
-
-Data lives in `./data` (mounted to `/app/data`).
-
-Without Docker:
-
-```bash
-python -m pip install -r requirements.txt
+cp .env.example .env
+# edit .env
+pip install -r requirements.txt
 python bot.py
 ```
 
-## Environment variables
+Or with Docker / docker-compose as used on the QNAP.
 
-### Core
+## Slash commands (overview)
 
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `DISCORD_TOKEN` | yes | Discord bot token |
-| `VOICE_CHANNEL_ID` | yes* | Voice channel to stay in (`*` if you use voice stayer) |
-| `TZ` | no | Set in `docker-compose.yml` (default `Europe/Berlin`) for schedules & timestamps |
-| `LOG_LEVEL` | no | `DEBUG` / `INFO` / `WARNING` / `ERROR` (default `INFO`) |
+### Core / admin
 
-### Birthdays
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `BIRTHDAY_DATA_PATH` | `data/birthdays.json` | Birthday JSON path |
-| `BIRTHDAY_ANNOUNCE_HOUR` | `0` | Daily announce hour (0–23) |
-| `BIRTHDAY_ANNOUNCE_MINUTE` | `0` | Daily announce minute |
-
-### Economy / games
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `ECONOMY_DATA_PATH` | `data/economy.db` | Economy SQLite DB |
-| `ROULETTE_EMOTE` | `🎰` | Emote prefix for roulette embeds |
-
-### Backup
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `BACKUP_DATA_PATH` | `data/backup.db` | Backup SQLite DB |
-| `BACKUP_ATTACHMENTS_PATH` | `data/backups/attachments` | Downloaded attachment files |
-| `BACKUP_SOFT_DELETE_RETENTION_DAYS` | `30` | Hard-delete soft-deleted rows after N days |
-| `BACKUP_PURGE_INTERVAL_HOURS` | `24` | How often the retention loop runs |
-
-### Twitch mirror (optional)
-
-| Variable | Purpose |
-|----------|---------|
-| `TWITCH_TOKEN` | OAuth token (`oauth:…` or bare) |
-| `TWITCH_CLIENT_ID` | Twitch application client ID |
-| `TWITCH_CHANNEL` | Channel login to join (e.g. `ich_klau_gratis_brot`) |
-| `TWITCH_DISCORD_CHANNEL_ID` | Discord text channel for the mirror |
-| `TWITCH_NICK` | Bot account login (if different from token user) |
-| `TWITCH_MIRROR_DELAY` | Delay between mirrored posts (default `0.35`) |
-| `TWITCH_DISCORD_TO_TWITCH` | `1` / `0` — enable Discord → Twitch |
-| `DISCORD_OWNER_ID` | Your Discord user ID for owner pings |
-| `TWITCH_OWNER_NAMES` | Comma-separated Twitch names that map to the Discord ping |
-
-**Twitch scopes (mirror + delete):**  
-`chat:read` `chat:edit` `user:write:chat` `moderator:manage:chat_messages`  
-Bot account should be a **mod** in the channel.
-
-See `.env.example` for commented templates.
-
----
-
-## Commands overview
-
-### Birthdays
-
-**Users**
-
-- `/geburtstag-setzen <datum> [jahr]` — set your birthday  
-- `/geburtstag-entfernen [benutzer]` — remove birthday  
-- `/geburtstags-liste` — upcoming birthdays  
-- `/geburtstag-heute` — today’s birthdays  
-
-**Admins**
-
-- `/birthday-setfor <benutzer> <datum> [jahr]`  
-- `/birthday-channel <channel>` — announcement channel  
-- `/test-birthday-messages` — test announce messages  
+- `/bot-status` — latency, uptime, cogs, voice, Twitch, backup, economy, BadgeBase
 
 ### Economy
-
-- `/balance [user]` — balance  
-- `/daily` — daily bonus (once per calendar day, local TZ)  
-- `/give <user> <amount>` — transfer coins  
-- `/beg` — beg; others can donate via button  
-- `/leaderboard` — paginated leaderboard  
-- `/coinflip <bet>` — Kopf/Zahl (min. 10)  
-- `/set-currency`, `/economy-give`, `/economy-take`, `/economy-set` — admin  
 
 Passive earnings: chat coins (hourly cap), voice coins when ≥2 active users in a VC.
 
@@ -162,7 +53,7 @@ Only the user who ran the command can use the buttons. Others get an ephemeral:
 
 **Status & sync**
 
-- `/backup-status` — DB counts, attachments, running jobs  
+- `/bot-status` — unified overview (backup, Twitch, voice, economy, …)  
 - `/backup-backfill` — force-sync: fill history + mark missing IDs as deleted  
 
 **Structure**
@@ -177,57 +68,19 @@ Only the user who ran the command can use the buttons. Others get an ephemeral:
 - `/backup-restore-messages [channel] [limit] [match_by_name] [snapshot_id]`  
   - Webhooks with original name/avatar; timestamps shown in username; no snapshot = all stored messages including deleted (disaster mode when admin patch applies)  
 
-**Maintenance**
+See source under `cogs/` and `utils/` for full option lists and behaviour.
 
-- `/backup-purge` — hard-delete soft-deleted and/or excluded messages (`confirm:PURGE`)  
-- `/backup-exclude` / `/backup-unexclude` / `/backup-excludes` — per channel  
-- `/backup-exclude-guild` / `/backup-include-guild` / `/backup-excluded-guilds`  
-- `/backup-download-missing` — re-download attachments from stored CDN URLs  
+## Twitch mirror
 
-**Behaviour notes**
+Requires `TWITCH_TOKEN`, `TWITCH_CHANNEL`, `TWITCH_DISCORD_CHANNEL_ID` (and ideally Helix scopes for send/delete).
 
-- New/edited messages are logged continuously (excluded guilds/channels skipped).  
-- Deletes set `is_deleted=1` (+ `deleted_at`). Auto-purge after ~30 days (configurable).  
-- Force-sync is the “ultimate” DB reconcile against live Discord history.  
+- IRC idle watchdog reconnects on blackholed sockets (e.g. router gateway change)
+- robotty catch-up on reconnect + periodic (defaults: limit 50, interval 300s)
 
-### Twitch mirror
+## Environment
 
-No slash commands required once env is set. On startup the cog joins the Twitch channel and mirrors into the Discord channel via webhook (display name + avatar).
+See `.env.example`. Important keys include `DISCORD_TOKEN`, `LOG_LEVEL`, backup paths, Twitch and BadgeBase settings.
 
-- **Twitch → Discord:** chat, `/me` as plain text, replies Chatterino-style, CLEARMSG/CLEARCHAT → Discord deletes  
-- **Discord → Twitch:** human messages as `[Discord] Name: …` (Helix when scopes allow)  
-- **Deletes both ways** while message IDs are still in the in-memory map (~last 3000; lost on restart)  
-- Owner name(s) in Twitch chat → Discord mention via `DISCORD_OWNER_ID`  
+## License
 
----
-
-## Docker / QNAP notes
-
-- `docker-compose.yml` sets `TZ=Europe/Berlin` and mounts `./data:/app/data`.  
-- Rebuild after code or env changes: `docker compose up -d --build` (or your `scripts/rebuild-*.sh`).  
-- Slash commands sync on each startup (fine for a small private bot).  
-- For multiple bot instances, use separate folders / data paths (`BIRTHDAY_DATA_PATH`, `ECONOMY_DATA_PATH`, `BACKUP_DATA_PATH`).  
-
-## Troubleshooting
-
-| Symptom | Check |
-|---------|--------|
-| Bot won’t start | `DISCORD_TOKEN` in `.env` |
-| Slash commands missing | Restart; wait a minute for global sync |
-| Wrong times (birthdays / message restore stamps) | Container `TZ` |
-| Birthdays not saving | `./data` mount + permissions |
-| Voice reconnect loop | Valid `VOICE_CHANNEL_ID`, bot can join |
-| Twitch not mirroring | Token, client id, channel name, Discord channel ID; bot mod for deletes |
-| Discord→Twitch delete fails | Need Helix send (`user:write:chat`) so message IDs are stored; map is in-memory |
-| Backup restore hierarchy odd | Bot role must be highest manageable; use `clear_first` carefully |
-| Unexpected command errors | Bot logs show full traceback; users get an ephemeral message |
-
-## Extending
-
-Drop a new `cogs/*.py` with a `setup(bot)` and it loads automatically. Shared UI patterns: `BetAdjustableMixin`, `ReplayMixin`, `OWNER_ONLY_MSG`.
-
-Per-command `@command.error` handlers still override the global tree error handler when present (e.g. cooldowns on roulette/slots).
-
----
-
-Built for QNAP Container Station — persistent voice, birthdays, economy, disaster-ready backup, and optional Twitch chat bridging.
+Private / as used by the project owner.
