@@ -1,161 +1,1131 @@
 from __future__ import annotations
-"""Twitch chat mirror – loads native catch-up implementation."""
-import base64
-import zlib
 
-_B64 = (
-    "eNrtPe1220Z2//kUE7g5BRKalp2km7JlNrIkx2psyStp4/YoOihEghJWJMAFQMlaH/Xsrz5A22fog+VJ"
-    "eu98YT4BkEq2u+3qh02CM4M7d+7cud8zL4slieP5ul6XaRyTbLkqypokeV7USZ0VeTUY8GdFJT6VqfhU"
-    "Z0v5Oanu82lWiK+L4uoqy6/E11lWTYtyNpjjC/mXUfqhFm+cFstlks8q1qC+X0Ff8dvxCiFJFkOym98P"
-    "yX76+3XK2k2LxSKdUjhl43KWlulsP5vWQzJL58l6Uc/4F+w3AMDIRIA3ukrrN/AxLcPg93myuizqUX2X"
-    "1dPreJmVZVEG0WBQl/fjAYE/Bhv9OStc0AMS+O+xnFD6YZquanJIWx7gmGwwox3AdFTkKSFPcPbpmGRX"
-    "eQGYbt4u8JwV13W98o7Lf+8ej85mXWeLSk45WcVVDa3Eu87o87fJ6hSfenpNE/h3vQKEfchy0TOkjfGP"
-    "jbHHGr3FNkP5W7nOYz5KtV6l5W1WFSX7OfK87TpdQMPK8Z73h2d7r+Oz4+8Pjobm073Xu0dHB2+s5/uH"
-    "p3vHJ/vi9/hw32pydLj3vT3em8ODozOtuRjq7DhmjZqfTg+O9uP9gze7/9I8e3v6Xby3u/f6IH67+8/N"
-    "4703B7sn8fvDo/3j9/Hpwd7x0f6p9fa3hycnxyfx/sv43e6Z8p73By9fHx9/Hx/tvj1onp4c/Oa3hycH"
-    "FIKDs4MYwHzn+plCafxIwUFQT8yHgLGz+LenByfaT/DL/uHRdzH8pj4+fn8EDd/hL2933zXPswroP59n"
-    "V8B9Zs1jINRlssj+kMZ1cZMq9HKZJmVamk+rZJ7Gd+nldVHcxOsqLfNkmTY/J6vV4j4u7nLoiWylUn5a"
-    "LIq7dBYv05wykXguyE/ZocvqKs4U6JZpVSVXAFuiDtXADDOqYTwFvrrMVvEiTWbw9rhMERz+RmUr0MfX"
-    "0AjARLI3xuc8U4yOkPKt07QBXrIqqpSzLh2QyMsw6B4bjbbjBEa/X5wXGO/7Kzf4Kzf4KzfYhhsMnoB8"
-    "QA5P9khdJvN5NiVhlk8XIwIYu01LgstTRQQGJvV1VoHABALZT//+H9A8TVDaI5eLZHpzXSxSEBdnADG8"
-    "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"
-)
+import os
+import re
+import time
+import asyncio
+import logging
+import discord
+from discord.ext import commands
+from typing import Optional, Any, Deque
+from collections import OrderedDict, defaultdict, deque
 
-_src = zlib.decompress(base64.b64decode("".join(_B64))).decode("utf-8")
-_g = globals()
-_g["__file__"] = __file__
-exec(compile(_src, __file__, "exec"), _g)
+log = logging.getLogger("qnapbot.twitch_mirror")
+
+try:
+    from twitchio.ext import commands as twitch_commands
+except ImportError:
+    twitch_commands = None  # type: ignore
+
+try:
+    import aiohttp
+except ImportError:
+    aiohttp = None  # type: ignore
+
+try:
+    from utils.twitch_map_store import TwitchMapStore
+    from utils.twitch_catchup_mixin import (
+        TwitchCatchupMixin,
+        run_twitch_supervisor,
+    )
+    from utils.twitch_helpers import (
+        TWITCH_TOKEN,
+        TWITCH_CHANNEL,
+        TWITCH_DISCORD_CHANNEL_ID,
+        TWITCH_NICK,
+        TWITCH_CLIENT_ID,
+        DISCORD_TO_TWITCH,
+        SEND_DELAY,
+        MSG_CACHE_MAX,
+        CLEAR_WINDOW_SECONDS,
+        TWITCH_MIRROR_DB_PATH,
+        WEBHOOK_NAME,
+        REQUIRED_DELETE_SCOPE,
+        REQUIRED_SEND_SCOPE,
+        CLEARMSG_RE,
+        CLEARCHAT_USER_RE,
+        LEADING_AT_RE,
+        OWNER_PING_MAP,
+        is_configured,
+        normalize_token,
+        bearer_token,
+        safe_webhook_username,
+        apply_owner_pings,
+        allowed_mentions_for,
+        twitch_msg_id,
+        message_tags,
+        normalize_content,
+        strip_leading_reply_mention,
+        reply_header_from_tags,
+        discord_content_for_twitch,
+        compose_mirror_content,
+    )
+except ImportError:
+    from ..utils.twitch_map_store import TwitchMapStore
+    from ..utils.twitch_catchup_mixin import (
+        TwitchCatchupMixin,
+        run_twitch_supervisor,
+    )
+    from ..utils.twitch_helpers import (
+        TWITCH_TOKEN,
+        TWITCH_CHANNEL,
+        TWITCH_DISCORD_CHANNEL_ID,
+        TWITCH_NICK,
+        TWITCH_CLIENT_ID,
+        DISCORD_TO_TWITCH,
+        SEND_DELAY,
+        MSG_CACHE_MAX,
+        CLEAR_WINDOW_SECONDS,
+        TWITCH_MIRROR_DB_PATH,
+        WEBHOOK_NAME,
+        REQUIRED_DELETE_SCOPE,
+        REQUIRED_SEND_SCOPE,
+        CLEARMSG_RE,
+        CLEARCHAT_USER_RE,
+        LEADING_AT_RE,
+        OWNER_PING_MAP,
+        is_configured,
+        normalize_token,
+        bearer_token,
+        safe_webhook_username,
+        apply_owner_pings,
+        allowed_mentions_for,
+        twitch_msg_id,
+        message_tags,
+        normalize_content,
+        strip_leading_reply_mention,
+        reply_header_from_tags,
+        discord_content_for_twitch,
+        compose_mirror_content,
+    )
+
+# No IRC traffic (incl. server PINGs) for this long → treat as blackhole and reconnect.
+# Twitch typically PINGs every ~4 minutes; default 5 min is slightly above that.
+IRC_IDLE_SECONDS = max(120, int(os.getenv("TWITCH_IRC_IDLE_SECONDS", "300")))
+IRC_WATCHDOG_INTERVAL = 30.0
+
+
+_TwitchBase = twitch_commands.Bot if twitch_commands else object
+
+
+class TwitchMirrorBot(TwitchCatchupMixin, _TwitchBase):  # type: ignore[misc]
+    def __init__(
+        self,
+        discord_bot: commands.Bot,
+        discord_channel_id: int,
+        store: Optional[TwitchMapStore] = None,
+    ) -> None:
+        if twitch_commands is None:
+            raise RuntimeError("twitchio is not installed")
+
+        super().__init__(
+            token=normalize_token(TWITCH_TOKEN),
+            prefix="!",
+            initial_channels=[TWITCH_CHANNEL],
+        )
+        self.discord_bot = discord_bot
+        self.discord_channel_id = discord_channel_id
+        self._queue: asyncio.Queue[
+            tuple[str, str, str, Optional[str], Optional[str], bool]
+        ] = asyncio.Queue()
+        self._delete_queue: asyncio.Queue[tuple[str, Optional[str]]] = asyncio.Queue()
+        self._worker_task: Optional[asyncio.Task] = None
+        self.connected = False
+        self._was_ready = False
+        self._last_irc_activity = time.time()
+        self._avatar_cache: dict[str, Optional[str]] = {}
+        self._avatar_lock = asyncio.Lock()
+
+        self._store = store or TwitchMapStore(TWITCH_MIRROR_DB_PATH, MSG_CACHE_MAX)
+
+        self._msg_map: OrderedDict[str, int] = OrderedDict()
+        self._login_msgs: dict[str, set[str]] = defaultdict(set)
+        self._discord_to_inbound: OrderedDict[int, str] = OrderedDict()
+
+        self._outbound_pending: Deque[int] = deque()
+        self._discord_to_twitch: OrderedDict[int, str] = OrderedDict()
+        self._outbound_twitch_ids: OrderedDict[str, None] = OrderedDict()
+        self._bot_logins: set[str] = set()
+        if TWITCH_NICK:
+            self._bot_logins.add(TWITCH_NICK.lower().lstrip("#"))
+        self._send_lock = asyncio.Lock()
+
+        self._webhook: Optional[discord.Webhook] = None
+        self._text_channel: Optional[discord.TextChannel] = None
+
+        self._broadcaster_id: Optional[str] = None
+        self._moderator_id: Optional[str] = None
+        self._has_delete_scope: bool = False
+        self._has_send_scope: bool = False
+        self._helix_client_id: str = TWITCH_CLIENT_ID
+        self._init_catchup_state()
+
+    def _touch_irc(self) -> None:
+        self._last_irc_activity = time.time()
+
+    def _track_outbound_tid(self, twitch_id: str) -> None:
+        self._outbound_twitch_ids[twitch_id] = None
+        self._outbound_twitch_ids.move_to_end(twitch_id)
+        while len(self._outbound_twitch_ids) > MSG_CACHE_MAX:
+            self._outbound_twitch_ids.popitem(last=False)
+
+    async def _load_persisted_map(self) -> None:
+        try:
+            await self._store.init()
+            rows = await self._store.load_recent()
+        except Exception as e:
+            log.warning("Map DB load failed: %s", e)
+            return
+
+        inbound = 0
+        outbound = 0
+        for row in rows:
+            tid = str(row["twitch_id"])
+            did = int(row["discord_id"])
+            login = (row.get("login") or "").lower()
+            direction = row.get("direction") or "inbound"
+
+            if direction == "outbound":
+                self._discord_to_twitch[did] = tid
+                self._discord_to_twitch.move_to_end(did)
+                self._track_outbound_tid(tid)
+                outbound += 1
+            else:
+                self._msg_map[tid] = did
+                self._msg_map.move_to_end(tid)
+                self._discord_to_inbound[did] = tid
+                self._discord_to_inbound.move_to_end(did)
+                if login:
+                    self._login_msgs[login].add(tid)
+                inbound += 1
+
+        if inbound or outbound:
+            log.info(
+                "Restored message map from DB: inbound=%s outbound=%s path=%s",
+                inbound, outbound, self._store.path,
+            )
+
+    async def _remember(self, twitch_id: str, discord_id: int, login: str) -> None:
+        self._msg_map[twitch_id] = discord_id
+        self._msg_map.move_to_end(twitch_id)
+        self._login_msgs[login.lower()].add(twitch_id)
+        self._discord_to_inbound[discord_id] = twitch_id
+        self._discord_to_inbound.move_to_end(discord_id)
+        while len(self._msg_map) > MSG_CACHE_MAX:
+            old_tid, old_did = self._msg_map.popitem(last=False)
+            for s in self._login_msgs.values():
+                s.discard(old_tid)
+            self._discord_to_inbound.pop(old_did, None)
+        while len(self._discord_to_inbound) > MSG_CACHE_MAX:
+            self._discord_to_inbound.popitem(last=False)
+        try:
+            await self._store.upsert(
+                twitch_id=twitch_id,
+                discord_id=discord_id,
+                login=login,
+                direction="inbound",
+            )
+        except Exception as e:
+            log.warning("Map persist (inbound) failed: %s", e)
+
+    async def _forget_twitch_id(self, twitch_id: str) -> Optional[int]:
+        """Resolve + drop mapping for a Twitch msg id (inbound or outbound)."""
+        discord_id = self._msg_map.pop(twitch_id, None)
+        for s in self._login_msgs.values():
+            s.discard(twitch_id)
+        if discord_id is not None:
+            self._discord_to_inbound.pop(discord_id, None)
+
+        # Outbound memory (Discord original → Twitch)
+        if discord_id is None:
+            for did, tid in list(self._discord_to_twitch.items()):
+                if tid == twitch_id:
+                    discord_id = did
+                    self._discord_to_twitch.pop(did, None)
+                    break
+        self._outbound_twitch_ids.pop(twitch_id, None)
+
+        try:
+            row = await self._store.delete_by_twitch(twitch_id)
+            if row is not None:
+                if discord_id is None:
+                    discord_id = int(row["discord_id"])
+                if row.get("direction") == "outbound" and discord_id is not None:
+                    self._discord_to_twitch.pop(discord_id, None)
+                elif row.get("direction") == "inbound" and discord_id is not None:
+                    self._discord_to_inbound.pop(discord_id, None)
+        except Exception as e:
+            log.warning("Map DB delete (twitch) failed: %s", e)
+        return discord_id
+
+    async def _forget_inbound_by_discord(self, discord_id: int) -> Optional[str]:
+        twitch_id = self._discord_to_inbound.pop(discord_id, None)
+        if twitch_id is not None:
+            self._msg_map.pop(twitch_id, None)
+            for s in self._login_msgs.values():
+                s.discard(twitch_id)
+        try:
+            row = await self._store.delete_by_discord(discord_id, direction="inbound")
+            if twitch_id is None and row is not None:
+                twitch_id = str(row["twitch_id"])
+        except Exception as e:
+            log.warning("Map DB delete (discord inbound) failed: %s", e)
+        return twitch_id
+
+    async def _remember_outbound(self, discord_id: int, twitch_id: str) -> None:
+        self._discord_to_twitch[discord_id] = twitch_id
+        self._discord_to_twitch.move_to_end(discord_id)
+        self._track_outbound_tid(twitch_id)
+        while len(self._discord_to_twitch) > MSG_CACHE_MAX:
+            self._discord_to_twitch.popitem(last=False)
+        try:
+            await self._store.upsert(
+                twitch_id=twitch_id,
+                discord_id=discord_id,
+                login=None,
+                direction="outbound",
+            )
+        except Exception as e:
+            log.warning("Map persist (outbound) failed: %s", e)
+
+    async def _forget_outbound(self, discord_id: int) -> Optional[str]:
+        twitch_id = self._discord_to_twitch.pop(discord_id, None)
+        if twitch_id is not None:
+            self._outbound_twitch_ids.pop(twitch_id, None)
+        try:
+            row = await self._store.delete_by_discord(discord_id, direction="outbound")
+            if twitch_id is None and row is not None:
+                twitch_id = str(row["twitch_id"])
+                self._outbound_twitch_ids.pop(twitch_id, None)
+        except Exception as e:
+            log.warning("Map DB delete (outbound) failed: %s", e)
+        return twitch_id
+
+    def _helix_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {bearer_token(TWITCH_TOKEN)}",
+            "Client-Id": self._helix_client_id or TWITCH_CLIENT_ID,
+            "Content-Type": "application/json",
+        }
+
+    async def _resolve_helix_ids(self) -> None:
+        if aiohttp is None:
+            log.warning("Helix unavailable (aiohttp missing)")
+            return
+
+        bearer = bearer_token(TWITCH_TOKEN)
+        timeout = aiohttp.ClientTimeout(total=10)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(
+                    "https://id.twitch.tv/oauth2/validate",
+                    headers={"Authorization": f"OAuth {bearer}"},
+                ) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        log.warning(
+                            "Token validate HTTP %s: %s",
+                            resp.status, body[:200],
+                        )
+                        return
+                    info: dict[str, Any] = await resp.json()
+
+                self._moderator_id = str(info.get("user_id") or "") or None
+                scopes = list(info.get("scopes") or [])
+                self._has_delete_scope = REQUIRED_DELETE_SCOPE in scopes
+                self._has_send_scope = REQUIRED_SEND_SCOPE in scopes
+                login = info.get("login") or "?"
+                if login and login != "?":
+                    self._bot_logins.add(str(login).lower())
+                token_client_id = str(info.get("client_id") or "")
+
+                if token_client_id:
+                    if TWITCH_CLIENT_ID and TWITCH_CLIENT_ID != token_client_id:
+                        log.warning(
+                            "TWITCH_CLIENT_ID mismatch!\n"
+                            "  .env TWITCH_CLIENT_ID = %s\n"
+                            "  token client_id       = %s\n"
+                            "  → using token's client_id for Helix calls",
+                            TWITCH_CLIENT_ID, token_client_id,
+                        )
+                    self._helix_client_id = token_client_id
+                elif TWITCH_CLIENT_ID:
+                    self._helix_client_id = TWITCH_CLIENT_ID
+                else:
+                    log.warning("No Client-Id available")
+                    return
+
+                log.info(
+                    "Token user=%s id=%s client_id=%s… scopes=%s",
+                    login, self._moderator_id, self._helix_client_id[:8], len(scopes),
+                )
+                if self._has_delete_scope:
+                    log.info("Scope OK: %s", REQUIRED_DELETE_SCOPE)
+                else:
+                    log.warning("missing `%s`", REQUIRED_DELETE_SCOPE)
+                if self._has_send_scope:
+                    log.info("Scope OK: %s", REQUIRED_SEND_SCOPE)
+                else:
+                    log.warning(
+                        "missing `%s` — Discord→Twitch will use IRC (no reliable msg id)",
+                        REQUIRED_SEND_SCOPE,
+                    )
+
+                headers = self._helix_headers()
+                async with session.get(
+                    f"https://api.twitch.tv/helix/users?login={TWITCH_CHANNEL}",
+                    headers=headers,
+                ) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        log.warning(
+                            "Helix users (broadcaster) HTTP %s: %s",
+                            resp.status, body[:200],
+                        )
+                        return
+                    data = await resp.json()
+                users = data.get("data") or []
+                if not users:
+                    log.warning("Broadcaster login not found: %s", TWITCH_CHANNEL)
+                    return
+                self._broadcaster_id = str(users[0]["id"])
+                log.info(
+                    "Helix ready: broadcaster=%s sender/mod=%s",
+                    self._broadcaster_id, self._moderator_id,
+                )
+        except Exception as e:
+            log.exception("Helix id resolve failed: %s", e)
+
+    async def event_ready(self) -> None:
+        self.connected = True
+        self._was_ready = True
+        self._touch_irc()
+        nick = getattr(self, "nick", None) or TWITCH_NICK or "?"
+        if nick and nick != "?":
+            self._bot_logins.add(str(nick).lower().lstrip("#"))
+        log.info("Connected as %s → #%s", nick, TWITCH_CHANNEL)
+        if OWNER_PING_MAP:
+            log.info(
+                "Owner ping map (@ or bare): %s",
+                ", ".join(f"{k}→<@{v}>" for k, v in OWNER_PING_MAP.items()),
+            )
+        log.info("Echo filter: only [Discord]-prefixed (bot self-chat mirrored)")
+        log.info("CLEARCHAT window: last %ss", CLEAR_WINDOW_SECONDS)
+        log.info("IRC idle watchdog: %ss", IRC_IDLE_SECONDS)
+        await self._load_persisted_map()
+        await self._resolve_helix_ids()
+        if DISCORD_TO_TWITCH:
+            log.info("Discord → Twitch: ON (Helix preferred)")
+        else:
+            log.info("Discord → Twitch: OFF")
+        if self._worker_task is None or self._worker_task.done():
+            self._worker_task = asyncio.create_task(self._discord_worker())
+        self._start_catchup_tasks()
+
+    async def event_error(self, error: Exception, data: Optional[str] = None) -> None:  # type: ignore[override]
+        self.connected = False
+        snippet = (data or "")[:200]
+        log.error("Twitch event_error: %s%s", error, f" data={snippet!r}" if snippet else "")
+
+    async def event_message(self, message) -> None:  # type: ignore[no-untyped-def]
+        self._touch_irc()
+        try:
+            if getattr(message, "echo", False):
+                tid = twitch_msg_id(message)
+                if tid and self._outbound_pending:
+                    discord_id = self._outbound_pending.popleft()
+                    await self._remember_outbound(discord_id, tid)
+                    log.debug(
+                        "Outbound (IRC echo) linked discord=%s → twitch=%s…",
+                        discord_id, tid[:12],
+                    )
+                return
+
+            author = message.author
+            login = (getattr(author, "name", None) or "unknown").lower()
+            display = (
+                getattr(author, "display_name", None)
+                or getattr(author, "name", None)
+                or "unknown"
+            )
+            raw = message.content or ""
+            content, is_action = normalize_content(raw)
+            if not content:
+                return
+
+            tid = twitch_msg_id(message)
+
+            if tid and tid in self._outbound_twitch_ids:
+                return
+
+            if content.startswith("[Discord]") or content.lower().startswith("[discord]"):
+                if tid and self._outbound_pending and login in self._bot_logins:
+                    discord_id = self._outbound_pending.popleft()
+                    await self._remember_outbound(discord_id, tid)
+                    log.debug(
+                        "Outbound ([Discord] IRC) linked discord=%s → twitch=%s…",
+                        discord_id, tid[:12],
+                    )
+                return
+
+            tags = message_tags(message)
+            reply_header: Optional[str] = None
+            try:
+                reply_header = reply_header_from_tags(tags)
+                if reply_header:
+                    before = content
+                    content = strip_leading_reply_mention(content, tags)
+                    if content != before:
+                        log.debug(
+                            "stripped reply @mention: %r → %r",
+                            before[:40], content[:40],
+                        )
+            except Exception as e:
+                log.warning("reply format error (sending plain): %s", e)
+                reply_header = None
+
+            if not content:
+                return
+
+            if not tid:
+                log.warning("no msg id from IRC for @%s", login)
+
+            await self._queue.put(
+                (login, display, content[:1900], tid, reply_header, is_action)
+            )
+        except Exception as e:
+            log.exception("event_message error: %s", e)
+
+    async def event_raw_data(self, data: str) -> None:  # type: ignore[no-untyped-def]
+        # Any IRC traffic (PING/PONG, JOIN, PRIVMSG, …) proves the socket is alive.
+        self._touch_irc()
+        if not data:
+            return
+
+        if "CLEARMSG" in data:
+            m = CLEARMSG_RE.search(data)
+            if m:
+                tid = m.group(1).strip()
+                if tid:
+                    await self._delete_queue.put(("id", tid))
+            return
+
+        if "CLEARCHAT" in data:
+            m = CLEARCHAT_USER_RE.search(data)
+            if m:
+                login = m.group(1).strip().lower()
+                await self._delete_queue.put(("user", login))
+                return
+            if re.search(r"CLEARCHAT\s+#\S+\s*$", data.strip(), re.IGNORECASE):
+                await self._delete_queue.put(("all", None))
+
+    async def event_message_delete(self, message) -> None:  # type: ignore[no-untyped-def]
+        self._touch_irc()
+        tid = twitch_msg_id(message)
+        if tid:
+            await self._delete_queue.put(("id", tid))
+
+    async def send_to_twitch(self, text: str, discord_msg_id: int) -> bool:
+        text = (text or "").strip()
+        if not text:
+            return False
+
+        async with self._send_lock:
+            if (
+                aiohttp is not None
+                and self._helix_client_id
+                and self._broadcaster_id
+                and self._moderator_id
+                and self._has_send_scope
+            ):
+                try:
+                    url = "https://api.twitch.tv/helix/chat/messages"
+                    payload = {
+                        "broadcaster_id": self._broadcaster_id,
+                        "sender_id": self._moderator_id,
+                        "message": text[:500],
+                    }
+                    timeout = aiohttp.ClientTimeout(total=10)
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        async with session.post(
+                            url, json=payload, headers=self._helix_headers()
+                        ) as resp:
+                            body_txt = await resp.text()
+                            if resp.status in (200, 201):
+                                try:
+                                    data = await resp.json(content_type=None)
+                                except Exception:
+                                    import json as _json
+
+                                    data = _json.loads(body_txt)
+                                rows = data.get("data") or []
+                                mid = None
+                                if rows:
+                                    mid = rows[0].get("message_id")
+                                    is_sent = rows[0].get("is_sent", True)
+                                    if not is_sent:
+                                        drop = rows[0].get("drop_reason")
+                                        log.warning("Helix send dropped: %s", drop)
+                                        return False
+                                if mid:
+                                    await self._remember_outbound(discord_msg_id, str(mid))
+                                    log.debug(
+                                        "Helix send OK discord=%s → twitch=%s…",
+                                        discord_msg_id, str(mid)[:12],
+                                    )
+                                else:
+                                    log.warning(
+                                        "Helix send OK but no message_id in response: %s",
+                                        body_txt[:200],
+                                    )
+                                await asyncio.sleep(SEND_DELAY)
+                                return True
+                            log.warning(
+                                "Helix send HTTP %s: %s",
+                                resp.status, body_txt[:250],
+                            )
+                except Exception as e:
+                    log.error("Helix send error: %s", e)
+
+            if not self.connected:
+                log.warning("send_to_twitch: not connected")
+                return False
+            try:
+                channel = self.get_channel(TWITCH_CHANNEL)
+                if channel is None:
+                    channel = self.get_channel(f"#{TWITCH_CHANNEL}")
+                if channel is None:
+                    log.warning("No IRC channel for #%s", TWITCH_CHANNEL)
+                    return False
+
+                self._outbound_pending.append(discord_msg_id)
+                await channel.send(text[:480])
+                await asyncio.sleep(SEND_DELAY)
+                log.debug(
+                    "IRC send used (no Helix msg id — delete-from-Discord may not work for this message)"
+                )
+                return True
+            except Exception as e:
+                try:
+                    if self._outbound_pending and self._outbound_pending[-1] == discord_msg_id:
+                        self._outbound_pending.pop()
+                except Exception:
+                    pass
+                log.error("IRC send failed: %s", e)
+                return False
+
+    async def delete_on_twitch(self, twitch_msg_id: str) -> bool:
+        if not twitch_msg_id:
+            return False
+        if aiohttp is None:
+            log.warning("delete failed: aiohttp missing")
+            return False
+        if not self._helix_client_id:
+            log.warning("delete failed: no Client-Id")
+            return False
+        if not self._broadcaster_id or not self._moderator_id:
+            log.warning("delete failed: broadcaster/moderator id unknown")
+            return False
+        if not self._has_delete_scope:
+            log.warning(
+                "delete failed: missing scope `%s`",
+                REQUIRED_DELETE_SCOPE,
+            )
+            return False
+
+        try:
+            url = "https://api.twitch.tv/helix/moderation/chat"
+            params = {
+                "broadcaster_id": self._broadcaster_id,
+                "moderator_id": self._moderator_id,
+                "message_id": twitch_msg_id,
+            }
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.delete(
+                    url, params=params, headers=self._helix_headers()
+                ) as resp:
+                    if resp.status in (200, 204):
+                        log.debug(
+                            "Helix delete OK %s… HTTP %s",
+                            twitch_msg_id[:12], resp.status,
+                        )
+                        return True
+                    body = await resp.text()
+                    log.warning(
+                        "Helix delete FAILED HTTP %s\n"
+                        "  msg_id=%s\n"
+                        "  broadcaster=%s moderator=%s\n"
+                        "  body=%s",
+                        resp.status, twitch_msg_id,
+                        self._broadcaster_id, self._moderator_id, body[:300],
+                    )
+                    return False
+        except Exception as e:
+            log.error("Helix delete error: %s", e)
+            return False
+
+    async def _fetch_avatar(self, login: str) -> Optional[str]:
+        login = login.lower()
+        if login in self._avatar_cache:
+            return self._avatar_cache[login]
+
+        if not self._helix_client_id or aiohttp is None:
+            self._avatar_cache[login] = None
+            return None
+
+        async with self._avatar_lock:
+            if login in self._avatar_cache:
+                return self._avatar_cache[login]
+
+            url = f"https://api.twitch.tv/helix/users?login={login}"
+            try:
+                timeout = aiohttp.ClientTimeout(total=8)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(url, headers=self._helix_headers()) as resp:
+                        if resp.status != 200:
+                            log.debug("Helix users %s: HTTP %s", login, resp.status)
+                            self._avatar_cache[login] = None
+                            return None
+                        data: dict[str, Any] = await resp.json()
+                users = data.get("data") or []
+                if not users:
+                    self._avatar_cache[login] = None
+                    return None
+                avatar = users[0].get("profile_image_url") or None
+                self._avatar_cache[login] = avatar
+                return avatar
+            except Exception as e:
+                log.warning("Avatar fetch failed for %s: %s", login, e)
+                self._avatar_cache[login] = None
+                return None
+
+    async def _get_or_create_webhook(
+        self, channel: discord.TextChannel
+    ) -> Optional[discord.Webhook]:
+        me = channel.guild.me if channel.guild else None
+        if me and not channel.permissions_for(me).manage_webhooks:
+            log.warning("Missing Manage Webhooks permission")
+            return None
+
+        try:
+            hooks = await channel.webhooks()
+            for h in hooks:
+                if h.name == WEBHOOK_NAME and h.token:
+                    log.debug("Reusing webhook id=%s", h.id)
+                    return h
+
+            hook = await channel.create_webhook(
+                name=WEBHOOK_NAME,
+                reason="Twitch chat mirror",
+            )
+            log.info("Created webhook id=%s", hook.id)
+            return hook
+        except Exception as e:
+            log.error("Webhook setup failed: %s", e)
+            return None
+
+    async def _delete_discord_message(self, discord_msg_id: int) -> None:
+        """Delete a mirrored Discord message (webhook OR normal user message)."""
+        self._discord_to_inbound.pop(discord_msg_id, None)
+
+        deleted = False
+        webhook = self._webhook
+        if webhook is not None and webhook.token:
+            try:
+                await webhook.delete_message(discord_msg_id)
+                deleted = True
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                log.warning("Webhook delete failed: %s", e)
+
+        if deleted:
+            return
+
+        channel = self._text_channel
+        if channel is not None:
+            try:
+                msg = await channel.fetch_message(discord_msg_id)
+                await msg.delete()
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                log.warning("Channel delete failed: %s", e)
+
+    async def _process_delete(self, kind: str, value: Optional[str]) -> None:
+        if kind == "id" and value:
+            discord_id = await self._forget_twitch_id(value)
+            if discord_id is not None:
+                await self._delete_discord_message(discord_id)
+                log.debug(
+                    "Deleted Discord msg=%s (CLEARMSG %s…)",
+                    discord_id, value[:8],
+                )
+            return
+
+        if kind == "user" and value:
+            login = value.lower()
+            tids = set(self._login_msgs.get(login, set()))
+            try:
+                db_rows = await self._store.delete_by_login(login)
+                for row in db_rows:
+                    tids.add(str(row["twitch_id"]))
+            except Exception as e:
+                log.warning("Map DB delete_by_login failed: %s", e)
+
+            deleted = 0
+            for tid in list(tids):
+                discord_id = await self._forget_twitch_id(tid)
+                if discord_id is not None:
+                    await self._delete_discord_message(discord_id)
+                    deleted += 1
+                    await asyncio.sleep(0.25)
+            if deleted:
+                log.info("CLEARCHAT @%s: removed %s Discord msg(s)", login, deleted)
+            return
+
+        if kind == "all":
+            # Only wipe messages mirrored within CLEAR_WINDOW_SECONDS (default 10 min)
+            window = max(0, CLEAR_WINDOW_SECONDS)
+            since = int(time.time()) - window
+            try:
+                rows = await self._store.delete_since(since)
+            except Exception as e:
+                log.warning("Map DB delete_since failed: %s", e)
+                rows = []
+
+            deleted = 0
+            for row in rows:
+                tid = str(row["twitch_id"])
+                discord_id = int(row["discord_id"])
+                self._msg_map.pop(tid, None)
+                self._discord_to_inbound.pop(discord_id, None)
+                self._discord_to_twitch.pop(discord_id, None)
+                self._outbound_twitch_ids.pop(tid, None)
+                for s in self._login_msgs.values():
+                    s.discard(tid)
+                await self._delete_discord_message(discord_id)
+                deleted += 1
+                await asyncio.sleep(0.25)
+            if deleted:
+                log.info(
+                    "CLEARCHAT (last %ss): removed %s Discord msg(s)",
+                    window, deleted,
+                )
+            else:
+                log.info("CLEARCHAT (last %ss): nothing in window", window)
+
+    async def _discord_worker(self) -> None:
+        await self.discord_bot.wait_until_ready()
+        channel = self.discord_bot.get_channel(self.discord_channel_id)
+        if channel is None:
+            try:
+                channel = await self.discord_bot.fetch_channel(self.discord_channel_id)
+            except Exception as e:
+                log.error(
+                    "Cannot resolve Discord channel %s: %s",
+                    self.discord_channel_id, e,
+                )
+                return
+
+        if not isinstance(channel, discord.TextChannel):
+            log.error("Channel %s is not a text channel", self.discord_channel_id)
+            return
+
+        self._text_channel = channel
+        webhook = await self._get_or_create_webhook(channel)
+        self._webhook = webhook
+        if webhook is None:
+            log.warning("Falling back to bot messages (no webhook)")
+
+        log.info(
+            "Mirroring #%s → #%s (webhook=%s)",
+            TWITCH_CHANNEL, channel.name, "yes" if webhook else "no",
+        )
+
+        while True:
+            try:
+                try:
+                    kind, value = self._delete_queue.get_nowait()
+                    await self._process_delete(kind, value)
+                    continue
+                except asyncio.QueueEmpty:
+                    pass
+
+                try:
+                    item = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    get_msg = asyncio.create_task(self._queue.get())
+                    get_del = asyncio.create_task(self._delete_queue.get())
+                    done, pending = await asyncio.wait(
+                        {get_msg, get_del}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for t in pending:
+                        t.cancel()
+                        try:
+                            await t
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    task = next(iter(done))
+                    result = task.result()
+                    if task is get_del:
+                        kind, value = result
+                        await self._process_delete(kind, value)
+                        continue
+                    item = result
+
+                login, display, content, twitch_id, reply_header, is_action = item
+                username = safe_webhook_username(display)
+                avatar_url = await self._fetch_avatar(login)
+
+                if reply_header and content.startswith("@"):
+                    stripped = LEADING_AT_RE.sub("", content, count=1).strip()
+                    if stripped:
+                        content = stripped
+
+                content, ping_ids = apply_owner_pings(content)
+                final = compose_mirror_content(content, reply_header, is_action)
+                if not final.strip():
+                    continue
+                mentions = allowed_mentions_for(ping_ids)
+
+                discord_msg_id: Optional[int] = None
+
+                if webhook is not None:
+                    try:
+                        sent = await webhook.send(
+                            content=final,
+                            username=username,
+                            avatar_url=avatar_url or discord.utils.MISSING,
+                            wait=True,
+                            allowed_mentions=mentions,
+                        )
+                        discord_msg_id = sent.id
+                    except discord.NotFound:
+                        log.warning("Webhook missing – recreating")
+                        webhook = await self._get_or_create_webhook(channel)
+                        self._webhook = webhook
+                        if webhook is not None:
+                            sent = await webhook.send(
+                                content=final,
+                                username=username,
+                                avatar_url=avatar_url or discord.utils.MISSING,
+                                wait=True,
+                                allowed_mentions=mentions,
+                            )
+                            discord_msg_id = sent.id
+                    except discord.HTTPException as e:
+                        log.warning("Webhook send failed: %s", e)
+                        if reply_header:
+                            try:
+                                sent = await webhook.send(
+                                    content=content,
+                                    username=username,
+                                    avatar_url=avatar_url or discord.utils.MISSING,
+                                    wait=True,
+                                    allowed_mentions=mentions,
+                                )
+                                discord_msg_id = sent.id
+                            except Exception as e2:
+                                log.warning("Plain retry failed: %s", e2)
+                        else:
+                            try:
+                                sent = await channel.send(
+                                    f"**{username}**: {final}",
+                                    allowed_mentions=mentions,
+                                )
+                                discord_msg_id = sent.id
+                            except Exception as e2:
+                                log.warning("Fallback send failed: %s", e2)
+                else:
+                    sent = await channel.send(
+                        f"**{username}**: {final}",
+                        allowed_mentions=mentions,
+                    )
+                    discord_msg_id = sent.id
+
+                if twitch_id and discord_msg_id is not None:
+                    await self._remember(twitch_id, discord_msg_id, login)
+
+                await asyncio.sleep(SEND_DELAY)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.exception("Worker error: %s", e)
+                await asyncio.sleep(1.0)
+
+
+class TwitchMirrorCog(commands.Cog):
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+        self._twitch: Optional[TwitchMirrorBot] = None
+        self._task: Optional[asyncio.Task] = None
+        self._store = TwitchMapStore(TWITCH_MIRROR_DB_PATH, MSG_CACHE_MAX)
+        self._pending_catchup_ts: Optional[float] = None
+        try:
+            self._discord_channel_id = (
+                int(TWITCH_DISCORD_CHANNEL_ID) if TWITCH_DISCORD_CHANNEL_ID else 0
+            )
+        except ValueError:
+            self._discord_channel_id = 0
+
+    async def cog_load(self) -> None:
+        if twitch_commands is None:
+            log.warning("twitchio not installed – cog idle")
+            return
+        if not is_configured():
+            log.warning(
+                "Disabled – set TWITCH_TOKEN, TWITCH_CHANNEL, "
+                "TWITCH_DISCORD_CHANNEL_ID in .env"
+            )
+            return
+
+        try:
+            channel_id = int(TWITCH_DISCORD_CHANNEL_ID)
+        except ValueError:
+            log.error(
+                "Invalid TWITCH_DISCORD_CHANNEL_ID: %r",
+                TWITCH_DISCORD_CHANNEL_ID,
+            )
+            return
+
+        try:
+            await self._store.init()
+            log.info("Map DB: %s", self._store.path)
+        except Exception as e:
+            log.error("Map DB init failed: %s", e)
+
+        self._discord_channel_id = channel_id
+        self._task = asyncio.create_task(self._run_twitch())
+        log.info(
+            "Starting Twitch client for #%s (idle watchdog %ss)…",
+            TWITCH_CHANNEL, IRC_IDLE_SECONDS,
+        )
+
+    async def _shutdown_client(self, client: Optional[TwitchMirrorBot]) -> None:
+        if client is None:
+            return
+        await client._cancel_catchup_tasks()
+        client.connected = False
+        try:
+            await client.close()
+        except Exception as e:
+            log.debug("Twitch client.close: %s", e)
+        wt = getattr(client, "_worker_task", None)
+        if wt is not None and not wt.done():
+            wt.cancel()
+            try:
+                await wt
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _irc_watchdog(
+        self,
+        client: TwitchMirrorBot,
+        start_task: asyncio.Task,
+    ) -> None:
+        """Detect blackholed IRC sockets (no traffic incl. PINGs) and force reconnect."""
+        while not start_task.done():
+            await asyncio.sleep(IRC_WATCHDOG_INTERVAL)
+            if not client.connected:
+                continue
+            idle = time.time() - client._last_irc_activity
+            if idle >= IRC_IDLE_SECONDS:
+                log.warning(
+                    "IRC idle for %.0fs (limit %ss) – forcing reconnect "
+                    "(likely network blackhole / gateway change)",
+                    idle, IRC_IDLE_SECONDS,
+                )
+                await self._shutdown_client(client)
+                return
+
+    async def _run_twitch(self) -> None:
+        """Supervise IRC client with robotty catch-up across reconnects."""
+        await run_twitch_supervisor(self)
+
+    async def cog_unload(self) -> None:
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
+        await self._shutdown_client(self._twitch)
+        self._twitch = None
+
+    def _is_mirror_channel(self, channel_id: Optional[int]) -> bool:
+        return bool(self._discord_channel_id and channel_id == self._discord_channel_id)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        if not DISCORD_TO_TWITCH:
+            return
+        if not self._is_mirror_channel(message.channel.id if message.channel else None):
+            return
+        if self._twitch is None or not self._twitch.connected:
+            return
+
+        if message.author.bot:
+            return
+        if message.webhook_id is not None:
+            return
+        if message.type not in (
+            discord.MessageType.default,
+            discord.MessageType.reply,
+        ):
+            return
+
+        body = discord_content_for_twitch(message)
+        if not body:
+            return
+
+        display = (message.author.display_name or message.author.name or "Discord").strip()
+        display = display.replace("\n", " ")[:32]
+        payload = f"[Discord] {display}: {body}"
+        if len(payload) > 480:
+            payload = payload[:477] + "…"
+
+        ok = await self._twitch.send_to_twitch(payload, message.id)
+        if ok:
+            log.debug("Discord→Twitch: %s: %r", display, body[:60])
+
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
+        if not self._is_mirror_channel(payload.channel_id):
+            return
+        if self._twitch is None or not self._twitch.connected:
+            return
+
+        twitch_id = await self._twitch._forget_inbound_by_discord(payload.message_id)
+        source = "inbound (Twitch original)"
+
+        if not twitch_id and DISCORD_TO_TWITCH:
+            twitch_id = await self._twitch._forget_outbound(payload.message_id)
+            source = "outbound (Discord→Twitch)"
+
+        if not twitch_id:
+            log.debug(
+                "Discord delete msg=%s not in map (inbound=%s outbound=%s) — skip Twitch delete",
+                payload.message_id,
+                len(self._twitch._discord_to_inbound),
+                len(self._twitch._discord_to_twitch),
+            )
+            return
+
+        ok = await self._twitch.delete_on_twitch(twitch_id)
+        if ok:
+            log.debug(
+                "Discord delete → Twitch delete %s… (%s)",
+                twitch_id[:12], source,
+            )
+        else:
+            log.warning(
+                "Could not delete on Twitch (%s…, %s). See Helix error above.",
+                twitch_id[:12], source,
+            )
+
+
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(TwitchMirrorCog(bot))
