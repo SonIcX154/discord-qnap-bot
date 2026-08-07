@@ -1,0 +1,43 @@
+name: apply-status-cleanup
+
+# One-tap from phone: Actions → this workflow → Run workflow
+on:
+  workflow_dispatch:
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decode cleaned backup sources
+        run: |
+          set -euo pipefail
+          python3 << 'PY'
+          import base64, zlib
+          from pathlib import Path
+
+          def decode(src: str, dest: str) -> None:
+              raw = zlib.decompress(base64.b64decode(Path(src).read_text()))
+              Path(dest).write_bytes(raw)
+              print(dest, len(raw), "bytes")
+
+          decode("scripts/status_cleanup/backup_admin.py.z64", "cogs/backup_admin.py")
+          decode("scripts/status_cleanup/backup.py.z64", "cogs/backup.py")
+          PY
+          python3 -m py_compile cogs/backup_admin.py cogs/backup.py
+          grep -n "backup-status" cogs/backup.py cogs/backup_admin.py && exit 1 || echo "OK: no backup-status left"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add cogs/backup.py cogs/backup_admin.py
+          if git diff --staged --quiet; then
+            echo "Already applied"
+            exit 0
+          fi
+          git commit -m "chore: remove dead /backup-status from backup cogs"
+          git push
