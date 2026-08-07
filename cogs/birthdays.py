@@ -398,7 +398,7 @@ class BirthdayCog(commands.Cog):
                         try:
                             age = today.year - int(b["year"])
                             if age > 0:
-                                age_str = f" (turns {age}!)\u2728"
+                                age_str = f" (wird {age}!)\u2728"
                         except Exception:
                             pass
                     celebrants.append(f"@{member.display_name}{age_str}")
