@@ -56,26 +56,82 @@ class BirthdayCog(commands.Cog):
             self.data[gid] = {}
         return self.data[gid]
 
+    @staticmethod
+    def _is_active(entry: Any) -> bool:
+        """Birthday entries for members who left are kept but flagged in_guild=False."""
+        if not isinstance(entry, dict):
+            return False
+        return bool(entry.get("in_guild", True))
+
+    def _set_in_guild(self, guild_id: int, user_id: int, in_guild: bool) -> bool:
+        """Update in_guild flag. Returns True if data changed."""
+        gdata = self._get_guild_data(guild_id)
+        uid = str(user_id)
+        if uid not in gdata or uid == "config":
+            return False
+        entry = gdata[uid]
+        if not isinstance(entry, dict):
+            return False
+        if entry.get("in_guild", True) == in_guild:
+            return False
+        entry["in_guild"] = in_guild
+        self._save_data()
+        return True
+
+    async def _reconcile_membership(self) -> None:
+        """Sync in_guild flags with current member list (handles past leaves)."""
+        changed = 0
+        for guild in self.bot.guilds:
+            gdata = self.data.get(str(guild.id), {})
+            dirty = False
+            for uid_str, entry in gdata.items():
+                if uid_str == "config" or not isinstance(entry, dict):
+                    continue
+                try:
+                    uid = int(uid_str)
+                except ValueError:
+                    continue
+                present = guild.get_member(uid) is not None
+                if entry.get("in_guild", True) != present:
+                    entry["in_guild"] = present
+                    dirty = True
+                    changed += 1
+            if dirty:
+                self._save_data()
+        if changed:
+            log.info("Reconciled in_guild flags for %s birthday entr(y/ies)", changed)
+
     def get_next_birthday_info(self, guild_id: int) -> dict[str, Any] | None:
         """Returns info about the next upcoming birthday in this guild.
 
-        Returns a dict with: name, days_until, total or None if no birthdays exist.
+        Only counts members still in the guild (in_guild=True).
+        Returns a dict with: name, days_until, total or None if no active birthdays.
         """
         gdata = self.data.get(str(guild_id), {})
         today = date.today()
+        guild = self.bot.get_guild(guild_id)
 
-        total = len([k for k in gdata if k != "config"])
+        active: list[tuple[str, dict[str, Any]]] = []
+        for uid_str, entry in gdata.items():
+            if uid_str == "config" or not self._is_active(entry):
+                continue
+            # Prefer live membership when we can see the guild
+            if guild is not None:
+                try:
+                    if guild.get_member(int(uid_str)) is None:
+                        continue
+                except ValueError:
+                    continue
+            active.append((uid_str, entry))
+
+        total = len(active)
         if total == 0:
             return None
 
         next_name = "Jemand"
         days_until_next = 999
 
-        guild = self.bot.get_guild(guild_id)
-
-        for uid_str, entry in gdata.items():
-            if uid_str == "config":
-                continue
+        for uid_str, entry in active:
             try:
                 month = entry.get("month")
                 day = entry.get("day")
@@ -185,7 +241,13 @@ class BirthdayCog(commands.Cog):
 
             celebrants: List[str] = []
             for uid_str, b in gdata.items():
-                if uid_str == "config":
+                if uid_str == "config" or not self._is_active(b):
+                    continue
+                # Skip if member is not currently in the guild
+                try:
+                    if guild.get_member(int(uid_str)) is None:
+                        continue
+                except ValueError:
                     continue
                 try:
                     if b.get("month") == check_date.month and b.get("day") == check_date.day:
@@ -236,7 +298,9 @@ class BirthdayCog(commands.Cog):
             return
         month, day = parsed
         gdata = self._get_guild_data(interaction.guild.id)
-        gdata[str(interaction.user.id)] = {"month": month, "day": day, "year": jahr}
+        gdata[str(interaction.user.id)] = {
+            "month": month, "day": day, "year": jahr, "in_guild": True,
+        }
         self._save_data()
         await interaction.response.send_message(f"✅ Dein Geburtstag wurde auf den {day:02d}.{month:02d}. gesetzt.")
 
@@ -253,7 +317,9 @@ class BirthdayCog(commands.Cog):
             return
         month, day = parsed
         gdata = self._get_guild_data(interaction.guild.id)
-        gdata[str(benutzer.id)] = {"month": month, "day": day, "year": jahr}
+        gdata[str(benutzer.id)] = {
+            "month": month, "day": day, "year": jahr, "in_guild": True,
+        }
         self._save_data()
         await interaction.response.send_message(f"✅ Geburtstag für {benutzer.mention} wurde gesetzt.", ephemeral=True)
 
@@ -286,12 +352,19 @@ class BirthdayCog(commands.Cog):
         today = date.today()
         upcoming: list[tuple[int, str]] = []
         for uid_str, b in gdata.items():
-            if uid_str == "config":
+            if uid_str == "config" or not self._is_active(b):
                 continue
             try:
-                name = await self._get_member_name(interaction.guild, int(uid_str))
+                uid = int(uid_str)
+            except ValueError:
+                continue
+            # Only list current guild members (avoids raw user-id display)
+            member = interaction.guild.get_member(uid)
+            if member is None:
+                continue
+            try:
                 days_until, next_date = self._get_days_until(b["month"], b["day"], today)
-                upcoming.append((days_until, f"**{name}** — {next_date.strftime('%d.%m.')}"))
+                upcoming.append((days_until, f"**{member.display_name}** — {next_date.strftime('%d.%m.')}"))
             except Exception:
                 continue
         if not upcoming:
@@ -309,10 +382,16 @@ class BirthdayCog(commands.Cog):
         today = date.today()
         celebrants: list[str] = []
         for uid_str, b in gdata.items():
-            if uid_str == "config":
+            if uid_str == "config" or not self._is_active(b):
                 continue
             try:
-                name = await self._get_member_name(interaction.guild, int(uid_str))
+                uid = int(uid_str)
+            except ValueError:
+                continue
+            member = interaction.guild.get_member(uid)
+            if member is None:
+                continue
+            try:
                 if b.get("month") == today.month and b.get("day") == today.day:
                     age_str = ""
                     if b.get("year"):
@@ -322,7 +401,7 @@ class BirthdayCog(commands.Cog):
                                 age_str = f" (turns {age}!)\u2728"
                         except Exception:
                             pass
-                    celebrants.append(f"@{name}{age_str}")
+                    celebrants.append(f"@{member.display_name}{age_str}")
             except Exception:
                 continue
         if not celebrants:
@@ -434,6 +513,26 @@ class BirthdayCog(commands.Cog):
     async def before_daily_check(self):
         await self.bot.wait_until_ready()
 
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member) -> None:
+        if member.bot:
+            return
+        if self._set_in_guild(member.guild.id, member.id, False):
+            log.info(
+                "Marked birthday inactive (left guild) user=%s guild=%s",
+                member.id, member.guild.id,
+            )
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member) -> None:
+        if member.bot:
+            return
+        if self._set_in_guild(member.guild.id, member.id, True):
+            log.info(
+                "Restored birthday active (rejoined) user=%s guild=%s",
+                member.id, member.guild.id,
+            )
+
     async def cog_load(self):
         log.info(
             "Birthday cog loaded. Daily announcements at %02d:%02d",
@@ -458,6 +557,15 @@ class BirthdayCog(commands.Cog):
                     )
 
         self.daily_check.start()
+        self.bot.loop.create_task(self._reconcile_after_ready())
+
+    async def _reconcile_after_ready(self) -> None:
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(2)
+        try:
+            await self._reconcile_membership()
+        except Exception:
+            log.exception("Membership reconcile failed")
 
     async def cog_unload(self):
         self.daily_check.cancel()
