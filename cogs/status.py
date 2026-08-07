@@ -164,6 +164,9 @@ class StatusCog(commands.Cog):
 
     async def _backup_line(self) -> str:
         try:
+            if self.bot.get_cog("BackupCog") is None:
+                return "not loaded"
+
             if not os.path.isfile(BACKUP_DB_PATH):
                 return "DB missing"
 
@@ -220,6 +223,9 @@ class StatusCog(commands.Cog):
 
     async def _economy_line(self) -> str:
         try:
+            if self.bot.get_cog("EconomyCog") is None:
+                return "not loaded"
+
             if not os.path.isfile(ECONOMY_DB_PATH):
                 return "DB missing"
             async with aiosqlite.connect(ECONOMY_DB_PATH) as db:
