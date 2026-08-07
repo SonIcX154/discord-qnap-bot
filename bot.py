@@ -37,7 +37,7 @@ intents.guilds = True
 intents.members = True
 intents.message_content = True  # Needed for BackupCog (reading message content)
 
-# Redundant – everything lives in /bot-status now
+# Safety net: strip leftover per-cog status cmds before tree sync
 LEGACY_STATUS_COMMANDS = (
     "twitch-mirror-status",
     "backup-status",
