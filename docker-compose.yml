@@ -1,7 +1,7 @@
 services:
   discord-qnap-bot:
     build: .
-    container_name: TestBot
+    container_name: BrotBot
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1

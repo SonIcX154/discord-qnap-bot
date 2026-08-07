@@ -1,19 +1,20 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# ==============================================
-# Schnelles Rebuild-Skript nur für den Dev-Bot (TestBot)
-# ==============================================
+# Schnelles Rebuild-Skript nur für den Dev-Bot (BrotBot)
+# Auf der QNAP per SSH ausführen.
 
-export PATH=$PATH:/share/CACHEDEV1_DATA/.qpkg/container-station/bin
+# === ANPASSEN ===
+DEV_BOT_PATH="/share/Container/BrotBot"   # <-- Hier anpassen falls nötig
+# ================
 
-DEV_BOT_PATH="/share/Container/TestBot"   # <-- Hier anpassen falls nötig
+cd "$DEV_BOT_PATH"
 
-echo "🚀 Starte Rebuild des Dev-Bots..."
+echo "→ Building BrotBot…"
+docker compose build --no-cache
 
-if [ -d "$DEV_BOT_PATH" ]; then
-    docker compose -f "$DEV_BOT_PATH/docker-compose.yml" down
-    docker compose -f "$DEV_BOT_PATH/docker-compose.yml" up --build -d
-    echo "✅ Dev-Bot erfolgreich neu gebaut"
-else
-    echo "❌ Dev-Bot Ordner nicht gefunden!"
-fi
+echo "→ Restarting BrotBot…"
+docker compose up -d --force-recreate
+
+echo "→ Logs (Ctrl+C zum Beenden):"
+docker compose logs -f --tail=50
